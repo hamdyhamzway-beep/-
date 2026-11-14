@@ -1,0 +1,11 @@
+{
+  "name": "Remix  الوليد ترافيل — نظام إدارة النقل المدرسي",
+  "description": "منصة متكاملة لإدارة أسطول النقل المدرسي والسائقين والمدارس والحسابات المالية والتتبع المباشر عبر GPS والمساعد الصوتي الذكي باللهجة المصرية.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
