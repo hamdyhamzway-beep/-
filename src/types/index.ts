@@ -11,6 +11,14 @@ export interface DbUser {
   isActive: boolean;
 }
 
+export interface DriverLicensePhoto {
+  id: string;
+  label: string;
+  imageUrl: string;
+  uploadedBy: 'admin' | 'driver' | string;
+  uploadedAt: string;
+}
+
 export interface EnrichedDriver {
   id: number;
   userId: number | null;
@@ -23,6 +31,7 @@ export interface EnrichedDriver {
   employmentStartDate: string;
   accountStatus: 'active' | 'inactive' | 'suspended' | string;
   photoUrl?: string | null;
+  licensePhotos?: DriverLicensePhoto[];
   notes: string | null;
   schoolId: number | null;
   schoolName: string;
@@ -104,7 +113,7 @@ export interface FleetVehicle {
 export interface RouteItem {
   id: number;
   name: string;
-  schoolId: number;
+  schoolId: number | null;
   pickupArea: string;
   dropoffArea: string;
   pickupTime: string;
@@ -191,4 +200,21 @@ export interface NotificationItem {
   body: string;
   isRead: boolean;
   createdAt: string;
+}
+
+export interface EmployeeRecord {
+  id: number;
+  employeeCode: string;
+  fullName: string;
+  jobTitle: string;
+  phone: string;
+  monthlySalary: number;
+  bonuses: number;
+  deductions: number;
+  netSalary: number;
+  employmentStartDate: string;
+  status: 'active' | 'inactive' | string;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
 }

@@ -1,29 +1,40 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Archive,
+  Check,
+  Copy,
+  Download,
   FileText,
+  Loader2,
+  MessageCircle,
   Plus,
-  Printer,
   Search,
   Trash2,
-  UserCheck,
-  UserX,
   Edit3,
+  Wallet,
   X,
 } from 'lucide-react';
 import { apiFetch, formatEGP } from '../../lib/api';
+import {
+  buildWhatsAppUrl,
+  captureElementAsPngBlob,
+  copyPngBlobToClipboard,
+  downloadBlob,
+  renderStatementFallbackBlob,
+  shareImageFileViaWebShare,
+} from '../../lib/whatsapp-statement';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import { DriverAvatar } from '../DriverAvatar';
+import { DriverLicensesSection } from '../DriverLicensesSection';
 import { DriverPhotoUploader } from '../DriverPhotoUploader';
 import type {
   AdvanceRecord,
   CoverageRecord,
+  DriverLicensePhoto,
   EnrichedDriver,
   FinancialTransaction,
-  FleetVehicle,
-  RouteItem,
   SalaryRecord,
-  SchoolItem,
 } from '../../types';
 
 interface StatementResponse {
@@ -37,13 +48,10 @@ interface StatementResponse {
 
 export const DriversModule: React.FC = () => {
   const [driversList, setDriversList] = useState<EnrichedDriver[]>([]);
-  const [schoolsList, setSchoolsList] = useState<SchoolItem[]>([]);
-  const [vehiclesList, setVehiclesList] = useState<FleetVehicle[]>([]);
-  const [routesList, setRoutesList] = useState<RouteItem[]>([]);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Add/Edit Modal
   const [showForm, setShowForm] = useState(false);
@@ -58,21 +66,91 @@ export const DriversModule: React.FC = () => {
     emergencyContact: '',
     linkedEmail: '',
     monthlyAgreedSalary: '',
-    employmentStartDate: new Date().toISOString().slice(0, 10),
+    employmentStartDate: '',
     accountStatus: 'active',
     photoUrl: '',
+    licensePhotos: [] as DriverLicensePhoto[],
     notes: '',
-    schoolId: '',
-    vehicleId: '',
+    schoolName: '',
+    busNumber: '',
     routeId: '',
+    routeName: '',
+    routePickupArea: '',
+    routePickupTime: '',
+    routeDropoffTime: '',
   });
 
-  // Statement Modal
+  // Optional route timings section inside Driver Modal
+  const [showRouteTimings, setShowRouteTimings] = useState(false);
+
+  // Driver Financial / Statement / Advances & Coverages Modal
   const [statementDriverId, setStatementDriverId] = useState<number | null>(null);
+  const [statementTab, setStatementTab] = useState<
+    'statement' | 'advances' | 'coverage' | 'adjustments'
+  >('statement');
   const [statementMonth, setStatementMonth] = useState(new Date().getMonth() + 1);
   const [statementYear, setStatementYear] = useState(new Date().getFullYear());
   const [statementData, setStatementData] = useState<StatementResponse | null>(null);
   const [statementLoading, setStatementLoading] = useState(false);
+  const [financeBusy, setFinanceBusy] = useState(false);
+  const [financeNotice, setFinanceNotice] = useState<string | null>(null);
+  const [financeErr, setFinanceErr] = useState<string | null>(null);
+  const statementCaptureRef = useRef<HTMLDivElement | null>(null);
+  const [sharingWhatsApp, setSharingWhatsApp] = useState(false);
+  const [whatsappPreview, setWhatsappPreview] = useState<{
+    blob: Blob;
+    url: string;
+    filename: string;
+    copied: boolean;
+    statusText: string;
+    whatsappUrl: string;
+    driverPhone: string;
+  } | null>(null);
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const [newAdv, setNewAdv] = useState({
+    amount: '',
+    date: todayStr,
+    paymentMethod: '',
+    reason: '',
+  });
+  const [editingAdvId, setEditingAdvId] = useState<number | null>(null);
+  const [editAdv, setEditAdv] = useState({
+    amount: '',
+    date: '',
+    paymentMethod: '',
+    reason: '',
+    notes: '',
+  });
+
+  const [newCov, setNewCov] = useState({
+    replacementQuery: '',
+    date: todayStr,
+    actualReplacementCost: '',
+    absentDriverDeduction: '',
+    reason: '',
+  });
+  const [editingCovId, setEditingCovId] = useState<number | null>(null);
+  const [editCov, setEditCov] = useState({
+    replacementQuery: '',
+    date: '',
+    actualReplacementCost: '',
+    absentDriverDeduction: '',
+    reason: '',
+    notes: '',
+  });
+
+  const [newAdj, setNewAdj] = useState({
+    type: 'bonus' as 'bonus' | 'other_deduction',
+    amount: '',
+    description: '',
+  });
+  const [editingAdjId, setEditingAdjId] = useState<number | null>(null);
+  const [editAdj, setEditAdj] = useState({
+    type: 'bonus' as 'bonus' | 'other_deduction',
+    amount: '',
+    description: '',
+  });
 
   // Delete Confirmation Modal
   const [deleteTarget, setDeleteTarget] = useState<EnrichedDriver | null>(null);
@@ -83,15 +161,8 @@ export const DriversModule: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const [dRes, sRes, vRes] = await Promise.all([
-        apiFetch<{ drivers: EnrichedDriver[] }>('/api/drivers'),
-        apiFetch<{ schools: SchoolItem[]; routes: RouteItem[] }>('/api/schools'),
-        apiFetch<{ vehicles: FleetVehicle[] }>('/api/vehicles'),
-      ]);
+      const dRes = await apiFetch<{ drivers: EnrichedDriver[] }>('/api/drivers');
       setDriversList(dRes.drivers);
-      setSchoolsList(sRes.schools);
-      setRoutesList(sRes.routes);
-      setVehiclesList(vRes.vehicles);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات السائقين');
     } finally {
@@ -106,20 +177,26 @@ export const DriversModule: React.FC = () => {
   const openAdd = () => {
     setEditingDriver(null);
     setFormError(null);
+    setShowRouteTimings(false);
     setFormState({
       driverCode: '',
       fullName: '',
       phone: '',
       emergencyContact: '',
       linkedEmail: '',
-      monthlyAgreedSalary: '7000',
-      employmentStartDate: new Date().toISOString().slice(0, 10),
+      monthlyAgreedSalary: '',
+      employmentStartDate: '',
       accountStatus: 'active',
       photoUrl: '',
+      licensePhotos: [] as DriverLicensePhoto[],
       notes: '',
-      schoolId: schoolsList[0]?.id ? String(schoolsList[0].id) : '',
-      vehicleId: vehiclesList[0]?.id ? String(vehiclesList[0].id) : '',
+      schoolName: '',
+      busNumber: '',
       routeId: '',
+      routeName: '',
+      routePickupArea: '',
+      routePickupTime: '',
+      routeDropoffTime: '',
     });
     setShowForm(true);
   };
@@ -127,6 +204,7 @@ export const DriversModule: React.FC = () => {
   const openEdit = (d: EnrichedDriver) => {
     setEditingDriver(d);
     setFormError(null);
+    setShowRouteTimings(false);
     setFormState({
       driverCode: d.driverCode,
       fullName: d.fullName,
@@ -137,25 +215,31 @@ export const DriversModule: React.FC = () => {
       employmentStartDate: d.employmentStartDate,
       accountStatus: d.accountStatus,
       photoUrl: d.photoUrl || '',
+      licensePhotos: d.licensePhotos || [],
       notes: d.notes || '',
-      schoolId: d.schoolId ? String(d.schoolId) : '',
-      vehicleId: d.vehicleId ? String(d.vehicleId) : '',
+      schoolName: d.schoolId && d.schoolName && d.schoolName !== 'غير معين' ? d.schoolName : '',
+      busNumber: d.vehicleId && d.busNumber && d.busNumber !== '—' ? d.busNumber : '',
       routeId: d.routeId ? String(d.routeId) : '',
+      routeName: d.routeId && d.routeName && d.routeName !== '—' ? d.routeName : '',
+      routePickupArea: d.pickupArea || '',
+      routePickupTime: d.pickupTime || '',
+      routeDropoffTime: d.dropoffTime || '',
     });
     setShowForm(true);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaving(true);
     setFormError(null);
+    setSaving(true);
     try {
       const payload = {
         ...formState,
         monthlyAgreedSalary: Number(formState.monthlyAgreedSalary || 0),
-        schoolId: formState.schoolId ? Number(formState.schoolId) : null,
-        vehicleId: formState.vehicleId ? Number(formState.vehicleId) : null,
+        schoolName: formState.schoolName.trim(),
+        busNumber: formState.busNumber.trim(),
         routeId: formState.routeId ? Number(formState.routeId) : null,
+        routeName: formState.routeName.trim(),
       };
       if (editingDriver) {
         await apiFetch(`/api/drivers/${editingDriver.id}`, {
@@ -177,13 +261,19 @@ export const DriversModule: React.FC = () => {
     }
   };
 
-  const toggleStatus = async (d: EnrichedDriver) => {
-    const nextStatus = d.accountStatus === 'active' ? 'inactive' : 'active';
-    await apiFetch(`/api/drivers/${d.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ accountStatus: nextStatus }),
-    });
-    await loadAll();
+  const archiveDriver = async (d: EnrichedDriver) => {
+    setError(null);
+    setSuccessMsg(null);
+    try {
+      await apiFetch(`/api/drivers/${d.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ accountStatus: 'inactive' }),
+      });
+      setSuccessMsg(`تم نقل السائق ${d.fullName} إلى قسم الأرشفة.`);
+      await loadAll();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر أرشفة السائق');
+    }
   };
 
   const openDeleteModal = (d: EnrichedDriver) => {
@@ -243,32 +333,356 @@ export const DriversModule: React.FC = () => {
     []
   );
 
-  const openStatement = (id: number) => {
+  const clearWhatsappPreview = useCallback(() => {
+    setWhatsappPreview((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+  }, []);
+
+  const openStatement = (
+    id: number,
+    initialTab: 'statement' | 'advances' | 'coverage' | 'adjustments' = 'statement'
+  ) => {
+    clearWhatsappPreview();
+    setFinanceNotice(null);
+    setFinanceErr(null);
+    setEditingAdvId(null);
+    setEditingCovId(null);
+    setEditingAdjId(null);
+    setStatementTab(initialTab);
     setStatementDriverId(id);
     loadStatement(id, statementMonth, statementYear);
   };
 
+  const handleAddDriverAdvance = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!statementDriverId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch('/api/finance/advances', {
+        method: 'POST',
+        body: JSON.stringify({
+          driverId: statementDriverId,
+          amount: Number(newAdv.amount),
+          date: newAdv.date,
+          paymentMethod: newAdv.paymentMethod.trim(),
+          reason: newAdv.reason.trim(),
+          idempotencyKey: `drv-adv-${statementDriverId}-${newAdv.amount}-${Date.now()}`,
+        }),
+      });
+      setNewAdv((p) => ({ ...p, amount: '', paymentMethod: '', reason: '' }));
+      setFinanceNotice('تمت إضافة السلفة وتحديث صافي الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر إضافة السلفة');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleSaveDriverAdvanceEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!statementDriverId || !editingAdvId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch(`/api/finance/advances/${editingAdvId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          amount: Number(editAdv.amount),
+          date: editAdv.date,
+          paymentMethod: editAdv.paymentMethod.trim(),
+          reason: editAdv.reason.trim(),
+          notes: editAdv.notes.trim(),
+        }),
+      });
+      setEditingAdvId(null);
+      setFinanceNotice('تم تعديل السلفة وإعادة احتساب الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر تعديل السلفة');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleDeleteDriverAdvance = async (advId: number) => {
+    if (!statementDriverId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch(`/api/finance/advances/${advId}`, { method: 'DELETE' });
+      if (editingAdvId === advId) setEditingAdvId(null);
+      setFinanceNotice('تم حذف السلفة وتحديث صافي الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر حذف السلفة');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleAddDriverCoverage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!statementDriverId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch('/api/finance/coverage', {
+        method: 'POST',
+        body: JSON.stringify({
+          absentDriverId: statementDriverId,
+          replacementQuery: newCov.replacementQuery.trim(),
+          date: newCov.date,
+          actualReplacementCost: Number(newCov.actualReplacementCost || 0),
+          absentDriverDeduction: Number(newCov.absentDriverDeduction || 0),
+          reason: newCov.reason.trim(),
+          idempotencyKey: `drv-cov-${statementDriverId}-${newCov.date}-${Date.now()}`,
+        }),
+      });
+      setNewCov((p) => ({
+        ...p,
+        replacementQuery: '',
+        actualReplacementCost: '',
+        absentDriverDeduction: '',
+        reason: '',
+      }));
+      setFinanceNotice('تم تسجيل التغطية وتحديث صافي الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر تسجيل التغطية');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleSaveDriverCoverageEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!statementDriverId || !editingCovId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch(`/api/finance/coverage/${editingCovId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          replacementQuery: editCov.replacementQuery.trim(),
+          date: editCov.date,
+          actualReplacementCost: Number(editCov.actualReplacementCost || 0),
+          absentDriverDeduction: Number(editCov.absentDriverDeduction || 0),
+          reason: editCov.reason.trim(),
+          notes: editCov.notes.trim(),
+        }),
+      });
+      setEditingCovId(null);
+      setFinanceNotice('تم تعديل سجل التغطية وإعادة احتساب الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر تعديل التغطية');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleDeleteDriverCoverage = async (covId: number) => {
+    if (!statementDriverId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch(`/api/finance/coverage/${covId}`, { method: 'DELETE' });
+      if (editingCovId === covId) setEditingCovId(null);
+      setFinanceNotice('تم حذف التغطية وتحديث صافي الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر حذف التغطية');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleAddDriverAdjustment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!statementDriverId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch('/api/finance/adjustments', {
+        method: 'POST',
+        body: JSON.stringify({
+          driverId: statementDriverId,
+          month: statementMonth,
+          year: statementYear,
+          type: newAdj.type,
+          amount: Number(newAdj.amount),
+          description: newAdj.description.trim(),
+        }),
+      });
+      setNewAdj((p) => ({ ...p, amount: '', description: '' }));
+      setFinanceNotice('تم حفظ التسوية وتحديث الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر تسجيل التسوية');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleSaveDriverAdjEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!statementDriverId || !editingAdjId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch(`/api/finance/adjustments/${editingAdjId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          type: editAdj.type,
+          amount: Number(editAdj.amount),
+          description: editAdj.description.trim(),
+        }),
+      });
+      setEditingAdjId(null);
+      setFinanceNotice('تم تعديل التسوية وتحديث صافي الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر تعديل التسوية');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
+  const handleDeleteDriverAdj = async (adjId: number) => {
+    if (!statementDriverId) return;
+    setFinanceBusy(true);
+    setFinanceErr(null);
+    setFinanceNotice(null);
+    try {
+      await apiFetch(`/api/finance/adjustments/${adjId}`, { method: 'DELETE' });
+      if (editingAdjId === adjId) setEditingAdjId(null);
+      setFinanceNotice('تم حذف التسوية وتحديث الراتب.');
+      await loadStatement(statementDriverId, statementMonth, statementYear);
+    } catch (err: unknown) {
+      setFinanceErr(err instanceof Error ? err.message : 'تعذر حذف التسوية');
+    } finally {
+      setFinanceBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (statementDriverId) {
+      clearWhatsappPreview();
       loadStatement(statementDriverId, statementMonth, statementYear);
     }
-  }, [statementDriverId, statementMonth, statementYear, loadStatement]);
+  }, [statementDriverId, statementMonth, statementYear, loadStatement, clearWhatsappPreview]);
+
+  useEffect(() => {
+    return () => {
+      if (whatsappPreview?.url) URL.revokeObjectURL(whatsappPreview.url);
+    };
+  }, [whatsappPreview]);
+
+  const handleSendStatementToWhatsApp = async () => {
+    if (!statementData) return;
+    setSharingWhatsApp(true);
+    setError(null);
+    try {
+      let blob: Blob;
+      if (statementCaptureRef.current) {
+        try {
+          blob = await captureElementAsPngBlob(statementCaptureRef.current);
+        } catch {
+          blob = await renderStatementFallbackBlob(statementData);
+        }
+      } else {
+        blob = await renderStatementFallbackBlob(statementData);
+      }
+
+      const safeName = statementData.driver.fullName.replace(/[^\u0600-\u06FFa-zA-Z0-9_-]+/g, '-');
+      const filename = `كشف-حساب-${safeName}-${statementData.period.month}-${statementData.period.year}.png`;
+      const caption = `كشف حساب ${statementData.driver.fullName} (كود ${statementData.driver.driverCode}) - شهر ${statementData.period.month}/${statementData.period.year} - صافي المستحق: ${formatEGP(statementData.salary.netSalary)}`;
+      const whatsappUrl = buildWhatsAppUrl(statementData.driver.phone, caption);
+
+      const webShareResult = await shareImageFileViaWebShare(
+        blob,
+        filename,
+        `كشف حساب ${statementData.driver.fullName}`,
+        caption
+      );
+
+      if (webShareResult === 'shared') {
+        clearWhatsappPreview();
+        const url = URL.createObjectURL(blob);
+        setWhatsappPreview({
+          blob,
+          url,
+          filename,
+          copied: false,
+          statusText: 'تم فتح المشاركة بالصورة بنجاح.',
+          whatsappUrl,
+          driverPhone: statementData.driver.phone || '',
+        });
+        return;
+      }
+
+      const copied = await copyPngBlobToClipboard(blob);
+      downloadBlob(blob, filename);
+
+      clearWhatsappPreview();
+      const url = URL.createObjectURL(blob);
+      setWhatsappPreview({
+        blob,
+        url,
+        filename,
+        copied,
+        statusText: copied
+          ? 'تم تجهيز صورة كشف الحساب ونسخها للحافظة وتحميلها — اضغط فتح الواتساب ثم الصق الصورة (Ctrl+V) أو أرفقها.'
+          : 'تم تجهيز صورة كشف الحساب وتحميلها — اضغط فتح الواتساب وأرفق الصورة المحمّلة داخل المحادثة.',
+        whatsappUrl,
+        driverPhone: statementData.driver.phone || '',
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر تجهيز صورة كشف الحساب للواتساب');
+    } finally {
+      setSharingWhatsApp(false);
+    }
+  };
+
+  const handleRecopyWhatsappImage = async () => {
+    if (!whatsappPreview) return;
+    const copied = await copyPngBlobToClipboard(whatsappPreview.blob);
+    setWhatsappPreview((prev) =>
+      prev
+        ? {
+            ...prev,
+            copied,
+            statusText: copied
+              ? 'تم نسخ صورة كشف الحساب للحافظة — الصقها مباشرة داخل الواتساب.'
+              : 'المتصفح لا يدعم نسخ الصور للحافظة، يمكنك إرفاق الصورة المحمّلة.',
+          }
+        : null
+    );
+  };
 
   const filtered = driversList.filter((d) => {
-    const matchesSearch =
-      !search ||
-      d.fullName.includes(search) ||
-      d.driverCode.includes(search) ||
-      d.phone.includes(search) ||
-      d.schoolName.includes(search) ||
-      d.busNumber.includes(search);
-    const matchesStatus = statusFilter === 'all' || d.accountStatus === statusFilter;
-    return matchesSearch && matchesStatus;
+    const q = search.trim();
+    if (!q) return true;
+    return (
+      d.fullName.includes(q) ||
+      d.driverCode.includes(q) ||
+      d.phone.includes(q) ||
+      d.schoolName.includes(q) ||
+      d.busNumber.includes(q)
+    );
   });
-
-  const schoolRoutes = routesList.filter(
-    (r) => !formState.schoolId || r.schoolId === Number(formState.schoolId)
-  );
 
   return (
     <div className="space-y-6">
@@ -276,7 +690,7 @@ export const DriversModule: React.FC = () => {
         <div>
           <h1 className="font-display text-2xl font-bold text-[#0B1F3A]">إدارة السائقين</h1>
           <p className="text-sm text-slate-500 mt-1">
-            ملفات السائقين، الأكواد الفريدة، التعيين على المدارس والباصات، وكشوف الحساب الشهرية
+            السائقون النشطون، تعديل البيانات، إدارة السلف والتغطيات لكل سائق، وكشوف الحساب الشهرية
           </p>
         </div>
         <button
@@ -288,7 +702,7 @@ export const DriversModule: React.FC = () => {
         </button>
       </div>
 
-      {/* Search and Segmented Filter */}
+      {/* Search */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="relative flex-1 max-w-md">
           <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
@@ -300,30 +714,20 @@ export const DriversModule: React.FC = () => {
             className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-3 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
           />
         </div>
-        <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg self-start">
-          {[
-            { id: 'all', label: 'الكل' },
-            { id: 'active', label: 'نشط' },
-            { id: 'inactive', label: 'موقوف' },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setStatusFilter(tab.id)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                statusFilter === tab.id
-                  ? 'bg-white text-[#0B1F3A] shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <div className="text-xs font-semibold text-slate-500">
+          إجمالي السائقين النشطين: <span className="font-mono text-[#0B1F3A]">{filtered.length}</span>
         </div>
       </div>
 
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800">
           {error}
+        </div>
+      )}
+
+      {successMsg && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs font-semibold text-emerald-900">
+          {successMsg}
         </div>
       )}
 
@@ -350,14 +754,8 @@ export const DriversModule: React.FC = () => {
                     </div>
                   </div>
                 </div>
-                <span
-                  className={`text-[11px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
-                    d.accountStatus === 'active'
-                      ? 'bg-emerald-50 text-emerald-700'
-                      : 'bg-red-50 text-red-700'
-                  }`}
-                >
-                  {d.accountStatus === 'active' ? 'نشط' : 'موقوف'}
+                <span className="text-[11px] font-bold px-2 py-0.5 rounded-md shrink-0 bg-emerald-50 text-emerald-700">
+                  نشط
                 </span>
               </div>
 
@@ -374,29 +772,40 @@ export const DriversModule: React.FC = () => {
                     {formatEGP(d.monthlyAgreedSalary)}
                   </span>
                 </div>
+                <div className="col-span-2">
+                  <span className="text-slate-500">خط السير: </span>
+                  <span className="font-semibold text-[#0B1F3A]">{d.routeName || '—'}</span>
+                </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2 pt-1">
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  onClick={() => openStatement(d.id, 'advances')}
+                  className="flex items-center justify-center gap-1.5 rounded-lg bg-[#C89B3C] px-2.5 py-2 text-xs font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer"
+                >
+                  <Wallet className="w-3.5 h-3.5" />
+                  السلف والتغطيات
+                </button>
                 <button
                   onClick={() => openEdit(d)}
                   className="flex items-center justify-center gap-1.5 rounded-lg bg-[#0B1F3A] px-2.5 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
                 >
                   <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
-                  تعديل
+                  تعديل البيانات
                 </button>
                 <button
-                  onClick={() => openStatement(d.id)}
+                  onClick={() => openStatement(d.id, 'statement')}
                   className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
                 >
                   <FileText className="w-3.5 h-3.5" />
                   كشف حساب
                 </button>
                 <button
-                  onClick={() => openDeleteModal(d)}
-                  className="flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                  onClick={() => archiveDriver(d)}
+                  className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  حذف
+                  <Archive className="w-3.5 h-3.5" />
+                  أرشفة
                 </button>
               </div>
             </div>
@@ -415,20 +824,19 @@ export const DriversModule: React.FC = () => {
                 <th className="py-3 px-4 font-semibold">المدرسة والخط</th>
                 <th className="py-3 px-4 font-semibold">الباص والمالك</th>
                 <th className="py-3 px-4 font-semibold">الراتب المتفق عليه</th>
-                <th className="py-3 px-4 font-semibold">الحالة</th>
                 <th className="py-3 px-4 font-semibold">الإجراءات</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-slate-400">
+                  <td colSpan={6} className="py-10 text-center text-slate-400">
                     جاري تحميل قائمة السائقين...
                   </td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-slate-400">
+                  <td colSpan={6} className="py-10 text-center text-slate-400">
                     لا يوجد سائقون مطابقون لخيارات البحث
                   </td>
                 </tr>
@@ -464,16 +872,15 @@ export const DriversModule: React.FC = () => {
                       {formatEGP(d.monthlyAgreedSalary)}
                     </td>
                     <td className="py-3.5 px-4">
-                      <span
-                        className={`font-semibold ${
-                          d.accountStatus === 'active' ? 'text-emerald-700' : 'text-red-700'
-                        }`}
-                      >
-                        {d.accountStatus === 'active' ? 'نشط' : 'موقوف'}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          onClick={() => openStatement(d.id, 'advances')}
+                          className="flex items-center gap-1 rounded-md bg-[#C89B3C] px-2.5 py-1.5 text-[11px] font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer whitespace-nowrap"
+                          title="إضافة وتعديل السلف والتغطيات"
+                        >
+                          <Wallet className="w-3.5 h-3.5" />
+                          السلف والتغطيات
+                        </button>
                         <button
                           onClick={() => openEdit(d)}
                           className="flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
@@ -483,22 +890,19 @@ export const DriversModule: React.FC = () => {
                           تعديل
                         </button>
                         <button
-                          onClick={() => openStatement(d.id)}
+                          onClick={() => openStatement(d.id, 'statement')}
                           className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer whitespace-nowrap"
                         >
                           <FileText className="w-3.5 h-3.5" />
                           كشف حساب
                         </button>
                         <button
-                          onClick={() => toggleStatus(d)}
-                          className="p-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100 cursor-pointer"
-                          title={d.accountStatus === 'active' ? 'إيقاف الحساب' : 'تفعيل الحساب'}
+                          onClick={() => archiveDriver(d)}
+                          className="flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
+                          title="نقل إلى الأرشفة"
                         >
-                          {d.accountStatus === 'active' ? (
-                            <UserX className="w-3.5 h-3.5 text-amber-600" />
-                          ) : (
-                            <UserCheck className="w-3.5 h-3.5 text-emerald-600" />
-                          )}
+                          <Archive className="w-3.5 h-3.5" />
+                          أرشفة
                         </button>
                         <button
                           onClick={() => openDeleteModal(d)}
@@ -543,6 +947,13 @@ export const DriversModule: React.FC = () => {
                 onChange={(photoUrl) => setFormState((prev) => ({ ...prev, photoUrl }))}
               />
 
+              <DriverLicensesSection
+                compact
+                viewerRole="admin"
+                photos={formState.licensePhotos}
+                onChange={(licensePhotos) => setFormState((prev) => ({ ...prev, licensePhotos }))}
+              />
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">كود السائق (فريد) *</label>
@@ -550,7 +961,7 @@ export const DriversModule: React.FC = () => {
                     required
                     value={formState.driverCode}
                     onChange={(e) => setFormState({ ...formState, driverCode: e.target.value })}
-                    placeholder="مثال: 1025"
+                    placeholder="اكتب كود السائق"
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono focus:border-[#0B1F3A] focus:outline-none"
                   />
                 </div>
@@ -582,7 +993,7 @@ export const DriversModule: React.FC = () => {
                   <label className="block font-semibold text-slate-700 mb-1">رقم الطوارئ</label>
                   <ContactPhoneInput
                     value={formState.emergencyContact}
-                    placeholder="010... (اسم قريب السائق)"
+                    placeholder="اكتب رقم الطوارئ"
                     onChange={(emergencyContact) =>
                       setFormState((prev) => ({ ...prev, emergencyContact }))
                     }
@@ -602,6 +1013,7 @@ export const DriversModule: React.FC = () => {
                     type="number"
                     required
                     min={0}
+                    placeholder="اكتب الراتب الشهري"
                     value={formState.monthlyAgreedSalary}
                     onChange={(e) =>
                       setFormState({ ...formState, monthlyAgreedSalary: e.target.value })
@@ -628,74 +1040,123 @@ export const DriversModule: React.FC = () => {
                     type="email"
                     value={formState.linkedEmail}
                     onChange={(e) => setFormState({ ...formState, linkedEmail: e.target.value })}
-                    placeholder="driver@gmail.com"
+                    placeholder="اكتب البريد الإلكتروني (اختياري)"
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono focus:border-[#0B1F3A] focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">حالة الحساب</label>
-                  <select
-                    value={formState.accountStatus}
-                    onChange={(e) => setFormState({ ...formState, accountStatus: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
-                  >
-                    <option value="active">نشط</option>
-                    <option value="inactive">موقوف</option>
-                  </select>
+                  <label className="block font-semibold text-slate-700 mb-1">الوضع</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { value: 'active', label: 'نشط' },
+                      { value: 'inactive', label: 'نقل للأرشفة' },
+                    ].map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setFormState({ ...formState, accountStatus: opt.value })}
+                        className={`rounded-lg border px-3 py-2 text-xs font-semibold cursor-pointer transition-colors ${
+                          formState.accountStatus === opt.value
+                            ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                            : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
               <div className="border-t border-slate-200 pt-4">
-                <h3 className="font-semibold text-slate-800 mb-3">التعيين التشغيلي الحالي</h3>
+                <h3 className="font-semibold text-slate-800 mb-3">التعيين التشغيلي</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-slate-600 mb-1">المدرسة</label>
-                    <select
-                      value={formState.schoolId}
+                    <label className="block text-slate-600 mb-1">اسم المدرسة</label>
+                    <input
+                      type="text"
+                      value={formState.schoolName}
                       onChange={(e) =>
-                        setFormState({ ...formState, schoolId: e.target.value, routeId: '' })
+                        setFormState({ ...formState, schoolName: e.target.value })
                       }
-                      className="w-full rounded-lg border border-slate-200 px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
-                    >
-                      <option value="">بدون تعيين</option>
-                      {schoolsList.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
+                      placeholder="اكتب اسم المدرسة"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
+                    />
                   </div>
                   <div>
                     <label className="block text-slate-600 mb-1">الباص / المركبة</label>
-                    <select
-                      value={formState.vehicleId}
-                      onChange={(e) => setFormState({ ...formState, vehicleId: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
-                    >
-                      <option value="">بدون مركبة</option>
-                      {vehiclesList.map((v) => (
-                        <option key={v.id} value={v.id}>
-                          {v.busNumber} ({v.registrationNumber})
-                        </option>
-                      ))}
-                    </select>
+                    <input
+                      type="text"
+                      value={formState.busNumber}
+                      onChange={(e) =>
+                        setFormState({ ...formState, busNumber: e.target.value })
+                      }
+                      placeholder="اكتب رقم الباص أو اللوحة"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
+                    />
                   </div>
                   <div>
-                    <label className="block text-slate-600 mb-1">خط السير</label>
-                    <select
-                      value={formState.routeId}
-                      onChange={(e) => setFormState({ ...formState, routeId: e.target.value })}
-                      className="w-full rounded-lg border border-slate-200 px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
-                    >
-                      <option value="">اختر خط السير</option>
-                      {schoolRoutes.map((r) => (
-                        <option key={r.id} value={r.id}>
-                          {r.name}
-                        </option>
-                      ))}
-                    </select>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block text-slate-600">خط السير</label>
+                      <button
+                        type="button"
+                        onClick={() => setShowRouteTimings((v) => !v)}
+                        className="text-[11px] font-semibold text-[#0B1F3A] hover:text-[#C89B3C] cursor-pointer"
+                      >
+                        {showRouteTimings ? 'إخفاء المواعيد' : 'تحديد المواعيد'}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={formState.routeName}
+                      onChange={(e) =>
+                        setFormState({ ...formState, routeName: e.target.value, routeId: '' })
+                      }
+                      placeholder="اكتب خط السير"
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
+                    />
                   </div>
                 </div>
+
+                {showRouteTimings && (
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2.5 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div>
+                      <label className="block text-[11px] text-slate-500 mb-1">
+                        نقطة الانطلاق / التجمع
+                      </label>
+                      <input
+                        placeholder="اكتب نقطة الانطلاق"
+                        value={formState.routePickupArea}
+                        onChange={(e) =>
+                          setFormState({ ...formState, routePickupArea: e.target.value })
+                        }
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs focus:border-[#0B1F3A] focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-500 mb-1">وقت الذهاب</label>
+                      <input
+                        type="time"
+                        value={formState.routePickupTime}
+                        onChange={(e) =>
+                          setFormState({ ...formState, routePickupTime: e.target.value })
+                        }
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-500 mb-1">وقت العودة</label>
+                      <input
+                        type="time"
+                        value={formState.routeDropoffTime}
+                        onChange={(e) =>
+                          setFormState({ ...formState, routeDropoffTime: e.target.value })
+                        }
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -787,7 +1248,7 @@ export const DriversModule: React.FC = () => {
                     onClick={handleDeactivateFromDeleteModal}
                     className="w-full rounded-lg bg-[#0B1F3A] px-3 py-2 text-xs font-semibold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
                   >
-                    إيقاف حساب السائق (أرشفة) بدلاً من الحذف
+                    نقل السائق إلى الأرشفة بدلاً من الحذف
                   </button>
                 </div>
               )}
@@ -815,22 +1276,33 @@ export const DriversModule: React.FC = () => {
         </div>
       )}
 
-      {/* Driver Financial Statement Modal */}
+      {/* Driver Financial Statement & Advances/Coverages Management Modal */}
       {statementDriverId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-3xl bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden max-h-[90vh] flex flex-col print-only-full">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-[#0B1F3A] text-white no-print">
-              <h2 className="font-display text-base font-bold">كشف حساب السائق الشهري</h2>
+          <div className="w-full max-w-4xl bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden max-h-[92vh] flex flex-col">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-[#0B1F3A] text-white">
+              <h2 className="font-display text-base font-bold">
+                {statementData
+                  ? `حساب السائق: ${statementData.driver.fullName} (كود ${statementData.driver.driverCode})`
+                  : 'حساب السائق الشهري'}
+              </h2>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => window.print()}
-                  className="flex items-center gap-1.5 rounded-lg bg-[#C89B3C] px-3 py-1.5 text-xs font-bold text-[#0B1F3A] cursor-pointer"
+                  type="button"
+                  disabled={statementLoading || !statementData || sharingWhatsApp}
+                  onClick={handleSendStatementToWhatsApp}
+                  className="flex items-center gap-1.5 rounded-lg bg-[#25D366] px-3.5 py-1.5 text-xs font-bold text-white hover:bg-[#1ebe5d] disabled:opacity-50 cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5" />
-                  طباعة / PDF
+                  {sharingWhatsApp ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <MessageCircle className="w-3.5 h-3.5" />
+                  )}
+                  {sharingWhatsApp ? 'جاري تجهيز الصورة...' : 'إرسال للواتساب (صورة)'}
                 </button>
                 <button
                   onClick={() => {
+                    clearWhatsappPreview();
                     setStatementDriverId(null);
                     setStatementData(null);
                   }}
@@ -842,144 +1314,821 @@ export const DriversModule: React.FC = () => {
             </div>
 
             <div className="p-6 overflow-y-auto space-y-5 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
-                <div className="flex items-center gap-3">
-                  <DriverAvatar
-                    name={statementData?.driver.fullName}
-                    photoUrl={statementData?.driver.photoUrl}
-                    size="lg"
-                  />
-                  <div>
-                    <div className="text-base font-bold text-[#0B1F3A]">
-                      {statementData?.driver.fullName || '...'} · كود{' '}
-                      <span className="font-mono">{statementData?.driver.driverCode}</span>
-                    </div>
-                    <div className="text-slate-500 mt-1">
-                      {statementData?.driver.schoolName} · باص {statementData?.driver.busNumber} ·{' '}
-                      {statementData?.driver.routeName}
-                    </div>
-                  </div>
+              {/* Period + Section Switcher */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5">
+                <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-200/70 rounded-lg">
+                  {[
+                    { id: 'statement' as const, label: 'كشف الحساب' },
+                    {
+                      id: 'advances' as const,
+                      label: `تعديل وإضافة السلف (${statementData?.advances.length ?? 0})`,
+                    },
+                    {
+                      id: 'coverage' as const,
+                      label: `تعديل وإضافة التغطيات (${statementData?.coverages.length ?? 0})`,
+                    },
+                    {
+                      id: 'adjustments' as const,
+                      label: 'المكافآت والخصومات',
+                    },
+                  ].map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setStatementTab(t.id)}
+                      className={`px-3 py-1.5 rounded-md text-xs font-bold cursor-pointer transition-colors ${
+                        statementTab === t.id
+                          ? 'bg-[#0B1F3A] text-white'
+                          : 'text-slate-700 hover:bg-white'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
                 </div>
-                <div className="flex items-center gap-2 no-print">
-                  <select
-                    value={statementMonth}
-                    onChange={(e) => setStatementMonth(Number(e.target.value))}
-                    className="rounded-lg border border-slate-200 px-2.5 py-1.5"
-                  >
-                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                      <option key={m} value={m}>
-                        شهر {m}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={statementYear}
-                    onChange={(e) => setStatementYear(Number(e.target.value))}
-                    className="rounded-lg border border-slate-200 px-2.5 py-1.5 font-mono"
-                  >
-                    {[2025, 2026, 2027].map((y) => (
-                      <option key={y} value={y}>
-                        {y}
-                      </option>
-                    ))}
-                  </select>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1">
+                    <span className="text-[11px] text-slate-500">الشهر</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={statementMonth}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (v >= 1 && v <= 12) setStatementMonth(v);
+                      }}
+                      className="w-12 bg-transparent font-mono text-xs font-semibold text-center focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1">
+                    <span className="text-[11px] text-slate-500">السنة</span>
+                    <input
+                      type="number"
+                      min={2020}
+                      max={2099}
+                      value={statementYear}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (v >= 2020 && v <= 2099) setStatementYear(v);
+                      }}
+                      className="w-16 bg-transparent font-mono text-xs font-semibold text-center focus:outline-none"
+                    />
+                  </div>
                 </div>
               </div>
 
-              {statementLoading || !statementData ? (
-                <div className="py-10 text-center text-slate-400">جاري تحميل كشف الحساب...</div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                    <div className="border border-slate-200 rounded-xl p-3">
-                      <div className="text-slate-500">الراتب الأساسي</div>
-                      <div className="mt-1 font-mono font-bold text-slate-900 tabular-nums">
-                        {formatEGP(statementData.salary.baseSalary)}
+              {financeErr && (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-red-800">
+                  {financeErr}
+                </div>
+              )}
+              {financeNotice && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 font-semibold text-emerald-900">
+                  {financeNotice}
+                </div>
+              )}
+
+              {/* WhatsApp Image Preview & Send Bar */}
+              {whatsappPreview && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="font-bold text-emerald-900 flex items-center gap-1.5">
+                        <MessageCircle className="w-4 h-4 text-[#25D366]" />
+                        <span>جاهز للإرسال عبر واتساب</span>
                       </div>
+                      <p className="text-[11px] text-emerald-800 leading-relaxed">
+                        {whatsappPreview.statusText}
+                      </p>
                     </div>
-                    <div className="border border-slate-200 rounded-xl p-3">
-                      <div className="text-slate-500">إجمالي السلف</div>
-                      <div className="mt-1 font-mono font-bold text-red-700 tabular-nums">
-                        − {formatEGP(statementData.salary.totalAdvances)}
-                      </div>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl p-3">
-                      <div className="text-slate-500">خصم التغطيات</div>
-                      <div className="mt-1 font-mono font-bold text-red-700 tabular-nums">
-                        − {formatEGP(statementData.salary.totalCoverageDeductions)}
-                      </div>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl p-3">
-                      <div className="text-slate-500">خصومات أخرى</div>
-                      <div className="mt-1 font-mono font-bold text-red-700 tabular-nums">
-                        − {formatEGP(statementData.salary.otherDeductions)}
-                      </div>
-                    </div>
-                    <div className="border border-slate-200 rounded-xl p-3">
-                      <div className="text-slate-500">المكافآت</div>
-                      <div className="mt-1 font-mono font-bold text-emerald-700 tabular-nums">
-                        + {formatEGP(statementData.salary.bonuses)}
-                      </div>
-                    </div>
-                    <div className="bg-[#0B1F3A] text-white rounded-xl p-3">
-                      <div className="text-slate-300">صافي المستحق</div>
-                      <div className="mt-1 font-mono font-bold text-[#C89B3C] tabular-nums">
-                        {formatEGP(statementData.salary.netSalary)}
-                      </div>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={clearWhatsappPreview}
+                      className="self-start text-emerald-700 hover:text-emerald-950 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
                   </div>
 
-                  <div>
-                    <h3 className="font-bold text-[#0B1F3A] mb-2">سجل الحركات المالية للشهر</h3>
-                    <div className="border border-slate-200 rounded-xl overflow-hidden">
-                      <table className="w-full text-right text-xs">
-                        <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
-                          <tr>
-                            <th className="py-2.5 px-3">التاريخ</th>
-                            <th className="py-2.5 px-3">النوع</th>
-                            <th className="py-2.5 px-3">البيان</th>
-                            <th className="py-2.5 px-3">المبلغ</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {statementData.transactions.length === 0 ? (
-                            <tr>
-                              <td colSpan={4} className="py-6 text-center text-slate-400">
-                                لا توجد حركات مالية مسجلة في هذا الشهر
-                              </td>
-                            </tr>
-                          ) : (
-                            statementData.transactions.map((t) => (
-                              <tr key={t.id}>
-                                <td className="py-2.5 px-3 font-mono text-slate-500 tabular-nums">
-                                  {new Date(t.createdAt).toLocaleDateString('ar-EG')}
-                                </td>
-                                <td className="py-2.5 px-3 font-semibold text-slate-700">
-                                  {t.type === 'advance'
-                                    ? 'سلفة'
-                                    : t.type === 'coverage_deduction'
-                                    ? 'خصم تغطية'
-                                    : t.type === 'bonus'
-                                    ? 'مكافأة'
-                                    : t.type === 'reversal'
-                                    ? 'عكس قيد'
-                                    : 'خصم إداري'}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-700">{t.description}</td>
-                                <td
-                                  className={`py-2.5 px-3 font-mono font-bold tabular-nums ${
-                                    t.direction === 'credit' ? 'text-emerald-700' : 'text-red-700'
-                                  }`}
-                                >
-                                  {t.direction === 'credit' ? '+' : '−'} {formatEGP(t.amount)}
-                                </td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                    <img
+                      src={whatsappPreview.url}
+                      alt="معاينة صورة كشف الحساب"
+                      className="w-36 h-24 object-cover object-top rounded-lg border border-emerald-200 bg-white shadow-xs shrink-0"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <a
+                        href={whatsappPreview.whatsappUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#25D366] px-4 py-2 text-xs font-bold text-white hover:bg-[#1ebe5d]"
+                      >
+                        <MessageCircle className="w-4 h-4" />
+                        فتح واتساب {whatsappPreview.driverPhone ? `(${whatsappPreview.driverPhone})` : ''}
+                      </a>
+                      <button
+                        type="button"
+                        onClick={handleRecopyWhatsappImage}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
+                      >
+                        {whatsappPreview.copied ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                        {whatsappPreview.copied ? 'تم نسخ الصورة' : 'نسخ الصورة'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => downloadBlob(whatsappPreview.blob, whatsappPreview.filename)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        تحميل الصورة
+                      </button>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {statementLoading || !statementData ? (
+                <div className="py-10 text-center text-slate-400">جاري تحميل حساب السائق...</div>
+              ) : (
+                <>
+                  {/* TAB 1: FULL PRINTABLE STATEMENT */}
+                  {statementTab === 'statement' && (
+                    <div
+                      ref={statementCaptureRef}
+                      dir="rtl"
+                      className="bg-white rounded-xl border border-slate-200 p-5 space-y-5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
+                        <div className="flex items-center gap-3">
+                          <DriverAvatar
+                            name={statementData.driver.fullName}
+                            photoUrl={statementData.driver.photoUrl}
+                            size="lg"
+                          />
+                          <div>
+                            <div className="text-[11px] font-bold text-[#C89B3C]">
+                              الوليد ترافيل — كشف حساب السائق
+                            </div>
+                            <div className="text-base font-bold text-[#0B1F3A] mt-0.5">
+                              {statementData.driver.fullName} · كود{' '}
+                              <span className="font-mono">{statementData.driver.driverCode}</span>
+                            </div>
+                            <div className="text-slate-500 mt-1">
+                              {statementData.driver.schoolName} · باص {statementData.driver.busNumber} ·{' '}
+                              {statementData.driver.routeName}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="rounded-lg bg-[#0B1F3A] text-white px-3.5 py-2 text-center">
+                          <div className="text-[10px] text-slate-300">الفترة المحاسبية</div>
+                          <div className="font-mono font-bold text-xs text-[#C89B3C] tabular-nums mt-0.5">
+                            شهر {statementData.period.month} / {statementData.period.year}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                        <div className="border border-slate-200 rounded-xl p-3">
+                          <div className="text-slate-500">الراتب الأساسي</div>
+                          <div className="mt-1 font-mono font-bold text-slate-900 tabular-nums">
+                            {formatEGP(statementData.salary.baseSalary)}
+                          </div>
+                        </div>
+                        <div className="border border-slate-200 rounded-xl p-3">
+                          <div className="text-slate-500">إجمالي السلف</div>
+                          <div className="mt-1 font-mono font-bold text-red-700 tabular-nums">
+                            − {formatEGP(statementData.salary.totalAdvances)}
+                          </div>
+                        </div>
+                        <div className="border border-slate-200 rounded-xl p-3">
+                          <div className="text-slate-500">خصم التغطيات</div>
+                          <div className="mt-1 font-mono font-bold text-red-700 tabular-nums">
+                            − {formatEGP(statementData.salary.totalCoverageDeductions)}
+                          </div>
+                        </div>
+                        <div className="border border-slate-200 rounded-xl p-3">
+                          <div className="text-slate-500">خصومات أخرى</div>
+                          <div className="mt-1 font-mono font-bold text-red-700 tabular-nums">
+                            − {formatEGP(statementData.salary.otherDeductions)}
+                          </div>
+                        </div>
+                        <div className="border border-slate-200 rounded-xl p-3">
+                          <div className="text-slate-500">المكافآت</div>
+                          <div className="mt-1 font-mono font-bold text-emerald-700 tabular-nums">
+                            + {formatEGP(statementData.salary.bonuses)}
+                          </div>
+                        </div>
+                        <div className="bg-[#0B1F3A] text-white rounded-xl p-3">
+                          <div className="text-slate-300">صافي المستحق</div>
+                          <div className="mt-1 font-mono font-bold text-[#C89B3C] tabular-nums">
+                            {formatEGP(statementData.salary.netSalary)}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <h3 className="font-bold text-[#0B1F3A] mb-2">سجل الحركات المالية للشهر</h3>
+                        <div className="border border-slate-200 rounded-xl overflow-hidden">
+                          <table className="w-full text-right text-xs">
+                            <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                              <tr>
+                                <th className="py-2.5 px-3">التاريخ</th>
+                                <th className="py-2.5 px-3">النوع</th>
+                                <th className="py-2.5 px-3">البيان</th>
+                                <th className="py-2.5 px-3">المبلغ</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {statementData.transactions.length === 0 ? (
+                                <tr>
+                                  <td colSpan={4} className="py-6 text-center text-slate-400">
+                                    لا توجد حركات مالية مسجلة في هذا الشهر
+                                  </td>
+                                </tr>
+                              ) : (
+                                statementData.transactions.map((t) => (
+                                  <tr key={t.id}>
+                                    <td className="py-2.5 px-3 font-mono text-slate-500 tabular-nums">
+                                      {new Date(t.createdAt).toLocaleDateString('ar-EG')}
+                                    </td>
+                                    <td className="py-2.5 px-3 font-semibold text-slate-700">
+                                      {t.type === 'advance'
+                                        ? 'سلفة'
+                                        : t.type === 'coverage_deduction'
+                                        ? 'خصم تغطية'
+                                        : t.type === 'bonus'
+                                        ? 'مكافأة'
+                                        : t.type === 'reversal'
+                                        ? 'عكس قيد'
+                                        : 'خصم إداري'}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-slate-700">{t.description}</td>
+                                    <td
+                                      className={`py-2.5 px-3 font-mono font-bold tabular-nums ${
+                                        t.direction === 'credit' ? 'text-emerald-700' : 'text-red-700'
+                                      }`}
+                                    >
+                                      {t.direction === 'credit' ? '+' : '−'} {formatEGP(t.amount)}
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TAB 2: DRIVER ADVANCES (ADD + EDIT + DELETE) */}
+                  {statementTab === 'advances' && (
+                    <div className="space-y-4">
+                      <form
+                        onSubmit={handleAddDriverAdvance}
+                        className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
+                      >
+                        <div className="font-bold text-[#0B1F3A]">إضافة سلفة جديدة</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                          <input
+                            type="number"
+                            required
+                            min={1}
+                            value={newAdv.amount}
+                            onChange={(e) => setNewAdv({ ...newAdv, amount: e.target.value })}
+                            placeholder="المبلغ (ج.م) *"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                          />
+                          <input
+                            type="date"
+                            required
+                            value={newAdv.date}
+                            onChange={(e) => setNewAdv({ ...newAdv, date: e.target.value })}
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                          />
+                          <input
+                            value={newAdv.paymentMethod}
+                            onChange={(e) => setNewAdv({ ...newAdv, paymentMethod: e.target.value })}
+                            placeholder="طريقة الدفع"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                          />
+                          <input
+                            value={newAdv.reason}
+                            onChange={(e) => setNewAdv({ ...newAdv, reason: e.target.value })}
+                            placeholder="السبب"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={financeBusy}
+                          className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                        >
+                          تسجيل السلفة
+                        </button>
+                      </form>
+
+                      <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
+                        {statementData.advances.length === 0 ? (
+                          <div className="p-6 text-center text-slate-400">
+                            لا توجد سلف مسجلة لهذا السائق في هذا الشهر
+                          </div>
+                        ) : (
+                          statementData.advances.map((a) =>
+                            editingAdvId === a.id ? (
+                              <form
+                                key={a.id}
+                                onSubmit={handleSaveDriverAdvanceEdit}
+                                className="p-4 bg-amber-50/60 space-y-3"
+                              >
+                                <div className="font-bold text-[#0B1F3A]">تعديل السلفة</div>
+                                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                                  <input
+                                    type="number"
+                                    required
+                                    min={1}
+                                    value={editAdv.amount}
+                                    onChange={(e) =>
+                                      setEditAdv({ ...editAdv, amount: e.target.value })
+                                    }
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                                  />
+                                  <input
+                                    type="date"
+                                    required
+                                    value={editAdv.date}
+                                    onChange={(e) =>
+                                      setEditAdv({ ...editAdv, date: e.target.value })
+                                    }
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                                  />
+                                  <input
+                                    value={editAdv.paymentMethod}
+                                    onChange={(e) =>
+                                      setEditAdv({ ...editAdv, paymentMethod: e.target.value })
+                                    }
+                                    placeholder="طريقة الدفع"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                                  />
+                                  <input
+                                    value={editAdv.reason}
+                                    onChange={(e) =>
+                                      setEditAdv({ ...editAdv, reason: e.target.value })
+                                    }
+                                    placeholder="السبب"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                                  />
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    type="submit"
+                                    disabled={financeBusy}
+                                    className="rounded-lg bg-[#0B1F3A] px-4 py-1.5 font-bold text-white cursor-pointer"
+                                  >
+                                    حفظ التعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingAdvId(null)}
+                                    className="rounded-lg border border-slate-200 bg-white px-4 py-1.5 font-semibold text-slate-600 cursor-pointer"
+                                  >
+                                    إلغاء
+                                  </button>
+                                </div>
+                              </form>
+                            ) : (
+                              <div
+                                key={a.id}
+                                className="p-3.5 flex flex-wrap items-center justify-between gap-3"
+                              >
+                                <div>
+                                  <div className="font-mono font-bold text-red-700 text-sm">
+                                    {formatEGP(a.amount)}
+                                  </div>
+                                  <div className="text-slate-500 mt-0.5">
+                                    <span className="font-mono">{a.date}</span> · {a.reason || '—'} ·{' '}
+                                    {a.paymentMethod || '—'}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingAdvId(a.id);
+                                      setEditAdv({
+                                        amount: String(a.amount),
+                                        date: a.date,
+                                        paymentMethod: a.paymentMethod || '',
+                                        reason: a.reason || '',
+                                        notes: a.notes || '',
+                                      });
+                                    }}
+                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={financeBusy}
+                                    onClick={() => handleDeleteDriverAdvance(a.id)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    حذف
+                                  </button>
+                                </div>
+                              </div>
+                            )
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TAB 3: DRIVER COVERAGES (ADD + EDIT + DELETE) */}
+                  {statementTab === 'coverage' && (
+                    <div className="space-y-4">
+                      <form
+                        onSubmit={handleAddDriverCoverage}
+                        className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
+                      >
+                        <div className="font-bold text-[#0B1F3A]">إضافة تغطية غياب جديدة</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                          <input
+                            value={newCov.replacementQuery}
+                            onChange={(e) =>
+                              setNewCov({ ...newCov, replacementQuery: e.target.value })
+                            }
+                            placeholder="السائق البديل"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                          />
+                          <input
+                            type="date"
+                            required
+                            value={newCov.date}
+                            onChange={(e) => setNewCov({ ...newCov, date: e.target.value })}
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                          />
+                          <input
+                            type="number"
+                            required
+                            min={0}
+                            value={newCov.actualReplacementCost}
+                            onChange={(e) =>
+                              setNewCov({ ...newCov, actualReplacementCost: e.target.value })
+                            }
+                            placeholder="تكلفة البديل *"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                          />
+                          <input
+                            type="number"
+                            required
+                            min={0}
+                            value={newCov.absentDriverDeduction}
+                            onChange={(e) =>
+                              setNewCov({ ...newCov, absentDriverDeduction: e.target.value })
+                            }
+                            placeholder="خصم السائق *"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                          />
+                          <input
+                            value={newCov.reason}
+                            onChange={(e) => setNewCov({ ...newCov, reason: e.target.value })}
+                            placeholder="السبب"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={financeBusy}
+                          className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                        >
+                          تسجيل التغطية
+                        </button>
+                      </form>
+
+                      <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
+                        {statementData.coverages.length === 0 ? (
+                          <div className="p-6 text-center text-slate-400">
+                            لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
+                          </div>
+                        ) : (
+                          statementData.coverages.map((c) =>
+                            editingCovId === c.id ? (
+                              <form
+                                key={c.id}
+                                onSubmit={handleSaveDriverCoverageEdit}
+                                className="p-4 bg-amber-50/60 space-y-3"
+                              >
+                                <div className="font-bold text-[#0B1F3A]">تعديل سجل التغطية</div>
+                                <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                                  <input
+                                    value={editCov.replacementQuery}
+                                    onChange={(e) =>
+                                      setEditCov({ ...editCov, replacementQuery: e.target.value })
+                                    }
+                                    placeholder="السائق البديل"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                                  />
+                                  <input
+                                    type="date"
+                                    required
+                                    value={editCov.date}
+                                    onChange={(e) =>
+                                      setEditCov({ ...editCov, date: e.target.value })
+                                    }
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                                  />
+                                  <input
+                                    type="number"
+                                    required
+                                    min={0}
+                                    value={editCov.actualReplacementCost}
+                                    onChange={(e) =>
+                                      setEditCov({
+                                        ...editCov,
+                                        actualReplacementCost: e.target.value,
+                                      })
+                                    }
+                                    placeholder="تكلفة البديل"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                                  />
+                                  <input
+                                    type="number"
+                                    required
+                                    min={0}
+                                    value={editCov.absentDriverDeduction}
+                                    onChange={(e) =>
+                                      setEditCov({
+                                        ...editCov,
+                                        absentDriverDeduction: e.target.value,
+                                      })
+                                    }
+                                    placeholder="خصم السائق"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                                  />
+                                  <input
+                                    value={editCov.reason}
+                                    onChange={(e) =>
+                                      setEditCov({ ...editCov, reason: e.target.value })
+                                    }
+                                    placeholder="السبب"
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                                  />
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    type="submit"
+                                    disabled={financeBusy}
+                                    className="rounded-lg bg-[#0B1F3A] px-4 py-1.5 font-bold text-white cursor-pointer"
+                                  >
+                                    حفظ التعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingCovId(null)}
+                                    className="rounded-lg border border-slate-200 bg-white px-4 py-1.5 font-semibold text-slate-600 cursor-pointer"
+                                  >
+                                    إلغاء
+                                  </button>
+                                </div>
+                              </form>
+                            ) : (
+                              <div
+                                key={c.id}
+                                className="p-3.5 flex flex-wrap items-center justify-between gap-3"
+                              >
+                                <div>
+                                  <div className="font-bold text-slate-900">
+                                    البديل: {c.replacementDriverName || c.replacementExternalName || '—'} ·{' '}
+                                    <span className="font-mono text-red-700">
+                                      خصم {formatEGP(c.absentDriverDeduction)}
+                                    </span>
+                                  </div>
+                                  <div className="text-slate-500 mt-0.5">
+                                    <span className="font-mono">{c.date}</span> · تكلفة البديل:{' '}
+                                    {formatEGP(c.actualReplacementCost)} · {c.reason || '—'}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingCovId(c.id);
+                                      setEditCov({
+                                        replacementQuery:
+                                          c.replacementDriverName && c.replacementDriverName !== '—'
+                                            ? c.replacementDriverName
+                                            : c.replacementExternalName || '',
+                                        date: c.date,
+                                        actualReplacementCost: String(c.actualReplacementCost ?? 0),
+                                        absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
+                                        reason: c.reason || '',
+                                        notes: c.notes || '',
+                                      });
+                                    }}
+                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={financeBusy}
+                                    onClick={() => handleDeleteDriverCoverage(c.id)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    حذف
+                                  </button>
+                                </div>
+                              </div>
+                            )
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* TAB 4: BONUSES & OTHER DEDUCTIONS */}
+                  {statementTab === 'adjustments' && (
+                    <div className="space-y-4">
+                      <form
+                        onSubmit={handleAddDriverAdjustment}
+                        className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
+                      >
+                        <div className="font-bold text-[#0B1F3A]">إضافة مكافأة أو خصم إداري</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {[
+                              { value: 'bonus' as const, label: 'مكافأة (+)' },
+                              { value: 'other_deduction' as const, label: 'خصم (−)' },
+                            ].map((opt) => (
+                              <button
+                                key={opt.value}
+                                type="button"
+                                onClick={() => setNewAdj({ ...newAdj, type: opt.value })}
+                                className={`rounded-lg border px-2 py-2 font-semibold cursor-pointer ${
+                                  newAdj.type === opt.value
+                                    ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                    : 'border-slate-200 bg-white text-slate-700'
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                          <input
+                            type="number"
+                            required
+                            min={1}
+                            value={newAdj.amount}
+                            onChange={(e) => setNewAdj({ ...newAdj, amount: e.target.value })}
+                            placeholder="المبلغ (ج.م) *"
+                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                          />
+                          <input
+                            required
+                            value={newAdj.description}
+                            onChange={(e) => setNewAdj({ ...newAdj, description: e.target.value })}
+                            placeholder="السبب / البيان *"
+                            className="sm:col-span-2 rounded-lg border border-slate-200 bg-white px-3 py-2"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={financeBusy}
+                          className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                        >
+                          حفظ التسوية
+                        </button>
+                      </form>
+
+                      <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
+                        {statementData.transactions
+                          .filter((t) => t.type === 'bonus' || t.type === 'other_deduction')
+                          .map((t) =>
+                            editingAdjId === t.id ? (
+                              <form
+                                key={t.id}
+                                onSubmit={handleSaveDriverAdjEdit}
+                                className="p-4 bg-amber-50/60 space-y-3"
+                              >
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                                  <div className="grid grid-cols-2 gap-1.5">
+                                    {[
+                                      { value: 'bonus' as const, label: 'مكافأة (+)' },
+                                      { value: 'other_deduction' as const, label: 'خصم (−)' },
+                                    ].map((opt) => (
+                                      <button
+                                        key={opt.value}
+                                        type="button"
+                                        onClick={() => setEditAdj({ ...editAdj, type: opt.value })}
+                                        className={`rounded-lg border px-2 py-1.5 font-semibold cursor-pointer ${
+                                          editAdj.type === opt.value
+                                            ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                            : 'border-slate-200 bg-white text-slate-700'
+                                        }`}
+                                      >
+                                        {opt.label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <input
+                                    type="number"
+                                    required
+                                    min={1}
+                                    value={editAdj.amount}
+                                    onChange={(e) =>
+                                      setEditAdj({ ...editAdj, amount: e.target.value })
+                                    }
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                                  />
+                                  <input
+                                    required
+                                    value={editAdj.description}
+                                    onChange={(e) =>
+                                      setEditAdj({ ...editAdj, description: e.target.value })
+                                    }
+                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                                  />
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    type="submit"
+                                    disabled={financeBusy}
+                                    className="rounded-lg bg-[#0B1F3A] px-4 py-1.5 font-bold text-white cursor-pointer"
+                                  >
+                                    حفظ التعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingAdjId(null)}
+                                    className="rounded-lg border border-slate-200 bg-white px-4 py-1.5 font-semibold text-slate-600 cursor-pointer"
+                                  >
+                                    إلغاء
+                                  </button>
+                                </div>
+                              </form>
+                            ) : (
+                              <div
+                                key={t.id}
+                                className="p-3.5 flex flex-wrap items-center justify-between gap-3"
+                              >
+                                <div>
+                                  <div
+                                    className={`font-mono font-bold text-sm ${
+                                      t.type === 'bonus' ? 'text-emerald-700' : 'text-red-700'
+                                    }`}
+                                  >
+                                    {t.type === 'bonus' ? '+' : '−'} {formatEGP(t.amount)}
+                                  </div>
+                                  <div className="text-slate-500 mt-0.5">{t.description}</div>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingAdjId(t.id);
+                                      setEditAdj({
+                                        type: t.type === 'bonus' ? 'bonus' : 'other_deduction',
+                                        amount: String(t.amount),
+                                        description: t.description,
+                                      });
+                                    }}
+                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={financeBusy}
+                                    onClick={() => handleDeleteDriverAdj(t.id)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    حذف
+                                  </button>
+                                </div>
+                              </div>
+                            )
+                          )}
+                        {statementData.transactions.filter(
+                          (t) => t.type === 'bonus' || t.type === 'other_deduction'
+                        ).length === 0 && (
+                          <div className="p-6 text-center text-slate-400">
+                            لا توجد مكافآت أو خصومات إدارية في هذا الشهر
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </div>

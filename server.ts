@@ -3,7 +3,7 @@ import http from 'http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { and, desc, eq, gte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, or, sql } from 'drizzle-orm';
 import { db } from './src/db/index.ts';
 import {
   advances,
@@ -12,14 +12,17 @@ import {
   coverageRecords,
   driverAssignments,
   drivers,
+  employees,
   financialTransactions,
   gpsLocations,
+  monthlyClosings,
   notifications,
   routes,
   salaries,
   schools,
   userRoles,
   users,
+  type DriverLicensePhoto,
   vehicleOwners,
   vehicles,
   voiceCommandLogs,
@@ -37,18 +40,29 @@ import {
 import {
   issueDriverSessionToken,
   normalizeArabicDigits,
+  normalizeArabicName,
   normalizeDriverCode,
   normalizeEgyptPhone,
 } from './src/lib/driver-session.ts';
 import { ensureRlsPoliciesApplied } from './src/db/apply-rls-policies.ts';
 import { runWithRlsContext } from './src/db/rls-context.ts';
-import { ensureStarterOperationalData } from './src/services/bootstrap.ts';
 import {
+  closeMonthAndStartNext,
+  deleteAdjustmentTransaction,
+  deleteAdvanceTransaction,
+  deleteCoverageTransaction,
+  getActiveBillingPeriod,
+  getMonthlyClosingsHistory,
+  getOrRecalculateDriverSalaryForRead,
   recalculateDriverSalary,
   recordAdjustmentTransaction,
   recordAdvanceTransaction,
   recordCoverageTransaction,
+  resetMonthFinancials,
   reverseFinancialRecord,
+  updateAdjustmentTransaction,
+  updateAdvanceTransaction,
+  updateCoverageTransaction,
 } from './src/services/finance.ts';
 import {
   interpretEgyptianCommand,
@@ -88,6 +102,55 @@ function sanitizeDriverPhotoUrl(value: unknown): string {
   throw new Error('صيغة رابط أو ملف الصورة غير صالحة');
 }
 
+function sanitizeLicensePhotos(
+  raw: unknown,
+  defaultUploadedBy: 'admin' | 'driver'
+): DriverLicensePhoto[] {
+  if (!Array.isArray(raw)) {
+    throw new Error('صيغة قائمة صور الرخص غير صالحة');
+  }
+  if (raw.length > 10) {
+    throw new Error('الحد الأقصى لعدد صور الرخص المحفوظة هو 10 صور');
+  }
+
+  return raw.map((item, idx) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error('بيانات إحدى صور الرخص غير صالحة');
+    }
+    const obj = item as Record<string, unknown>;
+    const imageUrl = typeof obj.imageUrl === 'string' ? obj.imageUrl.trim() : '';
+    if (!imageUrl || imageUrl.length > 900_000) {
+      throw new Error('حجم إحدى صور الرخص كبير جداً أو غير صالح');
+    }
+    if (
+      !imageUrl.startsWith('data:image/') &&
+      !imageUrl.startsWith('https://') &&
+      !imageUrl.startsWith('http://')
+    ) {
+      throw new Error('صيغة صورة الرخصة غير مدعومة');
+    }
+
+    const idRaw = typeof obj.id === 'string' ? obj.id.trim() : '';
+    const labelRaw = typeof obj.label === 'string' ? obj.label.trim() : '';
+    const uploadedBy =
+      obj.uploadedBy === 'driver' || obj.uploadedBy === 'admin'
+        ? obj.uploadedBy
+        : defaultUploadedBy;
+    const uploadedAt =
+      typeof obj.uploadedAt === 'string' && obj.uploadedAt.trim()
+        ? obj.uploadedAt.trim()
+        : new Date().toISOString();
+
+    return {
+      id: idRaw || `lic_${Date.now()}_${idx}`,
+      label: labelRaw.slice(0, 80) || 'صورة رخصة',
+      imageUrl,
+      uploadedBy,
+      uploadedAt,
+    };
+  });
+}
+
 async function getEnrichedDrivers() {
   const allDrivers = await db.select().from(drivers).orderBy(drivers.driverCode);
   const currentAssignments = await db
@@ -116,14 +179,15 @@ async function getEnrichedDrivers() {
 
   return allDrivers.map((d) => {
     const assign = assignByDriver[d.id];
-    const school = assign ? schoolById[assign.schoolId] : undefined;
-    const vehicle = assign ? vehicleById[assign.vehicleId] : undefined;
+    const school = assign?.schoolId ? schoolById[assign.schoolId] : undefined;
+    const vehicle = assign?.vehicleId ? vehicleById[assign.vehicleId] : undefined;
     const owner = vehicle?.ownerId ? ownerById[vehicle.ownerId] : undefined;
     const route = assign?.routeId ? routeById[assign.routeId] : undefined;
 
     return {
       ...d,
       monthlyAgreedSalary: Number(d.monthlyAgreedSalary || 0),
+      licensePhotos: Array.isArray(d.licensePhotosJson) ? d.licensePhotosJson : [],
       assignment: assign || null,
       schoolId: school?.id || null,
       schoolName: school?.name || 'غير معين',
@@ -161,7 +225,7 @@ async function getFleetWithLatestGps() {
 
   const latestByVehicle: Record<number, typeof gpsLocations.$inferSelect> = {};
   for (const g of latestGpsRows) {
-    if (!latestByVehicle[g.vehicleId]) {
+    if (g.vehicleId && !latestByVehicle[g.vehicleId]) {
       latestByVehicle[g.vehicleId] = g;
     }
   }
@@ -179,12 +243,15 @@ async function getFleetWithLatestGps() {
   for (const d of allDrivers) driverById[d.id] = d;
 
   const assignByVehicle: Record<number, typeof driverAssignments.$inferSelect> = {};
-  for (const a of currentAssignments) assignByVehicle[a.vehicleId] = a;
+  for (const a of currentAssignments) {
+    if (a.vehicleId) assignByVehicle[a.vehicleId] = a;
+  }
 
   return allVehicles.map((v) => {
     const assign = assignByVehicle[v.id];
-    const driver = assign ? driverById[assign.driverId] : undefined;
-    const school = assign ? schoolById[assign.schoolId] : undefined;
+    const rawDriver = assign ? driverById[assign.driverId] : undefined;
+    const driver = rawDriver && rawDriver.accountStatus === 'active' ? rawDriver : undefined;
+    const school = assign?.schoolId ? schoolById[assign.schoolId] : undefined;
     const route = assign?.routeId ? routeById[assign.routeId] : undefined;
     const owner = v.ownerId ? ownerById[v.ownerId] : undefined;
     const gps = latestByVehicle[v.id] || null;
@@ -256,24 +323,21 @@ async function startServer() {
     };
 
     try {
+      const rawIdentifier = String(
+        req.body?.identifier ?? req.body?.phone ?? req.body?.name ?? ''
+      ).trim();
       const normCode = normalizeDriverCode(req.body?.driverCode);
-      const normPhone = normalizeEgyptPhone(req.body?.phone);
-      const rawPhoneDigits = normalizeArabicDigits(String(req.body?.phone || '')).replace(/\D/g, '');
+      const normPhone = normalizeEgyptPhone(rawIdentifier);
+      const rawPhoneDigits = normalizeArabicDigits(rawIdentifier).replace(/\D/g, '');
+      const normInputName = normalizeArabicName(rawIdentifier);
 
-      if (!normCode || !normPhone) {
-        return res.status(400).json({ error: 'يرجى إدخال رقم الموبايل وكود السائق' });
+      if (!normCode || !rawIdentifier) {
+        return res.status(400).json({ error: 'يرجى إدخال رقم الموبايل أو الاسم وكود السائق' });
       }
 
       const result = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
         await ensureRolesExist();
-
-        const driverCountRes = await db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(drivers);
-        if ((driverCountRes[0]?.count ?? 0) === 0) {
-          const seedOwnerId = await ensureSeedOwnerUserId();
-          await ensureStarterOperationalData(seedOwnerId);
-        }
+        await ensureSeedOwnerUserId();
 
         let [driver] = await db
           .select()
@@ -289,17 +353,25 @@ async function startServer() {
         }
 
         if (!driver) {
-          return { status: 401 as const, error: 'رقم الموبايل أو كود السائق غير صحيح' };
+          return { status: 401 as const, error: 'الاسم / رقم الموبايل أو كود السائق غير صحيح' };
         }
 
         const storedPhoneNorm = normalizeEgyptPhone(driver.phone);
         const storedPhoneDigits = normalizeArabicDigits(driver.phone).replace(/\D/g, '');
         const phoneMatches =
-          storedPhoneNorm === normPhone ||
-          (rawPhoneDigits.length >= 8 && storedPhoneDigits === rawPhoneDigits);
+          (Boolean(normPhone) && storedPhoneNorm === normPhone) ||
+          (rawPhoneDigits.length >= 8 &&
+            (storedPhoneDigits === rawPhoneDigits ||
+              storedPhoneDigits.endsWith(rawPhoneDigits) ||
+              rawPhoneDigits.endsWith(storedPhoneDigits)));
 
-        if (!phoneMatches) {
-          return { status: 401 as const, error: 'رقم الموبايل أو كود السائق غير صحيح' };
+        const normStoredName = normalizeArabicName(driver.fullName);
+        const nameMatches =
+          normInputName.length >= 2 &&
+          (normStoredName === normInputName || normStoredName.includes(normInputName));
+
+        if (!phoneMatches && !nameMatches) {
+          return { status: 401 as const, error: 'الاسم / رقم الموبايل أو كود السائق غير صحيح' };
         }
 
         if (driver.accountStatus !== 'active') {
@@ -445,9 +517,6 @@ async function startServer() {
   // 1. Current Authenticated User & Bootstrap
   app.get('/api/me', requireAuth, async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.roleSlug === 'super_admin') {
-        await ensureStarterOperationalData(req.dbUser.id);
-      }
       res.json({
         user: req.dbUser,
         driver: req.driverRecord || null,
@@ -461,16 +530,25 @@ async function startServer() {
   // 2. Dashboard Summary (Admin/Staff only)
   app.get('/api/dashboard', requireAuth, requireAdminOrStaff, requirePermission('dashboard:read'), async (req: AuthRequest, res) => {
     try {
-      const month = Number(req.query.month) || new Date().getMonth() + 1;
-      const year = Number(req.query.year) || new Date().getFullYear();
+      const activePeriod = await getActiveBillingPeriod();
+      const month = Number(req.query.month) || activePeriod.month;
+      const year = Number(req.query.year) || activePeriod.year;
       const dateStr = (req.query.date as string) || getTodayDateString();
       const schoolFilter = req.query.schoolId ? Number(req.query.schoolId) : null;
       const driverFilter = req.query.driverId ? Number(req.query.driverId) : null;
       const vehicleFilter = req.query.vehicleId ? Number(req.query.vehicleId) : null;
       const statusFilter = (req.query.status as string) || '';
+      const schoolQuery = String(req.query.schoolQuery || '').trim().toLowerCase();
+      const driverQuery = String(req.query.driverQuery || '').trim().toLowerCase();
+      const vehicleQuery = String(req.query.vehicleQuery || '').trim().toLowerCase();
+      const statusQuery = String(req.query.statusQuery || '').trim().toLowerCase();
 
-      let enrichedDrivers = await getEnrichedDrivers();
-      let fleet = await getFleetWithLatestGps();
+      let enrichedDrivers = (await getEnrichedDrivers()).filter(
+        (d) => d.accountStatus === 'active'
+      );
+      let fleet = (await getFleetWithLatestGps()).filter(
+        (v) => v.operationalStatus !== 'inactive'
+      );
       const allSchools = await db.select().from(schools);
       const todayAttendance = await db
         .select()
@@ -484,13 +562,44 @@ async function startServer() {
         enrichedDrivers = enrichedDrivers.filter((d) => d.schoolId === schoolFilter);
         fleet = fleet.filter((v) => v.schoolId === schoolFilter);
       }
+      if (schoolQuery) {
+        enrichedDrivers = enrichedDrivers.filter((d) =>
+          (d.schoolName || '').toLowerCase().includes(schoolQuery)
+        );
+        fleet = fleet.filter((v) => (v.schoolName || '').toLowerCase().includes(schoolQuery));
+      }
       if (driverFilter) {
         enrichedDrivers = enrichedDrivers.filter((d) => d.id === driverFilter);
         fleet = fleet.filter((v) => v.driverId === driverFilter);
       }
+      if (driverQuery) {
+        enrichedDrivers = enrichedDrivers.filter(
+          (d) =>
+            d.fullName.toLowerCase().includes(driverQuery) ||
+            d.driverCode.toLowerCase().includes(driverQuery) ||
+            d.phone.toLowerCase().includes(driverQuery)
+        );
+        fleet = fleet.filter(
+          (v) =>
+            (v.driverName || '').toLowerCase().includes(driverQuery) ||
+            (v.driverCode || '').toLowerCase().includes(driverQuery)
+        );
+      }
       if (vehicleFilter) {
         enrichedDrivers = enrichedDrivers.filter((d) => d.vehicleId === vehicleFilter);
         fleet = fleet.filter((v) => v.id === vehicleFilter);
+      }
+      if (vehicleQuery) {
+        enrichedDrivers = enrichedDrivers.filter(
+          (d) =>
+            (d.busNumber || '').toLowerCase().includes(vehicleQuery) ||
+            (d.registrationNumber || '').toLowerCase().includes(vehicleQuery)
+        );
+        fleet = fleet.filter(
+          (v) =>
+            v.busNumber.toLowerCase().includes(vehicleQuery) ||
+            v.registrationNumber.toLowerCase().includes(vehicleQuery)
+        );
       }
       if (statusFilter) {
         if (statusFilter === 'absent') {
@@ -501,6 +610,24 @@ async function startServer() {
         } else if (statusFilter === 'active' || statusFilter === 'inactive') {
           enrichedDrivers = enrichedDrivers.filter((d) => d.accountStatus === statusFilter);
         }
+      }
+      if (statusQuery) {
+        enrichedDrivers = enrichedDrivers.filter((d) => {
+          const st = attByDriver[d.id]?.status || 'present';
+          const statusAr =
+            d.accountStatus === 'inactive'
+              ? 'مؤرشف'
+              : st === 'absent'
+              ? 'غائب'
+              : st === 'covered'
+              ? 'مغطى غائب'
+              : 'نشط حاضر';
+          return (
+            statusAr.includes(statusQuery) ||
+            d.accountStatus.toLowerCase().includes(statusQuery) ||
+            st.toLowerCase().includes(statusQuery)
+          );
+        });
       }
 
       const driverIds = new Set(enrichedDrivers.map((d) => d.id));
@@ -532,9 +659,16 @@ async function startServer() {
         }
       }
 
-      // School contract revenue vs vehicle owner costs
+      const allEmployees = (
+        await db.select().from(employees).orderBy(employees.fullName)
+      ).filter((e) => e.status === 'active');
+      const activeEmployees = allEmployees;
+
+      // School contract revenue vs total payroll (drivers + non-driver employees)
       const relevantSchools = schoolFilter
         ? allSchools.filter((s) => s.id === schoolFilter && s.isActive)
+        : schoolQuery
+        ? allSchools.filter((s) => s.isActive && s.name.toLowerCase().includes(schoolQuery))
         : allSchools.filter((s) => s.isActive);
       const totalSchoolContracts = relevantSchools.reduce(
         (sum, s) => sum + Number(s.monthlyContractValue || 0),
@@ -544,18 +678,16 @@ async function startServer() {
         .filter((v) => v.operationalStatus !== 'inactive')
         .reduce((sum, v) => sum + Number(v.monthlyOwnerCost || 0), 0);
 
-      // Coverage spread this month
-      const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
-      const monthCoverages = await db
-        .select()
-        .from(coverageRecords)
-        .where(and(eq(coverageRecords.isReversed, false), sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`));
-      const coverageSpread = monthCoverages.reduce(
-        (sum, c) => sum + (Number(c.absentDriverDeduction || 0) - Number(c.actualReplacementCost || 0)),
-        0
-      );
-
-      const monthlyBusinessProfit = totalSchoolContracts - totalOwnerCosts + coverageSpread;
+      const totalDriverSalaries = totalMonthlySalaries;
+      const totalEmployeeSalaries = activeEmployees.reduce((sum, e) => {
+        const net = Math.max(
+          0,
+          Number(e.monthlySalary || 0) + Number(e.bonuses || 0) - Number(e.deductions || 0)
+        );
+        return sum + net;
+      }, 0);
+      const combinedMonthlySalaries = totalDriverSalaries + totalEmployeeSalaries;
+      const monthlyBusinessProfit = totalSchoolContracts - combinedMonthlySalaries;
 
       const activeVehicles = fleet.filter((v) => v.operationalStatus === 'active');
       const onlineVehicles = activeVehicles.filter((v) => v.isOnline);
@@ -575,28 +707,100 @@ async function startServer() {
         .orderBy(desc(notifications.createdAt))
         .limit(8);
 
+      const [closingRow] = await db
+        .select()
+        .from(monthlyClosings)
+        .where(and(eq(monthlyClosings.month, month), eq(monthlyClosings.year, year)))
+        .limit(1);
+
+      const snapshotEmpById: Record<
+        number,
+        { monthlySalary: number; bonuses: number; deductions: number; netSalary: number }
+      > = {};
+      if (closingRow?.snapshotJson?.employees) {
+        for (const se of closingRow.snapshotJson.employees) {
+          snapshotEmpById[se.employeeId] = se;
+        }
+      }
+
+      const effectiveSchoolContracts = closingRow
+        ? Number(closingRow.totalSchoolContracts)
+        : totalSchoolContracts;
+      const effectiveEmployeeSalaries = closingRow
+        ? Number(closingRow.totalEmployeeSalaries)
+        : totalEmployeeSalaries;
+      const effectiveCombinedSalaries = totalDriverSalaries + effectiveEmployeeSalaries;
+      const effectiveProfit = closingRow
+        ? Number(closingRow.netProfit)
+        : effectiveSchoolContracts - effectiveCombinedSalaries;
+
       res.json({
         period: { month, year, date: dateStr },
+        activePeriod,
+        isMonthClosed: Boolean(closingRow),
         kpis: {
           totalRegisteredDrivers: enrichedDrivers.length,
+          totalEmployeesCount: closingRow ? closingRow.employeesCount : allEmployees.length,
+          activeEmployeesCount: closingRow ? closingRow.employeesCount : activeEmployees.length,
           totalActiveVehicles: activeVehicles.length,
           vehiclesOnline: onlineVehicles.length,
           vehiclesOffline: offlineVehicles.length,
           driversActive: activeDriversCount,
           driversAbsent: absentDriversCount,
-          totalMonthlySalaries,
+          totalDriverSalaries,
+          totalEmployeeSalaries: effectiveEmployeeSalaries,
+          totalMonthlySalaries: effectiveCombinedSalaries,
           totalAdvances,
           totalCoverageDeductions,
           totalOutstandingPayments,
-          totalSchoolContracts,
+          totalSchoolContracts: effectiveSchoolContracts,
           totalOwnerCosts,
-          monthlyBusinessProfit,
+          monthlyBusinessProfit: effectiveProfit,
         },
-        drivers: enrichedDrivers.map((d) => ({
-          ...d,
-          todayAttendance: attByDriver[d.id]?.status || 'present',
-          currentSalary: salaryByDriver[d.id] || null,
-        })),
+        drivers: enrichedDrivers.map((d) => {
+          const s = salaryByDriver[d.id];
+          return {
+            ...d,
+            todayAttendance: attByDriver[d.id]?.status || 'present',
+            currentSalary: s
+              ? {
+                  ...s,
+                  baseSalary: Number(s.baseSalary),
+                  totalAdvances: Number(s.totalAdvances),
+                  totalCoverageDeductions: Number(s.totalCoverageDeductions),
+                  otherDeductions: Number(s.otherDeductions),
+                  bonuses: Number(s.bonuses),
+                  netSalary: Number(s.netSalary),
+                }
+              : {
+                  id: 0,
+                  driverId: d.id,
+                  month,
+                  year,
+                  baseSalary: d.monthlyAgreedSalary,
+                  totalAdvances: 0,
+                  totalCoverageDeductions: 0,
+                  otherDeductions: 0,
+                  bonuses: 0,
+                  netSalary: d.monthlyAgreedSalary,
+                  status: 'open',
+                },
+          };
+        }),
+        employees: allEmployees.map((e) => {
+          const snap = snapshotEmpById[e.id];
+          const mSal = snap ? snap.monthlySalary : Number(e.monthlySalary || 0);
+          const bon = snap ? snap.bonuses : Number(e.bonuses || 0);
+          const ded = snap ? snap.deductions : Number(e.deductions || 0);
+          const net = snap ? snap.netSalary : mSal + bon - ded;
+          return {
+            ...e,
+            monthlySalary: mSal,
+            bonuses: bon,
+            deductions: ded,
+            netSalary: net,
+          };
+        }),
         fleet,
         schools: allSchools,
         recentNotifications,
@@ -607,16 +811,205 @@ async function startServer() {
     }
   });
 
-  // 3. Drivers Management
-  app.get('/api/drivers', requireAuth, requireAdminOrStaff, requirePermission('drivers:read'), async (_req: AuthRequest, res) => {
+  // 3. Drivers Management (Active by default — archived drivers live in /api/archive)
+  app.get('/api/drivers', requireAuth, requireAdminOrStaff, requirePermission('drivers:read'), async (req: AuthRequest, res) => {
     try {
-      const list = await getEnrichedDrivers();
+      const includeArchived = req.query.includeArchived === 'true';
+      const all = await getEnrichedDrivers();
+      const list = includeArchived ? all : all.filter((d) => d.accountStatus === 'active');
       res.json({ drivers: list });
     } catch (error) {
       console.error('Get drivers error:', error);
       res.status(500).json({ error: 'تعذر تحميل قائمة السائقين' });
     }
   });
+
+  async function resolveSchoolIdForDriver(
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    opts: { schoolId?: unknown; schoolName?: unknown }
+  ): Promise<number | null> {
+    if (opts.schoolName !== undefined) {
+      const trimmed = String(opts.schoolName || '').trim();
+      if (!trimmed) return null;
+
+      const [existingByName] = await tx
+        .select()
+        .from(schools)
+        .where(eq(schools.name, trimmed))
+        .limit(1);
+      if (existingByName) return existingByName.id;
+
+      const [created] = await tx
+        .insert(schools)
+        .values({
+          name: trimmed,
+          address: '',
+          lat: 31.2156,
+          lng: 29.9553,
+          isActive: true,
+        })
+        .returning();
+      return created.id;
+    }
+
+    return opts.schoolId ? Number(opts.schoolId) : null;
+  }
+
+  async function resolveVehicleIdForDriver(
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    opts: { vehicleId?: unknown; busNumber?: unknown }
+  ): Promise<number | null> {
+    if (opts.busNumber !== undefined) {
+      const trimmed = String(opts.busNumber || '').trim();
+      if (!trimmed) return null;
+
+      const [existingVehicle] = await tx
+        .select()
+        .from(vehicles)
+        .where(or(eq(vehicles.busNumber, trimmed), eq(vehicles.registrationNumber, trimmed)))
+        .limit(1);
+      if (existingVehicle) return existingVehicle.id;
+
+      const [created] = await tx
+        .insert(vehicles)
+        .values({
+          busNumber: trimmed,
+          registrationNumber: trimmed,
+          vehicleType: '',
+          operationalStatus: 'active',
+        })
+        .returning();
+      return created.id;
+    }
+
+    return opts.vehicleId ? Number(opts.vehicleId) : null;
+  }
+
+  async function resolveRouteIdForDriver(
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    opts: {
+      schoolId: number | null;
+      routeId?: unknown;
+      routeName?: unknown;
+      pickupArea?: unknown;
+      pickupTime?: unknown;
+      dropoffTime?: unknown;
+    }
+  ): Promise<number | null> {
+    if (opts.routeName !== undefined) {
+      const trimmedName = String(opts.routeName || '').trim();
+      if (!trimmedName) return null;
+
+      if (opts.routeId) {
+        const [byId] = await tx
+          .select()
+          .from(routes)
+          .where(eq(routes.id, Number(opts.routeId)))
+          .limit(1);
+        if (byId && byId.name.trim() === trimmedName && (byId.schoolId ?? null) === opts.schoolId) {
+          return byId.id;
+        }
+      }
+
+      const [existingByName] = await tx
+        .select()
+        .from(routes)
+        .where(
+          opts.schoolId !== null
+            ? and(eq(routes.schoolId, opts.schoolId), eq(routes.name, trimmedName))
+            : and(isNull(routes.schoolId), eq(routes.name, trimmedName))
+        )
+        .limit(1);
+      if (existingByName) {
+        return existingByName.id;
+      }
+
+      let schoolRow: typeof schools.$inferSelect | undefined;
+      if (opts.schoolId !== null) {
+        const [foundSchool] = await tx
+          .select()
+          .from(schools)
+          .where(eq(schools.id, opts.schoolId))
+          .limit(1);
+        schoolRow = foundSchool;
+      }
+
+      const [createdRoute] = await tx
+        .insert(routes)
+        .values({
+          name: trimmedName,
+          schoolId: opts.schoolId,
+          pickupArea: opts.pickupArea ? String(opts.pickupArea).trim() : '',
+          dropoffArea: schoolRow?.name || '',
+          pickupTime: opts.pickupTime ? String(opts.pickupTime) : '',
+          dropoffTime: opts.dropoffTime ? String(opts.dropoffTime) : '',
+          estimatedDistanceKm: 0,
+        })
+        .returning();
+
+      return createdRoute.id;
+    }
+
+    return opts.routeId ? Number(opts.routeId) : null;
+  }
+
+  async function resolveOwnerIdForVehicle(
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    opts: { ownerId?: unknown; ownerName?: unknown }
+  ): Promise<number | null> {
+    if (opts.ownerName !== undefined) {
+      const trimmed = String(opts.ownerName || '').trim();
+      if (!trimmed) return null;
+
+      const [existing] = await tx
+        .select()
+        .from(vehicleOwners)
+        .where(eq(vehicleOwners.fullName, trimmed))
+        .limit(1);
+      if (existing) return existing.id;
+
+      const [created] = await tx
+        .insert(vehicleOwners)
+        .values({
+          fullName: trimmed,
+          phone: '',
+          nationalId: '',
+          notes: '',
+        })
+        .returning();
+      return created.id;
+    }
+
+    return opts.ownerId ? Number(opts.ownerId) : null;
+  }
+
+  async function resolveDriverByIdOrQuery(opts: {
+    driverId?: unknown;
+    driverQuery?: unknown;
+  }): Promise<typeof drivers.$inferSelect | null> {
+    if (opts.driverId) {
+      const [byId] = await db
+        .select()
+        .from(drivers)
+        .where(eq(drivers.id, Number(opts.driverId)))
+        .limit(1);
+      if (byId) return byId;
+    }
+    const q = String(opts.driverQuery || '').trim();
+    if (!q) return null;
+    const normCode = normalizeDriverCode(q);
+    const allDrivers = await db.select().from(drivers);
+    return (
+      allDrivers.find(
+        (d) =>
+          d.driverCode.toLowerCase() === normCode.toLowerCase() ||
+          d.driverCode.toLowerCase() === q.toLowerCase()
+      ) ||
+      allDrivers.find((d) => d.fullName.trim().toLowerCase() === q.toLowerCase()) ||
+      allDrivers.find((d) => d.fullName.toLowerCase().includes(q.toLowerCase())) ||
+      null
+    );
+  }
 
   app.post(
     '/api/drivers',
@@ -635,10 +1028,17 @@ async function startServer() {
           employmentStartDate,
           accountStatus,
           photoUrl,
+          licensePhotos,
           notes,
           schoolId,
+          schoolName,
           vehicleId,
+          busNumber,
           routeId,
+          routeName,
+          routePickupArea,
+          routePickupTime,
+          routeDropoffTime,
         } = req.body;
 
         if (!driverCode || !fullName || !phone) {
@@ -646,8 +1046,12 @@ async function startServer() {
         }
 
         let safePhotoUrl = '';
+        let safeLicensePhotos: DriverLicensePhoto[] = [];
         try {
           safePhotoUrl = sanitizeDriverPhotoUrl(photoUrl);
+          if (licensePhotos !== undefined) {
+            safeLicensePhotos = sanitizeLicensePhotos(licensePhotos, 'admin');
+          }
         } catch (photoErr: unknown) {
           return res.status(400).json({
             error: photoErr instanceof Error ? photoErr.message : 'صورة السائق غير صالحة',
@@ -680,16 +1084,28 @@ async function startServer() {
               employmentStartDate: employmentStartDate || getTodayDateString(),
               accountStatus: accountStatus || 'active',
               photoUrl: safePhotoUrl,
+              licensePhotosJson: safeLicensePhotos,
               notes: notes || '',
             })
             .returning();
 
-          if (schoolId && vehicleId) {
+          const resolvedSchoolId = await resolveSchoolIdForDriver(tx, { schoolId, schoolName });
+          const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
+          const resolvedRouteId = await resolveRouteIdForDriver(tx, {
+            schoolId: resolvedSchoolId,
+            routeId,
+            routeName,
+            pickupArea: routePickupArea,
+            pickupTime: routePickupTime,
+            dropoffTime: routeDropoffTime,
+          });
+
+          if (resolvedSchoolId || resolvedVehicleId || resolvedRouteId) {
             await tx.insert(driverAssignments).values({
               driverId: newDriver.id,
-              schoolId: Number(schoolId),
-              vehicleId: Number(vehicleId),
-              routeId: routeId ? Number(routeId) : null,
+              schoolId: resolvedSchoolId,
+              vehicleId: resolvedVehicleId,
+              routeId: resolvedRouteId,
               isCurrent: true,
             });
           }
@@ -733,21 +1149,34 @@ async function startServer() {
         employmentStartDate,
         accountStatus,
         photoUrl,
+        licensePhotos,
         notes,
         schoolId,
+        schoolName,
         vehicleId,
+        busNumber,
         routeId,
+        routeName,
+        routePickupArea,
+        routePickupTime,
+        routeDropoffTime,
       } = req.body;
 
       let nextPhotoUrl = existing.photoUrl || '';
-      if (photoUrl !== undefined) {
-        try {
+      let nextLicensePhotos: DriverLicensePhoto[] = Array.isArray(existing.licensePhotosJson)
+        ? existing.licensePhotosJson
+        : [];
+      try {
+        if (photoUrl !== undefined) {
           nextPhotoUrl = sanitizeDriverPhotoUrl(photoUrl);
-        } catch (photoErr: unknown) {
-          return res.status(400).json({
-            error: photoErr instanceof Error ? photoErr.message : 'صورة السائق غير صالحة',
-          });
         }
+        if (licensePhotos !== undefined) {
+          nextLicensePhotos = sanitizeLicensePhotos(licensePhotos, 'admin');
+        }
+      } catch (photoErr: unknown) {
+        return res.status(400).json({
+          error: photoErr instanceof Error ? photoErr.message : 'صورة السائق غير صالحة',
+        });
       }
 
       const nextCode = driverCode ? normalizeDriverCode(driverCode) : existing.driverCode;
@@ -763,6 +1192,14 @@ async function startServer() {
           return res.status(409).json({ error: `كود السائق ${nextCode} مستخدم لسائق آخر` });
         }
       }
+
+      const hasAssignmentUpdate =
+        schoolId !== undefined ||
+        schoolName !== undefined ||
+        vehicleId !== undefined ||
+        busNumber !== undefined ||
+        routeId !== undefined ||
+        routeName !== undefined;
 
       const updated = await db.transaction(async (tx) => {
         const [u] = await tx
@@ -783,24 +1220,37 @@ async function startServer() {
             employmentStartDate: employmentStartDate ?? existing.employmentStartDate,
             accountStatus: accountStatus ?? existing.accountStatus,
             photoUrl: nextPhotoUrl,
+            licensePhotosJson: nextLicensePhotos,
             notes: notes ?? existing.notes,
           })
           .where(eq(drivers.id, driverId))
           .returning();
 
-        if (schoolId && vehicleId) {
+        if (hasAssignmentUpdate) {
+          const resolvedSchoolId = await resolveSchoolIdForDriver(tx, { schoolId, schoolName });
+          const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
+          const resolvedRouteId = await resolveRouteIdForDriver(tx, {
+            schoolId: resolvedSchoolId,
+            routeId,
+            routeName,
+            pickupArea: routePickupArea,
+            pickupTime: routePickupTime,
+            dropoffTime: routeDropoffTime,
+          });
           await tx
             .update(driverAssignments)
             .set({ isCurrent: false, endedAt: new Date() })
             .where(and(eq(driverAssignments.driverId, driverId), eq(driverAssignments.isCurrent, true)));
 
-          await tx.insert(driverAssignments).values({
-            driverId,
-            schoolId: Number(schoolId),
-            vehicleId: Number(vehicleId),
-            routeId: routeId ? Number(routeId) : null,
-            isCurrent: true,
-          });
+          if (resolvedSchoolId || resolvedVehicleId || resolvedRouteId) {
+            await tx.insert(driverAssignments).values({
+              driverId,
+              schoolId: resolvedSchoolId,
+              vehicleId: resolvedVehicleId,
+              routeId: resolvedRouteId,
+              isCurrent: true,
+            });
+          }
         }
 
         if (accountStatus && accountStatus !== existing.accountStatus) {
@@ -929,14 +1379,15 @@ async function startServer() {
         return res.status(403).json({ error: 'ليس لديك صلاحية الاطلاع على الكشوف المالية' });
       }
 
-      const month = Number(req.query.month) || new Date().getMonth() + 1;
-      const year = Number(req.query.year) || new Date().getFullYear();
+      const activePeriod = await getActiveBillingPeriod();
+      const month = Number(req.query.month) || activePeriod.month;
+      const year = Number(req.query.year) || activePeriod.year;
 
       const allDrivers = await getEnrichedDrivers();
       const driver = allDrivers.find((d) => d.id === driverId);
       if (!driver) return res.status(404).json({ error: 'السائق غير موجود' });
 
-      const salary = await recalculateDriverSalary(db, driverId, month, year);
+      const salary = await getOrRecalculateDriverSalaryForRead(db, driverId, month, year);
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
 
       const driverAdvances = await db
@@ -968,8 +1419,20 @@ async function startServer() {
         )
         .orderBy(desc(financialTransactions.createdAt));
 
+      const [todayAtt] = await db
+        .select()
+        .from(attendance)
+        .where(and(eq(attendance.driverId, driverId), eq(attendance.date, getTodayDateString())))
+        .limit(1);
+
+      const driverNameById: Record<number, string> = {};
+      for (const d of allDrivers) driverNameById[d.id] = d.fullName;
+
       res.json({
-        driver,
+        driver: {
+          ...driver,
+          todayAttendance: todayAtt?.status || 'present',
+        },
         period: { month, year },
         salary: {
           ...salary,
@@ -983,6 +1446,9 @@ async function startServer() {
         advances: driverAdvances.map((a) => ({ ...a, amount: Number(a.amount) })),
         coverages: driverCoverages.map((c) => ({
           ...c,
+          replacementDriverName: c.replacementDriverId
+            ? driverNameById[c.replacementDriverId] || '—'
+            : c.replacementExternalName || 'سائق خارجي',
           actualReplacementCost:
             req.dbUser?.roleSlug === 'driver' ? 0 : Number(c.actualReplacementCost),
           absentDriverDeduction: Number(c.absentDriverDeduction),
@@ -1042,20 +1508,59 @@ async function startServer() {
         contractEndDate,
         notes,
       } = req.body;
-      if (!name) return res.status(400).json({ error: 'اسم المدرسة مطلوب' });
+      const trimmedName = String(name || '').trim();
+      if (!trimmedName) return res.status(400).json({ error: 'اسم المدرسة مطلوب' });
+
+      const existingRows = await db
+        .select()
+        .from(schools)
+        .where(sql`LOWER(TRIM(${schools.name})) = LOWER(${trimmedName})`)
+        .limit(1);
+
+      if (existingRows[0]) {
+        const existing = existingRows[0];
+        const isMinimalAutoStub =
+          Number(existing.monthlyContractValue || 0) === 0 &&
+          !existing.contactName &&
+          !existing.contactPhone &&
+          !existing.address;
+
+        if (isMinimalAutoStub) {
+          const [updated] = await db
+            .update(schools)
+            .set({
+              contactName: contactName || existing.contactName || '',
+              contactPhone: contactPhone || existing.contactPhone || '',
+              address: address || existing.address || '',
+              monthlyContractValue: Number(monthlyContractValue || 0).toFixed(2),
+              contractStartDate: contractStartDate || existing.contractStartDate || '',
+              contractEndDate: contractEndDate || existing.contractEndDate || '',
+              notes: notes || existing.notes || '',
+              isActive: true,
+            })
+            .where(eq(schools.id, existing.id))
+            .returning();
+
+          return res.status(200).json({ school: updated, updatedExisting: true });
+        }
+
+        return res.status(409).json({
+          error: 'هذه المدرسة مسجلة بالفعل — يمكنك تعديل بياناتها وعقدها من بطاقة المدرسة في القائمة.',
+        });
+      }
 
       const [created] = await db
         .insert(schools)
         .values({
-          name: String(name).trim(),
+          name: trimmedName,
           contactName: contactName || '',
           contactPhone: contactPhone || '',
           address: address || '',
-          lat: Number(lat || 30.0444),
-          lng: Number(lng || 31.2357),
+          lat: Number(lat || 31.2156),
+          lng: Number(lng || 29.9553),
           monthlyContractValue: Number(monthlyContractValue || 0).toFixed(2),
-          contractStartDate: contractStartDate || '2026-09-01',
-          contractEndDate: contractEndDate || '2027-06-30',
+          contractStartDate: contractStartDate || '',
+          contractEndDate: contractEndDate || '',
           notes: notes || '',
         })
         .returning();
@@ -1165,6 +1670,7 @@ async function startServer() {
         registrationNumber,
         vehicleType,
         ownerId,
+        ownerName,
         monthlyOwnerCost,
         operationalStatus,
         notes,
@@ -1172,27 +1678,32 @@ async function startServer() {
       if (!busNumber || !registrationNumber) {
         return res.status(400).json({ error: 'رقم الباص ورقم اللوحة مطلوبان' });
       }
-      const [created] = await db
-        .insert(vehicles)
-        .values({
-          busNumber: String(busNumber).trim(),
-          registrationNumber: String(registrationNumber).trim(),
-          vehicleType: vehicleType || 'تويوتا هايس سقف عالي',
-          ownerId: ownerId ? Number(ownerId) : null,
-          monthlyOwnerCost: Number(monthlyOwnerCost || 0).toFixed(2),
-          operationalStatus: operationalStatus || 'active',
-          gpsStatus: 'offline',
-          notes: notes || '',
-        })
-        .returning();
+      const created = await db.transaction(async (tx) => {
+        const resolvedOwnerId = await resolveOwnerIdForVehicle(tx, { ownerId, ownerName });
+        const [v] = await tx
+          .insert(vehicles)
+          .values({
+            busNumber: String(busNumber).trim(),
+            registrationNumber: String(registrationNumber).trim(),
+            vehicleType: vehicleType || '',
+            ownerId: resolvedOwnerId,
+            monthlyOwnerCost: Number(monthlyOwnerCost || 0).toFixed(2),
+            operationalStatus: operationalStatus || 'active',
+            gpsStatus: 'offline',
+            notes: notes || '',
+          })
+          .returning();
 
-      await db.insert(auditLogs).values({
-        actorUserId: req.dbUser!.id,
-        action: 'CREATE_VEHICLE',
-        entityType: 'vehicles',
-        entityId: String(created.id),
-        afterJson: created,
-        ipAddress: req.ip || '',
+        await tx.insert(auditLogs).values({
+          actorUserId: req.dbUser!.id,
+          action: 'CREATE_VEHICLE',
+          entityType: 'vehicles',
+          entityId: String(v.id),
+          afterJson: v,
+          ipAddress: req.ip || '',
+        });
+
+        return v;
       });
 
       res.status(201).json({ vehicle: created });
@@ -1213,27 +1724,35 @@ async function startServer() {
         registrationNumber,
         vehicleType,
         ownerId,
+        ownerName,
         monthlyOwnerCost,
         operationalStatus,
         notes,
       } = req.body;
 
-      const [updated] = await db
-        .update(vehicles)
-        .set({
-          busNumber: busNumber ?? existing.busNumber,
-          registrationNumber: registrationNumber ?? existing.registrationNumber,
-          vehicleType: vehicleType ?? existing.vehicleType,
-          ownerId: ownerId !== undefined ? (ownerId ? Number(ownerId) : null) : existing.ownerId,
-          monthlyOwnerCost:
-            monthlyOwnerCost !== undefined
-              ? Number(monthlyOwnerCost).toFixed(2)
-              : existing.monthlyOwnerCost,
-          operationalStatus: operationalStatus ?? existing.operationalStatus,
-          notes: notes ?? existing.notes,
-        })
-        .where(eq(vehicles.id, id))
-        .returning();
+      const updated = await db.transaction(async (tx) => {
+        const nextOwnerId =
+          ownerName !== undefined || ownerId !== undefined
+            ? await resolveOwnerIdForVehicle(tx, { ownerId, ownerName })
+            : existing.ownerId;
+        const [v] = await tx
+          .update(vehicles)
+          .set({
+            busNumber: busNumber ?? existing.busNumber,
+            registrationNumber: registrationNumber ?? existing.registrationNumber,
+            vehicleType: vehicleType ?? existing.vehicleType,
+            ownerId: nextOwnerId,
+            monthlyOwnerCost:
+              monthlyOwnerCost !== undefined
+                ? Number(monthlyOwnerCost).toFixed(2)
+                : existing.monthlyOwnerCost,
+            operationalStatus: operationalStatus ?? existing.operationalStatus,
+            notes: notes ?? existing.notes,
+          })
+          .where(eq(vehicles.id, id))
+          .returning();
+        return v;
+      });
 
       res.json({ vehicle: updated });
     } catch (error) {
@@ -1244,23 +1763,27 @@ async function startServer() {
 
   app.post('/api/routes', requireAuth, requireAdminOrStaff, requirePermission('routes:write'), async (req: AuthRequest, res) => {
     try {
-      const { name, schoolId, pickupArea, dropoffArea, pickupTime, dropoffTime, estimatedDistanceKm } =
+      const { name, schoolId, schoolName, pickupArea, dropoffArea, pickupTime, dropoffTime, estimatedDistanceKm } =
         req.body;
-      if (!name || !schoolId) {
-        return res.status(400).json({ error: 'اسم الخط والمدرسة مطلوبان' });
+      if (!name) {
+        return res.status(400).json({ error: 'اسم الخط مطلوب' });
       }
-      const [route] = await db
-        .insert(routes)
-        .values({
-          name,
-          schoolId: Number(schoolId),
-          pickupArea: pickupArea || '',
-          dropoffArea: dropoffArea || '',
-          pickupTime: pickupTime || '06:45',
-          dropoffTime: dropoffTime || '14:30',
-          estimatedDistanceKm: Number(estimatedDistanceKm || 0),
-        })
-        .returning();
+      const route = await db.transaction(async (tx) => {
+        const resolvedSchoolId = await resolveSchoolIdForDriver(tx, { schoolId, schoolName });
+        const [r] = await tx
+          .insert(routes)
+          .values({
+            name: String(name).trim(),
+            schoolId: resolvedSchoolId,
+            pickupArea: pickupArea || '',
+            dropoffArea: dropoffArea || '',
+            pickupTime: pickupTime || '',
+            dropoffTime: dropoffTime || '',
+            estimatedDistanceKm: Number(estimatedDistanceKm || 0),
+          })
+          .returning();
+        return r;
+      });
       res.status(201).json({ route });
     } catch (error) {
       console.error('Create route error:', error);
@@ -1268,22 +1791,96 @@ async function startServer() {
     }
   });
 
+  app.patch('/api/routes/:id', requireAuth, requireAdminOrStaff, requirePermission('routes:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [existing] = await db.select().from(routes).where(eq(routes.id, id)).limit(1);
+      if (!existing) return res.status(404).json({ error: 'خط السير غير موجود' });
+
+      const { name, schoolId, schoolName, pickupArea, dropoffArea, pickupTime, dropoffTime, estimatedDistanceKm } =
+        req.body;
+
+      const updated = await db.transaction(async (tx) => {
+        const nextSchoolId =
+          schoolName !== undefined || schoolId !== undefined
+            ? await resolveSchoolIdForDriver(tx, { schoolId, schoolName })
+            : existing.schoolId;
+        const [r] = await tx
+          .update(routes)
+          .set({
+            name: name !== undefined ? String(name).trim() : existing.name,
+            schoolId: nextSchoolId,
+            pickupArea: pickupArea !== undefined ? String(pickupArea) : existing.pickupArea,
+            dropoffArea: dropoffArea !== undefined ? String(dropoffArea) : existing.dropoffArea,
+            pickupTime: pickupTime !== undefined ? String(pickupTime) : existing.pickupTime,
+            dropoffTime: dropoffTime !== undefined ? String(dropoffTime) : existing.dropoffTime,
+            estimatedDistanceKm:
+              estimatedDistanceKm !== undefined
+                ? Number(estimatedDistanceKm || 0)
+                : existing.estimatedDistanceKm,
+          })
+          .where(eq(routes.id, id))
+          .returning();
+        return r;
+      });
+
+      res.json({ route: updated });
+    } catch (error) {
+      console.error('Update route error:', error);
+      res.status(500).json({ error: 'تعذر تحديث خط السير' });
+    }
+  });
+
+  app.delete('/api/routes/:id', requireAuth, requireAdminOrStaff, requirePermission('routes:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [existing] = await db.select().from(routes).where(eq(routes.id, id)).limit(1);
+      if (!existing) return res.status(404).json({ error: 'خط السير غير موجود' });
+
+      await db.transaction(async (tx) => {
+        await tx.update(driverAssignments).set({ routeId: null }).where(eq(driverAssignments.routeId, id));
+        await tx.delete(routes).where(eq(routes.id, id));
+      });
+
+      res.json({ ok: true, deletedId: id });
+    } catch (error) {
+      console.error('Delete route error:', error);
+      res.status(500).json({ error: 'تعذر حذف خط السير' });
+    }
+  });
+
   // 5. Financial Management (Advances, Coverages, Adjustments, Reversals, Statements)
   app.get('/api/finance/overview', requireAuth, requireAdminOrStaff, requirePermission('finance:read'), async (req: AuthRequest, res) => {
     try {
-      const month = Number(req.query.month) || new Date().getMonth() + 1;
-      const year = Number(req.query.year) || new Date().getFullYear();
+      const activePeriod = await getActiveBillingPeriod();
+      const month = Number(req.query.month) || activePeriod.month;
+      const year = Number(req.query.year) || activePeriod.year;
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
 
-      const enrichedDrivers = await getEnrichedDrivers();
-      for (const d of enrichedDrivers) {
-        await recalculateDriverSalary(db, d.id, month, year);
+      const closingsHistory = await getMonthlyClosingsHistory();
+      const currentClosing =
+        closingsHistory.find((c) => c.month === month && c.year === year) || null;
+
+      const allDrivers = await getEnrichedDrivers();
+      const activeDrivers = allDrivers.filter((d) => d.accountStatus === 'active');
+      const activeDriverIds = new Set(activeDrivers.map((d) => d.id));
+
+      if (!currentClosing) {
+        for (const d of activeDrivers) {
+          await recalculateDriverSalary(db, d.id, month, year);
+        }
       }
 
-      const monthSalaries = await db
+      const rawMonthSalaries = await db
         .select()
         .from(salaries)
         .where(and(eq(salaries.month, month), eq(salaries.year, year)));
+
+      // If the month is already closed, keep ALL recorded salaries for that ended month intact;
+      // otherwise show active drivers for the open month.
+      const monthSalaries = currentClosing
+        ? rawMonthSalaries
+        : rawMonthSalaries.filter((s) => activeDriverIds.has(s.driverId));
 
       const monthAdvances = await db
         .select()
@@ -1303,11 +1900,14 @@ async function startServer() {
         .where(and(eq(financialTransactions.month, month), eq(financialTransactions.year, year)))
         .orderBy(desc(financialTransactions.createdAt));
 
-      const driverMap: Record<number, (typeof enrichedDrivers)[number]> = {};
-      for (const d of enrichedDrivers) driverMap[d.id] = d;
+      const driverMap: Record<number, (typeof allDrivers)[number]> = {};
+      for (const d of allDrivers) driverMap[d.id] = d;
 
       res.json({
         period: { month, year },
+        activePeriod,
+        currentClosing,
+        closingsHistory,
         salaries: monthSalaries.map((s) => ({
           ...s,
           baseSalary: Number(s.baseSalary),
@@ -1355,16 +1955,17 @@ async function startServer() {
 
   app.post('/api/finance/advances', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
     try {
-      const { driverId, amount, date, reason, paymentMethod, notes, idempotencyKey } = req.body;
-      if (!driverId || !amount || !date) {
-        return res.status(400).json({ error: 'السائق والمبلغ والتاريخ حقول مطلوبة' });
+      const { driverId, driverQuery, amount, date, reason, paymentMethod, notes, idempotencyKey } = req.body;
+      const resolvedDriver = await resolveDriverByIdOrQuery({ driverId, driverQuery });
+      if (!resolvedDriver || !amount || !date) {
+        return res.status(400).json({ error: 'يرجى كتابة اسم أو كود سائق مسجل والمبلغ والتاريخ' });
       }
       const result = await recordAdvanceTransaction({
-        driverId: Number(driverId),
+        driverId: resolvedDriver.id,
         amount: Number(amount),
         date: String(date),
-        reason: reason || 'سلفة نقدية',
-        paymentMethod: paymentMethod || 'cash',
+        reason: reason ? String(reason).trim() : '',
+        paymentMethod: paymentMethod ? String(paymentMethod).trim() : '',
         notes: notes || '',
         recordedByUserId: req.dbUser!.id,
         idempotencyKey: idempotencyKey ? String(idempotencyKey) : undefined,
@@ -1381,7 +1982,9 @@ async function startServer() {
     try {
       const {
         absentDriverId,
+        absentDriverQuery,
         replacementDriverId,
+        replacementQuery,
         replacementExternalName,
         vehicleId,
         schoolId,
@@ -1393,21 +1996,44 @@ async function startServer() {
         idempotencyKey,
       } = req.body;
 
-      if (!absentDriverId || !date) {
-        return res.status(400).json({ error: 'السائق الغائب والتاريخ حقول مطلوبة' });
+      const resolvedAbsent = await resolveDriverByIdOrQuery({
+        driverId: absentDriverId,
+        driverQuery: absentDriverQuery,
+      });
+      if (!resolvedAbsent || !date) {
+        return res.status(400).json({ error: 'يرجى كتابة اسم أو كود السائق الغائب والتاريخ' });
+      }
+
+      const repText = String(replacementQuery || replacementExternalName || '').trim();
+      const resolvedRep = replacementDriverId
+        ? await resolveDriverByIdOrQuery({ driverId: replacementDriverId })
+        : repText
+        ? await resolveDriverByIdOrQuery({ driverQuery: repText })
+        : null;
+
+      let nextVehicleId = vehicleId ? Number(vehicleId) : null;
+      let nextSchoolId = schoolId ? Number(schoolId) : null;
+      if (!nextVehicleId || !nextSchoolId) {
+        const [assign] = await db
+          .select()
+          .from(driverAssignments)
+          .where(and(eq(driverAssignments.driverId, resolvedAbsent.id), eq(driverAssignments.isCurrent, true)))
+          .limit(1);
+        if (!nextVehicleId) nextVehicleId = assign?.vehicleId ?? null;
+        if (!nextSchoolId) nextSchoolId = assign?.schoolId ?? null;
       }
 
       const executeCoverage = () =>
         recordCoverageTransaction({
-          absentDriverId: Number(absentDriverId),
-          replacementDriverId: replacementDriverId ? Number(replacementDriverId) : null,
-          replacementExternalName: replacementExternalName || '',
-          vehicleId: vehicleId ? Number(vehicleId) : null,
-          schoolId: schoolId ? Number(schoolId) : null,
+          absentDriverId: resolvedAbsent.id,
+          replacementDriverId: resolvedRep ? resolvedRep.id : null,
+          replacementExternalName: resolvedRep ? '' : repText,
+          vehicleId: nextVehicleId,
+          schoolId: nextSchoolId,
           date: String(date),
           actualReplacementCost: Number(actualReplacementCost || 0),
           absentDriverDeduction: Number(absentDriverDeduction || 0),
-          reason: reason || 'تغطية غياب',
+          reason: reason ? String(reason).trim() : '',
           notes: notes || '',
           recordedByUserId: req.dbUser!.id,
           idempotencyKey: idempotencyKey ? String(idempotencyKey) : undefined,
@@ -1428,15 +2054,16 @@ async function startServer() {
 
   app.post('/api/finance/adjustments', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
     try {
-      const { driverId, month, year, type, amount, description } = req.body;
-      if (!driverId || !type || !amount || !description) {
-        return res.status(400).json({ error: 'جميع الحقول مطلوبة لتسجيل التسوية' });
+      const { driverId, driverQuery, month, year, type, amount, description } = req.body;
+      const resolvedDriver = await resolveDriverByIdOrQuery({ driverId, driverQuery });
+      if (!resolvedDriver || !type || !amount || !description) {
+        return res.status(400).json({ error: 'يرجى كتابة السائق والنوع والمبلغ والبيان' });
       }
       if (type !== 'bonus' && type !== 'other_deduction') {
         return res.status(400).json({ error: 'نوع التسوية غير صحيح' });
       }
       const result = await recordAdjustmentTransaction({
-        driverId: Number(driverId),
+        driverId: resolvedDriver.id,
         month: Number(month) || new Date().getMonth() + 1,
         year: Number(year) || new Date().getFullYear(),
         type,
@@ -1448,6 +2075,156 @@ async function startServer() {
       res.status(201).json(result);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'تعذر تسجيل التسوية المالية';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.patch('/api/finance/adjustments/:id', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { type, amount, description } = req.body;
+      if (!id || !amount || (type !== 'bonus' && type !== 'other_deduction')) {
+        return res.status(400).json({ error: 'بيانات تعديل التسوية غير مكتملة' });
+      }
+      const result = await updateAdjustmentTransaction({
+        id,
+        type,
+        amount: Number(amount),
+        description: String(description || ''),
+        recordedByUserId: req.dbUser!.id,
+        ipAddress: req.ip || '',
+      });
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر تعديل التسوية المالية';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/finance/adjustments/:id', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: 'معرف التسوية غير صالح' });
+      const result = await deleteAdjustmentTransaction({
+        id,
+        recordedByUserId: req.dbUser!.id,
+        ipAddress: req.ip || '',
+      });
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر حذف التسوية المالية';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.patch('/api/finance/advances/:id', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { amount, date, reason, paymentMethod, notes } = req.body;
+      if (!id || !amount || !date) {
+        return res.status(400).json({ error: 'بيانات تعديل السلفة غير مكتملة' });
+      }
+      const result = await updateAdvanceTransaction({
+        id,
+        amount: Number(amount),
+        date: String(date),
+        reason: reason !== undefined ? String(reason).trim() : '',
+        paymentMethod: paymentMethod !== undefined ? String(paymentMethod).trim() : '',
+        notes: notes !== undefined ? String(notes) : '',
+        recordedByUserId: req.dbUser!.id,
+        ipAddress: req.ip || '',
+      });
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر تعديل السلفة';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/finance/advances/:id', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: 'معرف السلفة غير صالح' });
+      const result = await deleteAdvanceTransaction({
+        id,
+        recordedByUserId: req.dbUser!.id,
+        ipAddress: req.ip || '',
+      });
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر حذف السلفة';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.patch('/api/finance/coverage/:id', requireAuth, requireAdminOrStaff, requireAnyPermission(['finance:write', 'coverage:write']), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const {
+        replacementDriverId,
+        replacementQuery,
+        replacementExternalName,
+        date,
+        actualReplacementCost,
+        absentDriverDeduction,
+        reason,
+        notes,
+      } = req.body;
+      if (!id || !date) {
+        return res.status(400).json({ error: 'بيانات تعديل التغطية غير مكتملة' });
+      }
+      const repText = String(replacementQuery ?? replacementExternalName ?? '').trim();
+      const resolvedRep = replacementDriverId
+        ? await resolveDriverByIdOrQuery({ driverId: replacementDriverId })
+        : repText
+        ? await resolveDriverByIdOrQuery({ driverQuery: repText })
+        : null;
+
+      const executeUpdate = () =>
+        updateCoverageTransaction({
+          id,
+          replacementDriverId: resolvedRep ? resolvedRep.id : null,
+          replacementExternalName: resolvedRep ? '' : repText,
+          date: String(date),
+          actualReplacementCost: Number(actualReplacementCost || 0),
+          absentDriverDeduction: Number(absentDriverDeduction || 0),
+          reason: reason !== undefined ? String(reason).trim() : '',
+          notes: notes !== undefined ? String(notes) : '',
+          recordedByUserId: req.dbUser!.id,
+          ipAddress: req.ip || '',
+        });
+
+      const result =
+        req.dbUser?.roleSlug === 'movement_manager'
+          ? await runWithRlsContext({ role: 'system', driverId: null }, executeUpdate)
+          : await executeUpdate();
+
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر تعديل سجل التغطية';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/finance/coverage/:id', requireAuth, requireAdminOrStaff, requireAnyPermission(['finance:write', 'coverage:write']), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: 'معرف التغطية غير صالح' });
+      const executeDelete = () =>
+        deleteCoverageTransaction({
+          id,
+          recordedByUserId: req.dbUser!.id,
+          ipAddress: req.ip || '',
+        });
+
+      const result =
+        req.dbUser?.roleSlug === 'movement_manager'
+          ? await runWithRlsContext({ role: 'system', driverId: null }, executeDelete)
+          : await executeDelete();
+
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر حذف سجل التغطية';
       res.status(400).json({ error: msg });
     }
   });
@@ -1469,6 +2246,279 @@ async function startServer() {
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'تعذر تنفيذ قيد العكس';
       res.status(400).json({ error: msg });
+    }
+  });
+
+  // 5b. Non-Driver Employees Management (الموظفون غير السائقين - نشطون فقط)
+  app.get('/api/employees', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const includeArchived = req.query.includeArchived === 'true';
+      const rows = await db.select().from(employees).orderBy(employees.fullName);
+      const visible = includeArchived ? rows : rows.filter((e) => e.status === 'active');
+      res.json({
+        employees: visible.map((e) => ({
+          ...e,
+          monthlySalary: Number(e.monthlySalary || 0),
+          bonuses: Number(e.bonuses || 0),
+          deductions: Number(e.deductions || 0),
+          netSalary:
+            Number(e.monthlySalary || 0) + Number(e.bonuses || 0) - Number(e.deductions || 0),
+        })),
+      });
+    } catch (error) {
+      console.error('Get employees error:', error);
+      res.status(500).json({ error: 'تعذر تحميل بيانات الموظفين' });
+    }
+  });
+
+  // 5c. Dedicated Archive Management (الأرشفة)
+  app.get('/api/archive', requireAuth, requireAdminOrStaff, async (_req: AuthRequest, res) => {
+    try {
+      const allDrivers = await getEnrichedDrivers();
+      const archivedDrivers = allDrivers.filter((d) => d.accountStatus !== 'active');
+
+      const allEmployees = await db.select().from(employees).orderBy(employees.fullName);
+      const archivedEmployees = allEmployees
+        .filter((e) => e.status !== 'active')
+        .map((e) => ({
+          ...e,
+          monthlySalary: Number(e.monthlySalary || 0),
+          bonuses: Number(e.bonuses || 0),
+          deductions: Number(e.deductions || 0),
+          netSalary:
+            Number(e.monthlySalary || 0) + Number(e.bonuses || 0) - Number(e.deductions || 0),
+        }));
+
+      const allVehicles = await getFleetWithLatestGps();
+      const archivedVehicles = allVehicles.filter((v) => v.operationalStatus === 'inactive');
+
+      const allSchools = await db.select().from(schools).orderBy(schools.name);
+      const archivedSchools = allSchools.filter((s) => !s.isActive);
+
+      res.json({
+        drivers: archivedDrivers,
+        employees: archivedEmployees,
+        vehicles: archivedVehicles,
+        schools: archivedSchools,
+      });
+    } catch (error) {
+      console.error('Get archive error:', error);
+      res.status(500).json({ error: 'تعذر تحميل بيانات الأرشفة' });
+    }
+  });
+
+  app.post('/api/archive/drivers/:id/restore', requireAuth, requireAdminOrStaff, requirePermission('drivers:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [updated] = await db
+        .update(drivers)
+        .set({ accountStatus: 'active' })
+        .where(eq(drivers.id, id))
+        .returning();
+      if (!updated) return res.status(404).json({ error: 'السائق غير موجود' });
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'RESTORE_DRIVER_FROM_ARCHIVE',
+        entityType: 'drivers',
+        entityId: String(id),
+        afterJson: updated,
+        ipAddress: req.ip || '',
+      });
+      res.json({ driver: updated });
+    } catch (error) {
+      console.error('Restore driver error:', error);
+      res.status(500).json({ error: 'تعذر استعادة السائق من الأرشفة' });
+    }
+  });
+
+  app.post('/api/archive/employees/:id/restore', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [updated] = await db
+        .update(employees)
+        .set({ status: 'active' })
+        .where(eq(employees.id, id))
+        .returning();
+      if (!updated) return res.status(404).json({ error: 'الموظف غير موجود' });
+      res.json({ employee: updated });
+    } catch (error) {
+      res.status(500).json({ error: 'تعذر استعادة الموظف من الأرشفة' });
+    }
+  });
+
+  app.post('/api/archive/vehicles/:id/restore', requireAuth, requireAdminOrStaff, requirePermission('vehicles:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [updated] = await db
+        .update(vehicles)
+        .set({ operationalStatus: 'active' })
+        .where(eq(vehicles.id, id))
+        .returning();
+      if (!updated) return res.status(404).json({ error: 'المركبة غير موجودة' });
+      res.json({ vehicle: updated });
+    } catch (error) {
+      res.status(500).json({ error: 'تعذر استعادة المركبة' });
+    }
+  });
+
+  app.post('/api/archive/schools/:id/restore', requireAuth, requireAdminOrStaff, requirePermission('schools:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [updated] = await db
+        .update(schools)
+        .set({ isActive: true })
+        .where(eq(schools.id, id))
+        .returning();
+      if (!updated) return res.status(404).json({ error: 'المدرسة غير موجودة' });
+      res.json({ school: updated });
+    } catch (error) {
+      res.status(500).json({ error: 'تعذر استعادة المدرسة' });
+    }
+  });
+
+  app.post('/api/employees', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const {
+        employeeCode,
+        fullName,
+        jobTitle,
+        phone,
+        monthlySalary,
+        bonuses,
+        deductions,
+        employmentStartDate,
+        status,
+        notes,
+      } = req.body;
+      const trimmedName = String(fullName || '').trim();
+      if (!trimmedName) {
+        return res.status(400).json({ error: 'اسم الموظف مطلوب' });
+      }
+      const [created] = await db
+        .insert(employees)
+        .values({
+          employeeCode: String(employeeCode || '').trim(),
+          fullName: trimmedName,
+          jobTitle: String(jobTitle || '').trim(),
+          phone: String(phone || '').trim(),
+          monthlySalary: Number(monthlySalary || 0).toFixed(2),
+          bonuses: Number(bonuses || 0).toFixed(2),
+          deductions: Number(deductions || 0).toFixed(2),
+          employmentStartDate: String(employmentStartDate || ''),
+          status: status === 'inactive' ? 'inactive' : 'active',
+          notes: String(notes || ''),
+        })
+        .returning();
+
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'CREATE_EMPLOYEE',
+        entityType: 'employees',
+        entityId: String(created.id),
+        afterJson: created,
+        ipAddress: req.ip || '',
+      });
+
+      res.status(201).json({
+        employee: {
+          ...created,
+          monthlySalary: Number(created.monthlySalary || 0),
+          bonuses: Number(created.bonuses || 0),
+          deductions: Number(created.deductions || 0),
+          netSalary:
+            Number(created.monthlySalary || 0) +
+            Number(created.bonuses || 0) -
+            Number(created.deductions || 0),
+        },
+      });
+    } catch (error) {
+      console.error('Create employee error:', error);
+      res.status(500).json({ error: 'تعذر إضافة الموظف' });
+    }
+  });
+
+  app.patch('/api/employees/:id', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [existing] = await db.select().from(employees).where(eq(employees.id, id)).limit(1);
+      if (!existing) return res.status(404).json({ error: 'الموظف غير موجود' });
+
+      const {
+        employeeCode,
+        fullName,
+        jobTitle,
+        phone,
+        monthlySalary,
+        bonuses,
+        deductions,
+        employmentStartDate,
+        status,
+        notes,
+      } = req.body;
+
+      const [updated] = await db
+        .update(employees)
+        .set({
+          employeeCode:
+            employeeCode !== undefined ? String(employeeCode).trim() : existing.employeeCode,
+          fullName: fullName !== undefined ? String(fullName).trim() : existing.fullName,
+          jobTitle: jobTitle !== undefined ? String(jobTitle).trim() : existing.jobTitle,
+          phone: phone !== undefined ? String(phone).trim() : existing.phone,
+          monthlySalary:
+            monthlySalary !== undefined
+              ? Number(monthlySalary || 0).toFixed(2)
+              : existing.monthlySalary,
+          bonuses:
+            bonuses !== undefined ? Number(bonuses || 0).toFixed(2) : existing.bonuses,
+          deductions:
+            deductions !== undefined ? Number(deductions || 0).toFixed(2) : existing.deductions,
+          employmentStartDate:
+            employmentStartDate !== undefined
+              ? String(employmentStartDate)
+              : existing.employmentStartDate,
+          status: status !== undefined ? String(status) : existing.status,
+          notes: notes !== undefined ? String(notes) : existing.notes,
+          updatedAt: new Date(),
+        })
+        .where(eq(employees.id, id))
+        .returning();
+
+      res.json({
+        employee: {
+          ...updated,
+          monthlySalary: Number(updated.monthlySalary || 0),
+          bonuses: Number(updated.bonuses || 0),
+          deductions: Number(updated.deductions || 0),
+          netSalary:
+            Number(updated.monthlySalary || 0) +
+            Number(updated.bonuses || 0) -
+            Number(updated.deductions || 0),
+        },
+      });
+    } catch (error) {
+      console.error('Update employee error:', error);
+      res.status(500).json({ error: 'تعذر تحديث بيانات الموظف' });
+    }
+  });
+
+  app.delete('/api/employees/:id', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const [existing] = await db.select().from(employees).where(eq(employees.id, id)).limit(1);
+      if (!existing) return res.status(404).json({ error: 'الموظف غير موجود' });
+      await db.delete(employees).where(eq(employees.id, id));
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'DELETE_EMPLOYEE',
+        entityType: 'employees',
+        entityId: String(id),
+        beforeJson: existing,
+        ipAddress: req.ip || '',
+      });
+      res.json({ ok: true, deletedId: id });
+    } catch (error) {
+      console.error('Delete employee error:', error);
+      res.status(500).json({ error: 'تعذر حذف الموظف' });
     }
   });
 
@@ -1499,6 +2549,75 @@ async function startServer() {
     } catch (error) {
       console.error('Salary status error:', error);
       res.status(500).json({ error: 'تعذر تحديث حالة الراتب' });
+    }
+  });
+
+  // 5d. Monthly Settlement / Closing & Fresh-Month Rollover (التصفية الشهرية وبدء شهر جديد على بياض)
+  app.get('/api/finance/period', requireAuth, async (_req: AuthRequest, res) => {
+    try {
+      const activePeriod = await getActiveBillingPeriod();
+      res.json({ activePeriod });
+    } catch (error) {
+      res.status(500).json({ error: 'تعذر قراءة الشهر المالي المفتوح' });
+    }
+  });
+
+  app.get('/api/finance/closings', requireAuth, requireAdminOrStaff, requirePermission('finance:read'), async (_req: AuthRequest, res) => {
+    try {
+      const [activePeriod, closings] = await Promise.all([
+        getActiveBillingPeriod(),
+        getMonthlyClosingsHistory(),
+      ]);
+      res.json({ activePeriod, closings });
+    } catch (error) {
+      console.error('Closings history error:', error);
+      res.status(500).json({ error: 'تعذر تحميل سجل التصفيات الشهرية' });
+    }
+  });
+
+  app.post('/api/finance/close-month', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+    try {
+      const activePeriod = await getActiveBillingPeriod();
+      const month = Number(req.body?.month) || activePeriod.month;
+      const year = Number(req.body?.year) || activePeriod.year;
+      const markAllPaid = req.body?.markAllPaid !== false;
+      const notes = String(req.body?.notes || '').trim();
+
+      const result = await closeMonthAndStartNext({
+        month,
+        year,
+        markAllPaid,
+        notes,
+        recordedByUserId: req.dbUser!.id,
+        ipAddress: req.ip || '',
+      });
+
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر تنفيذ التصفية الشهرية';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.post('/api/finance/reset-month', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+    try {
+      const activePeriod = await getActiveBillingPeriod();
+      const month = Number(req.body?.month) || activePeriod.month;
+      const year = Number(req.body?.year) || activePeriod.year;
+      const resetEmployees = req.body?.resetEmployees !== false;
+
+      const result = await resetMonthFinancials({
+        month,
+        year,
+        resetEmployees,
+        recordedByUserId: req.dbUser!.id,
+        ipAddress: req.ip || '',
+      });
+
+      res.json(result);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'تعذر تصفير مالية الشهر';
+      res.status(400).json({ error: msg });
     }
   });
 
@@ -1544,7 +2663,9 @@ async function startServer() {
   // 7. Live GPS Tracking
   app.get('/api/gps/fleet', requireAuth, requireAdminOrStaff, requirePermission('gps:read'), async (_req: AuthRequest, res) => {
     try {
-      const fleet = await getFleetWithLatestGps();
+      const fleet = (await getFleetWithLatestGps()).filter(
+        (v) => v.operationalStatus !== 'inactive'
+      );
       res.json({ fleet });
     } catch (error) {
       console.error('GPS fleet error:', error);
@@ -1602,7 +2723,7 @@ async function startServer() {
           .from(driverAssignments)
           .where(and(eq(driverAssignments.driverId, req.driverRecord.id), eq(driverAssignments.isCurrent, true)))
           .limit(1);
-        if (!assign) {
+        if (!assign || !assign.vehicleId) {
           return res.status(400).json({ error: 'لم يتم تعيين مركبة لك بعد' });
         }
         targetVehicleId = assign.vehicleId;
@@ -1668,6 +2789,8 @@ async function startServer() {
         userMessage = 'تم تجاوز حصة طلبات الذكاء الاصطناعي مؤقتاً. يمكنك استخدام زر الإملاء الفوري أو كتابة الأمر.';
       } else if (detail.includes('400') || detail.includes('INVALID_ARGUMENT')) {
         userMessage = 'صيغة الملف الصوتي غير مدعومة من الخادم. جرب الإملاء الفوري أو أعد التسجيل.';
+      } else if (detail.includes('timed out') || detail.includes('503') || detail.includes('UNAVAILABLE')) {
+        userMessage = 'خدمة تحويل الصوت مشغولة أو بطيئة حالياً، يرجى إعادة المحاولة أو استخدام الإملاء الفوري.';
       }
       res.status(500).json({ error: userMessage });
     }
@@ -1681,7 +2804,8 @@ async function startServer() {
       }
 
       const todayDate = getTodayDateString();
-      const enrichedDrivers = await getEnrichedDrivers();
+      const allEnrichedDrivers = await getEnrichedDrivers();
+      const enrichedDrivers = allEnrichedDrivers.filter((d) => d.accountStatus === 'active');
       const allSchools = await db.select().from(schools);
 
       const interpreted = await interpretEgyptianCommand(String(transcript), {
@@ -1839,6 +2963,197 @@ async function startServer() {
           requiresConfirmation = false;
           finalReply = `لم أتمكن من مطابقة السائق (${interpreted.driverCode || interpreted.driverNameQuery}) في قاعدة البيانات. برجاء تحديد كود السائق أو اسمه بدقة.`;
         } else if (
+          interpreted.intent === 'edit_advance' ||
+          interpreted.intent === 'delete_advance'
+        ) {
+          const driverAdvances = await db
+            .select()
+            .from(advances)
+            .where(and(eq(advances.driverId, matchedDriver.id), eq(advances.isReversed, false)))
+            .orderBy(desc(advances.date), desc(advances.id))
+            .limit(12);
+
+          if (driverAdvances.length === 0) {
+            requiresConfirmation = false;
+            finalReply = `السائق ${matchedDriver.fullName} معندوش أي سلف مسجلة حالياً لتعديلها أو حذفها.`;
+          } else {
+            const targetAdvance =
+              (interpreted.targetDate
+                ? driverAdvances.find((a) => a.date === interpreted.targetDate)
+                : undefined) ||
+              (interpreted.oldAmount > 0
+                ? driverAdvances.find((a) => Number(a.amount) === interpreted.oldAmount)
+                : undefined) ||
+              driverAdvances[0];
+
+            const sal = await recalculateDriverSalary(db, matchedDriver.id, month, year);
+            const currentNet = Number(sal.netSalary);
+            const currentAdvAmt = Number(targetAdvance.amount);
+            const nextAmt =
+              interpreted.intent === 'delete_advance'
+                ? 0
+                : interpreted.amount > 0
+                ? Number(interpreted.amount)
+                : currentAdvAmt;
+            const projectedNet = currentNet + currentAdvAmt - nextAmt;
+
+            const availableAdvances = driverAdvances.map((a) => ({
+              id: a.id,
+              amount: Number(a.amount),
+              date: a.date,
+              reason: a.reason || '',
+              paymentMethod: a.paymentMethod || 'cash',
+            }));
+
+            queryResult = {
+              type: 'pending_confirmation',
+              driver: matchedDriver,
+              currentNetSalary: currentNet,
+              projectedNetSalary: projectedNet,
+              availableAdvances,
+              payload: {
+                intent: interpreted.intent,
+                targetRecordId: targetAdvance.id,
+                driverId: matchedDriver.id,
+                driverCode: matchedDriver.driverCode,
+                driverName: matchedDriver.fullName,
+                schoolId: matchedDriver.schoolId,
+                schoolName: matchedDriver.schoolName,
+                vehicleId: matchedDriver.vehicleId,
+                busNumber: matchedDriver.busNumber,
+                amount: interpreted.intent === 'delete_advance' ? currentAdvAmt : nextAmt,
+                actualReplacementCost: 0,
+                absentDriverDeduction: 0,
+                date:
+                  interpreted.date && interpreted.date !== todayDate
+                    ? interpreted.date
+                    : targetAdvance.date,
+                reason:
+                  interpreted.reason && interpreted.reason !== 'أمر صوتي من المدير'
+                    ? interpreted.reason
+                    : targetAdvance.reason || '',
+                paymentMethod:
+                  interpreted.paymentMethod || targetAdvance.paymentMethod || 'cash',
+              },
+            };
+
+            finalReply =
+              interpreted.intent === 'delete_advance'
+                ? `جاهز لحذف سلفة ${currentAdvAmt.toLocaleString('ar-EG')} جنيه بتاريخ ${targetAdvance.date} للسائق ${matchedDriver.fullName}. اضغط تأكيد الحذف لإرجاع المبلغ لصافي الراتب.`
+                : `جاهز لتعديل سلفة السائق ${matchedDriver.fullName} (بتاريخ ${targetAdvance.date} — كانت ${currentAdvAmt.toLocaleString('ar-EG')} جنيه) إلى ${nextAmt.toLocaleString('ar-EG')} جنيه. يمكنك تعديل أي خانة ثم الضغط على تأكيد.`;
+          }
+        } else if (
+          interpreted.intent === 'edit_coverage' ||
+          interpreted.intent === 'delete_coverage'
+        ) {
+          const driverCoverages = await db
+            .select()
+            .from(coverageRecords)
+            .where(
+              and(
+                eq(coverageRecords.absentDriverId, matchedDriver.id),
+                eq(coverageRecords.isReversed, false)
+              )
+            )
+            .orderBy(desc(coverageRecords.date), desc(coverageRecords.id))
+            .limit(12);
+
+          if (driverCoverages.length === 0) {
+            requiresConfirmation = false;
+            finalReply = `السائق ${matchedDriver.fullName} معندوش أي تغطيات غياب مسجلة حالياً لتعديلها أو حذفها.`;
+          } else {
+            const targetCoverage =
+              (interpreted.targetDate
+                ? driverCoverages.find((c) => c.date === interpreted.targetDate)
+                : undefined) ||
+              (interpreted.oldAmount > 0
+                ? driverCoverages.find(
+                    (c) => Number(c.absentDriverDeduction) === interpreted.oldAmount
+                  )
+                : undefined) ||
+              driverCoverages[0];
+
+            const driverNameMap: Record<number, string> = {};
+            for (const d of allEnrichedDrivers) driverNameMap[d.id] = d.fullName;
+
+            const existingRepName = targetCoverage.replacementDriverId
+              ? driverNameMap[targetCoverage.replacementDriverId] || ''
+              : targetCoverage.replacementExternalName || '';
+
+            const sal = await recalculateDriverSalary(db, matchedDriver.id, month, year);
+            const currentNet = Number(sal.netSalary);
+            const oldDeduction = Number(targetCoverage.absentDriverDeduction);
+            const nextDeduction =
+              interpreted.intent === 'delete_coverage'
+                ? 0
+                : interpreted.absentDriverDeduction > 0
+                ? Number(interpreted.absentDriverDeduction)
+                : interpreted.amount > 0
+                ? Number(interpreted.amount)
+                : oldDeduction;
+            const nextCost =
+              interpreted.intent === 'delete_coverage'
+                ? 0
+                : interpreted.actualReplacementCost > 0
+                ? Number(interpreted.actualReplacementCost)
+                : interpreted.amount > 0
+                ? Number(interpreted.amount)
+                : Number(targetCoverage.actualReplacementCost);
+            const projectedNet = currentNet + oldDeduction - nextDeduction;
+
+            const availableCoverages = driverCoverages.map((c) => ({
+              id: c.id,
+              date: c.date,
+              actualReplacementCost: Number(c.actualReplacementCost),
+              absentDriverDeduction: Number(c.absentDriverDeduction),
+              reason: c.reason || '',
+              replacementName: c.replacementDriverId
+                ? driverNameMap[c.replacementDriverId] || '—'
+                : c.replacementExternalName || '',
+            }));
+
+            queryResult = {
+              type: 'pending_confirmation',
+              driver: matchedDriver,
+              currentNetSalary: currentNet,
+              projectedNetSalary: projectedNet,
+              availableCoverages,
+              payload: {
+                intent: interpreted.intent,
+                targetRecordId: targetCoverage.id,
+                driverId: matchedDriver.id,
+                driverCode: matchedDriver.driverCode,
+                driverName: matchedDriver.fullName,
+                schoolId: matchedDriver.schoolId,
+                schoolName: matchedDriver.schoolName,
+                vehicleId: matchedDriver.vehicleId,
+                busNumber: matchedDriver.busNumber,
+                replacementQuery: interpreted.replacementDriverQuery || existingRepName,
+                amount: nextDeduction,
+                actualReplacementCost:
+                  interpreted.intent === 'delete_coverage'
+                    ? Number(targetCoverage.actualReplacementCost)
+                    : nextCost,
+                absentDriverDeduction:
+                  interpreted.intent === 'delete_coverage' ? oldDeduction : nextDeduction,
+                date:
+                  interpreted.date && interpreted.date !== todayDate
+                    ? interpreted.date
+                    : targetCoverage.date,
+                reason:
+                  interpreted.reason && interpreted.reason !== 'أمر صوتي من المدير'
+                    ? interpreted.reason
+                    : targetCoverage.reason || '',
+                paymentMethod: 'cash',
+              },
+            };
+
+            finalReply =
+              interpreted.intent === 'delete_coverage'
+                ? `جاهز لحذف سجل التغطية بتاريخ ${targetCoverage.date} للسائق ${matchedDriver.fullName} (خصم ${oldDeduction.toLocaleString('ar-EG')} جنيه). اضغط تأكيد للتنفيذ.`
+                : `جاهز لتعديل تغطية السائق ${matchedDriver.fullName} بتاريخ ${targetCoverage.date}. راجع تكلفة البديل والخصم واضغط تأكيد للحفظ.`;
+          }
+        } else if (
           (interpreted.intent === 'record_advance' ||
             interpreted.intent === 'record_bonus' ||
             interpreted.intent === 'record_deduction') &&
@@ -1984,6 +3299,65 @@ async function startServer() {
           ipAddress: req.ip || '',
         });
         actionSummary = `تم تسجيل التسوية بنجاح للسائق ${payload.driverName}. صافي الراتب المحدث: ${Number(result.salary.netSalary).toLocaleString('ar-EG')} جنيه.`;
+      } else if (payload.intent === 'edit_advance') {
+        if (!payload.targetRecordId) {
+          return res.status(400).json({ error: 'لم يتم تحديد سجل السلفة المطلوب تعديله' });
+        }
+        const result = await updateAdvanceTransaction({
+          id: Number(payload.targetRecordId),
+          amount: Number(payload.amount),
+          date: String(payload.date || getTodayDateString()),
+          reason: String(payload.reason || ''),
+          paymentMethod: String(payload.paymentMethod || 'cash'),
+          notes: 'تم التعديل عبر المساعد الصوتي بعد تأكيد المدير',
+          recordedByUserId: req.dbUser!.id,
+          ipAddress: req.ip || '',
+        });
+        actionSummary = `تم تعديل السلفة بنجاح إلى ${Number(payload.amount).toLocaleString('ar-EG')} جنيه للسائق ${payload.driverName}. صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
+      } else if (payload.intent === 'delete_advance') {
+        if (!payload.targetRecordId) {
+          return res.status(400).json({ error: 'لم يتم تحديد سجل السلفة المطلوب حذفه' });
+        }
+        const result = await deleteAdvanceTransaction({
+          id: Number(payload.targetRecordId),
+          recordedByUserId: req.dbUser!.id,
+          ipAddress: req.ip || '',
+        });
+        actionSummary = `تم حذف السلفة بنجاح للسائق ${payload.driverName}. صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
+      } else if (payload.intent === 'edit_coverage') {
+        if (!payload.targetRecordId) {
+          return res.status(400).json({ error: 'لم يتم تحديد سجل التغطية المطلوب تعديله' });
+        }
+        const repText = String(payload.replacementQuery || payload.replacementExternalName || '').trim();
+        const resolvedRep = payload.replacementDriverId
+          ? await resolveDriverByIdOrQuery({ driverId: payload.replacementDriverId })
+          : repText
+          ? await resolveDriverByIdOrQuery({ driverQuery: repText })
+          : null;
+
+        const result = await updateCoverageTransaction({
+          id: Number(payload.targetRecordId),
+          replacementDriverId: resolvedRep ? resolvedRep.id : null,
+          replacementExternalName: resolvedRep ? '' : repText,
+          date: String(payload.date || getTodayDateString()),
+          actualReplacementCost: Number(payload.actualReplacementCost || 0),
+          absentDriverDeduction: Number(payload.absentDriverDeduction || 0),
+          reason: String(payload.reason || ''),
+          notes: 'تم التعديل عبر المساعد الصوتي بعد تأكيد المدير',
+          recordedByUserId: req.dbUser!.id,
+          ipAddress: req.ip || '',
+        });
+        actionSummary = `تم تعديل سجل التغطية للسائق ${payload.driverName} بنجاح (الخصم ${Number(payload.absentDriverDeduction || 0).toLocaleString('ar-EG')} جنيه). صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
+      } else if (payload.intent === 'delete_coverage') {
+        if (!payload.targetRecordId) {
+          return res.status(400).json({ error: 'لم يتم تحديد سجل التغطية المطلوب حذفه' });
+        }
+        const result = await deleteCoverageTransaction({
+          id: Number(payload.targetRecordId),
+          recordedByUserId: req.dbUser!.id,
+          ipAddress: req.ip || '',
+        });
+        actionSummary = `تم حذف سجل التغطية بنجاح للسائق ${payload.driverName}. صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
       } else {
         return res.status(400).json({ error: 'نوع العملية غير مدعوم للتنفيذ' });
       }
@@ -2059,14 +3433,20 @@ async function startServer() {
 
   app.post('/api/notifications/announcement', requireAuth, requireAdminOrStaff, requirePermission('*'), async (req: AuthRequest, res) => {
     try {
-      const { title, body, driverId } = req.body;
+      const { title, body, driverId, driverQuery } = req.body;
       if (!title || !body) return res.status(400).json({ error: 'العنوان ونص الإشعار مطلوبان' });
 
-      if (driverId) {
+      const q = String(driverQuery || '').trim();
+      if (driverId || q) {
+        const target = await resolveDriverByIdOrQuery({ driverId, driverQuery: q });
+        if (!target) {
+          return res.status(404).json({ error: 'لم يتم العثور على السائق بهذا الاسم أو الكود' });
+        }
         const [n] = await db
           .insert(notifications)
           .values({
-            recipientDriverId: Number(driverId),
+            recipientDriverId: target.id,
+            recipientUserId: target.userId || null,
             type: 'announcement',
             title,
             body,
@@ -2173,19 +3553,37 @@ async function startServer() {
   // 11. Reports Summary
   app.get('/api/reports/summary', requireAuth, requireAdminOrStaff, requirePermission('reports:read'), async (req: AuthRequest, res) => {
     try {
-      const month = Number(req.query.month) || new Date().getMonth() + 1;
-      const year = Number(req.query.year) || new Date().getFullYear();
+      const activePeriod = await getActiveBillingPeriod();
+      const month = Number(req.query.month) || activePeriod.month;
+      const year = Number(req.query.year) || activePeriod.year;
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
 
-      const enrichedDrivers = await getEnrichedDrivers();
-      for (const d of enrichedDrivers) {
-        await recalculateDriverSalary(db, d.id, month, year);
+      const [closingRow] = await db
+        .select({ id: monthlyClosings.id })
+        .from(monthlyClosings)
+        .where(and(eq(monthlyClosings.month, month), eq(monthlyClosings.year, year)))
+        .limit(1);
+
+      const allDrivers = await getEnrichedDrivers();
+      const activeDrivers = allDrivers.filter((d) => d.accountStatus === 'active');
+      if (!closingRow) {
+        for (const d of activeDrivers) {
+          await recalculateDriverSalary(db, d.id, month, year);
+        }
       }
 
-      const monthSalaries = await db
+      const rawMonthSalaries = await db
         .select()
         .from(salaries)
         .where(and(eq(salaries.month, month), eq(salaries.year, year)));
+      const activeIds = new Set(activeDrivers.map((d) => d.id));
+      const monthSalaries = closingRow
+        ? rawMonthSalaries
+        : rawMonthSalaries.filter((s) => activeIds.has(s.driverId));
+      const reportDriverIds = new Set(monthSalaries.map((s) => s.driverId));
+      const enrichedDrivers = closingRow
+        ? allDrivers.filter((d) => reportDriverIds.has(d.id) || d.accountStatus === 'active')
+        : activeDrivers;
       const monthAdvances = await db
         .select()
         .from(advances)
@@ -2220,8 +3618,9 @@ async function startServer() {
   // 12. Driver Mobile App Endpoints (Strict Data Isolation!)
   app.get('/api/driver-app/me', requireAuth, async (req: AuthRequest, res) => {
     try {
-      const month = Number(req.query.month) || new Date().getMonth() + 1;
-      const year = Number(req.query.year) || new Date().getFullYear();
+      const activePeriod = await getActiveBillingPeriod();
+      const month = Number(req.query.month) || activePeriod.month;
+      const year = Number(req.query.year) || activePeriod.year;
 
       // Security: Driver role is ALWAYS locked to their own authenticated driverRecord.
       // Super admin may pass ?asDriverId= to inspect/preview a specific driver's mobile experience.
@@ -2242,7 +3641,7 @@ async function startServer() {
       const driver = enrichedDrivers.find((d) => d.id === targetDriverId);
       if (!driver) return res.json({ linked: false, driver: null });
 
-      const salary = await recalculateDriverSalary(db, driver.id, month, year);
+      const salary = await getOrRecalculateDriverSalaryForRead(db, driver.id, month, year);
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
 
       const driverAdvances = await db
@@ -2355,7 +3754,7 @@ async function startServer() {
         .from(driverAssignments)
         .where(and(eq(driverAssignments.driverId, targetDriverId), eq(driverAssignments.isCurrent, true)))
         .limit(1);
-      if (!assign) return res.status(400).json({ error: 'لا توجد مركبة معينة' });
+      if (!assign || !assign.vehicleId) return res.status(400).json({ error: 'لا توجد مركبة معينة' });
 
       const newStatus = paused ? 'paused' : 'online';
       await db.update(vehicles).set({ gpsStatus: newStatus }).where(eq(vehicles.id, assign.vehicleId));
@@ -2373,6 +3772,126 @@ async function startServer() {
       res.json({ ok: true, gpsStatus: newStatus });
     } catch (error) {
       res.status(500).json({ error: 'تعذر تحديث حالة مشاركة الموقع' });
+    }
+  });
+
+  // Admin quick update for driver license photos
+  app.put(
+    '/api/drivers/:id/licenses',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('drivers:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const driverId = Number(req.params.id);
+        const [existing] = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
+        if (!existing) return res.status(404).json({ error: 'السائق غير موجود' });
+
+        let nextPhotos: DriverLicensePhoto[];
+        try {
+          nextPhotos = sanitizeLicensePhotos(req.body?.licensePhotos, 'admin');
+        } catch (err: unknown) {
+          return res.status(400).json({
+            error: err instanceof Error ? err.message : 'بيانات صور الرخص غير صالحة',
+          });
+        }
+
+        const [updated] = await db
+          .update(drivers)
+          .set({ licensePhotosJson: nextPhotos })
+          .where(eq(drivers.id, driverId))
+          .returning();
+
+        await db.insert(auditLogs).values({
+          actorUserId: req.dbUser!.id,
+          action: 'ADMIN_UPDATE_DRIVER_LICENSES',
+          entityType: 'drivers',
+          entityId: String(driverId),
+          afterJson: { count: nextPhotos.length },
+          ipAddress: req.ip || '',
+        });
+
+        res.json({ ok: true, licensePhotos: updated.licensePhotosJson });
+      } catch (error) {
+        console.error('Admin license update error:', error);
+        res.status(500).json({ error: 'تعذر حفظ صور الرخص' });
+      }
+    }
+  );
+
+  // Driver (or Super Admin previewing) self-service license photo upload/update
+  app.put('/api/driver-app/licenses', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'driver' && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'غير مصرح لك بتعديل صور الرخص' });
+      }
+
+      const isAdminActor = req.dbUser?.roleSlug === 'super_admin';
+      let targetDriverId: number | null = req.driverRecord?.id || null;
+      if (isAdminActor && req.body?.driverId) {
+        targetDriverId = Number(req.body.driverId);
+      }
+      if (!targetDriverId) {
+        return res.status(403).json({ error: 'حساب السائق غير مرتبط بملف' });
+      }
+
+      const defaultUploader: 'admin' | 'driver' = isAdminActor ? 'admin' : 'driver';
+      let nextPhotos: DriverLicensePhoto[];
+      try {
+        nextPhotos = sanitizeLicensePhotos(req.body?.licensePhotos, defaultUploader);
+      } catch (err: unknown) {
+        return res.status(400).json({
+          error: err instanceof Error ? err.message : 'بيانات صور الرخص غير صالحة',
+        });
+      }
+
+      const result = await runWithRlsContext({ role: 'system', driverId: targetDriverId }, async () => {
+        const [existing] = await db
+          .select()
+          .from(drivers)
+          .where(eq(drivers.id, targetDriverId))
+          .limit(1);
+        if (!existing) return null;
+
+        const prevCount = Array.isArray(existing.licensePhotosJson)
+          ? existing.licensePhotosJson.length
+          : 0;
+
+        const [updated] = await db
+          .update(drivers)
+          .set({ licensePhotosJson: nextPhotos })
+          .where(eq(drivers.id, targetDriverId))
+          .returning();
+
+        await db.insert(auditLogs).values({
+          actorUserId: req.dbUser!.id,
+          action: isAdminActor ? 'ADMIN_PREVIEW_UPDATE_LICENSES' : 'DRIVER_UPDATE_LICENSES',
+          entityType: 'drivers',
+          entityId: String(targetDriverId),
+          afterJson: { count: nextPhotos.length },
+          ipAddress: req.ip || '',
+        });
+
+        if (!isAdminActor && nextPhotos.length > prevCount) {
+          await db.insert(notifications).values({
+            targetRole: 'super_admin',
+            type: 'driver_document',
+            title: 'تم رفع صور رخصة جديدة',
+            body: `قام السائق ${existing.fullName} (كود ${existing.driverCode}) برفع صورة رخصة في ملفه (${nextPhotos.length} صورة محفوظة).`,
+          });
+        }
+
+        return updated;
+      });
+
+      if (!result) {
+        return res.status(404).json({ error: 'ملف السائق غير موجود' });
+      }
+
+      res.json({ ok: true, licensePhotos: result.licensePhotosJson });
+    } catch (error) {
+      console.error('Driver license update error:', error);
+      res.status(500).json({ error: 'تعذر حفظ صور الرخص' });
     }
   });
 

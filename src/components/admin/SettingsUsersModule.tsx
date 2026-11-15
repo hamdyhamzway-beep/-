@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Bell, Shield, Users } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
-import type { EnrichedDriver } from '../../types';
 
 interface UserItem {
   id: number;
@@ -33,22 +32,20 @@ export const SettingsUsersModule: React.FC = () => {
   const [usersList, setUsersList] = useState<UserItem[]>([]);
   const [rolesList, setRolesList] = useState<RoleItem[]>([]);
   const [auditList, setAuditList] = useState<AuditItem[]>([]);
-  const [driversList, setDriversList] = useState<EnrichedDriver[]>([]);
   const [announceTitle, setAnnounceTitle] = useState('');
   const [announceBody, setAnnounceBody] = useState('');
-  const [targetDriverId, setTargetDriverId] = useState('');
+  const [targetDriverQuery, setTargetDriverQuery] = useState('');
   const [sentMsg, setSentMsg] = useState<string | null>(null);
+  const [announceError, setAnnounceError] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
-    const [uRes, aRes, dRes] = await Promise.all([
+    const [uRes, aRes] = await Promise.all([
       apiFetch<{ users: UserItem[]; roles: RoleItem[] }>('/api/users'),
       apiFetch<{ logs: AuditItem[] }>('/api/audit-logs'),
-      apiFetch<{ drivers: EnrichedDriver[] }>('/api/drivers'),
     ]);
     setUsersList(uRes.users);
     setRolesList(uRes.roles);
     setAuditList(aRes.logs);
-    setDriversList(dRes.drivers);
   }, []);
 
   useEffect(() => {
@@ -66,17 +63,23 @@ export const SettingsUsersModule: React.FC = () => {
   const handleSendAnnouncement = async (e: React.FormEvent) => {
     e.preventDefault();
     setSentMsg(null);
-    await apiFetch('/api/notifications/announcement', {
-      method: 'POST',
-      body: JSON.stringify({
-        title: announceTitle,
-        body: announceBody,
-        driverId: targetDriverId ? Number(targetDriverId) : null,
-      }),
-    });
-    setAnnounceTitle('');
-    setAnnounceBody('');
-    setSentMsg('تم إرسال الإشعار بنجاح.');
+    setAnnounceError(null);
+    try {
+      await apiFetch('/api/notifications/announcement', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: announceTitle,
+          body: announceBody,
+          driverQuery: targetDriverQuery.trim(),
+        }),
+      });
+      setAnnounceTitle('');
+      setAnnounceBody('');
+      setTargetDriverQuery('');
+      setSentMsg('تم إرسال الإشعار بنجاح.');
+    } catch (err: unknown) {
+      setAnnounceError(err instanceof Error ? err.message : 'تعذر إرسال الإشعار');
+    }
   };
 
   return (
@@ -127,17 +130,22 @@ export const SettingsUsersModule: React.FC = () => {
                       <div className="font-mono text-slate-500">{u.email}</div>
                     </td>
                     <td className="py-3 px-4">
-                      <select
-                        value={u.roleId}
-                        onChange={(e) => handleRoleChange(u.id, Number(e.target.value))}
-                        className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold"
-                      >
+                      <div className="flex flex-wrap gap-1">
                         {rolesList.map((r) => (
-                          <option key={r.id} value={r.id}>
+                          <button
+                            key={r.id}
+                            type="button"
+                            onClick={() => handleRoleChange(u.id, r.id)}
+                            className={`rounded-md px-2.5 py-1 text-[11px] font-semibold cursor-pointer transition-colors ${
+                              u.roleId === r.id
+                                ? 'bg-[#0B1F3A] text-white'
+                                : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                            }`}
+                          >
                             {r.nameAr}
-                          </option>
+                          </button>
                         ))}
-                      </select>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -160,18 +168,18 @@ export const SettingsUsersModule: React.FC = () => {
               {sentMsg}
             </div>
           )}
-          <select
-            value={targetDriverId}
-            onChange={(e) => setTargetDriverId(e.target.value)}
+          {announceError && (
+            <div className="rounded-lg bg-red-50 border border-red-200 p-2.5 text-red-800">
+              {announceError}
+            </div>
+          )}
+          <input
+            type="text"
+            value={targetDriverQuery}
+            onChange={(e) => setTargetDriverQuery(e.target.value)}
+            placeholder="كود أو اسم السائق (اتركه فارغاً للإرسال للجميع)"
             className="w-full rounded-lg border border-slate-200 px-3 py-2"
-          >
-            <option value="">جميع السائقين النشطين</option>
-            {driversList.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.fullName} (كود {d.driverCode})
-              </option>
-            ))}
-          </select>
+          />
           <input
             required
             placeholder="عنوان الإشعار *"

@@ -40,10 +40,18 @@ export async function apiFetch<T = unknown>(
     headers.set('Content-Type', 'application/json');
   }
 
-  const res = await fetch(url, {
-    ...options,
-    headers,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers,
+    });
+  } catch (networkErr: unknown) {
+    if (networkErr instanceof DOMException && networkErr.name === 'AbortError') {
+      throw new Error('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
+    }
+    throw new Error('تعذر الاتصال بالخادم حالياً، يرجى التحقق من الشبكة والمحاولة مرة أخرى');
+  }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {

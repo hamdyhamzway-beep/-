@@ -12,8 +12,26 @@ import {
 } from 'lucide-react';
 import { apiFetch, formatEGP } from '../../lib/api';
 
+interface AvailableAdvanceOption {
+  id: number;
+  amount: number;
+  date: string;
+  reason: string;
+  paymentMethod: string;
+}
+
+interface AvailableCoverageOption {
+  id: number;
+  date: string;
+  actualReplacementCost: number;
+  absentDriverDeduction: number;
+  reason: string;
+  replacementName: string;
+}
+
 interface PendingConfirmationPayload {
   intent: string;
+  targetRecordId?: number;
   driverId: number;
   driverCode: string;
   driverName: string;
@@ -21,6 +39,7 @@ interface PendingConfirmationPayload {
   schoolName: string;
   vehicleId: number | null;
   busNumber: string;
+  replacementQuery?: string;
   amount: number;
   actualReplacementCost: number;
   absentDriverDeduction: number;
@@ -40,6 +59,8 @@ interface InterpretResponse {
     type?: string;
     currentNetSalary?: number;
     projectedNetSalary?: number;
+    availableAdvances?: AvailableAdvanceOption[];
+    availableCoverages?: AvailableCoverageOption[];
     payload?: PendingConfirmationPayload;
     [key: string]: unknown;
   } | null;
@@ -54,17 +75,6 @@ interface VoiceLogItem {
   responseArabic: string;
   createdAt: string;
 }
-
-const EXAMPLE_COMMANDS = [
-  'ادي السواق رقم 1025 سلفة 500 جنيه.',
-  'السواق رقم 25 اتغطى النهارده.',
-  'اعرضلي كشف حساب محمد أحمد.',
-  'مين السواقين اللي غايبين النهارده؟',
-  'إجمالي السلف في إشراقة الغد كام؟',
-  'مين أكتر سواق أخد سلف الشهر ده؟',
-  'اعرضلي العربيات اللي مش متصلة بالإنترنت.',
-  'كام صافي المرتبات المطلوب دفعها الشهر ده؟',
-];
 
 export const VoiceAssistantModule: React.FC = () => {
   const [inputText, setInputText] = useState('');
@@ -220,7 +230,7 @@ export const VoiceAssistantModule: React.FC = () => {
         setEditablePayload(res.queryResult.payload);
       }
       await loadLogs();
-      await speakArabic(res.replyArabic);
+      void speakArabic(res.replyArabic);
     } catch (err: unknown) {
       console.error('[VoiceAssistant] Interpret error:', err);
       setError(err instanceof Error ? err.message : 'تعذر تحليل الأمر');
@@ -417,15 +427,27 @@ export const VoiceAssistantModule: React.FC = () => {
       const chosenMime = supportedMimes[0];
       console.info('[VoiceAssistant] Supported MediaRecorder MIME types:', supportedMimes, 'chosen:', chosenMime);
 
-      const recorder = chosenMime
-        ? new MediaRecorder(stream, { mimeType: chosenMime })
-        : new MediaRecorder(stream);
+      let recorder: MediaRecorder;
+      try {
+        recorder = chosenMime
+          ? new MediaRecorder(stream, { mimeType: chosenMime, audioBitsPerSecond: 32000 })
+          : new MediaRecorder(stream, { audioBitsPerSecond: 32000 });
+      } catch {
+        recorder = chosenMime ? new MediaRecorder(stream, { mimeType: chosenMime }) : new MediaRecorder(stream);
+      }
       audioChunksRef.current = [];
       setRecordSeconds(0);
 
       if (recordTimerRef.current) window.clearInterval(recordTimerRef.current);
       recordTimerRef.current = window.setInterval(() => {
-        setRecordSeconds((s) => s + 1);
+        setRecordSeconds((s) => {
+          const next = s + 1;
+          if (next >= 45 && recorder.state !== 'inactive') {
+            recorder.stop();
+            setRecording(false);
+          }
+          return next;
+        });
       }, 1000);
 
       recorder.onstart = () => {
@@ -440,7 +462,7 @@ export const VoiceAssistantModule: React.FC = () => {
       };
 
       recorder.onerror = (ev) => {
-        console.error('[VoiceAssistant] MediaRecorder error event:', ev);
+        console.warn('[VoiceAssistant] MediaRecorder error event:', ev);
         if (recordTimerRef.current) {
           window.clearInterval(recordTimerRef.current);
           recordTimerRef.current = null;
@@ -474,43 +496,78 @@ export const VoiceAssistantModule: React.FC = () => {
 
         const reader = new FileReader();
         reader.onerror = () => {
-          console.error('[VoiceAssistant] FileReader failed to read audio blob:', reader.error);
+          console.warn('[VoiceAssistant] FileReader failed to read audio blob:', reader.error);
           setProcessing(false);
           setError('تعذر قراءة بيانات الصوت المسجل.');
         };
         reader.onloadend = async () => {
           const base64 = String(reader.result || '').split(',')[1];
           if (!base64) {
-            console.error('[VoiceAssistant] Base64 encoding of audio blob was empty');
+            console.warn('[VoiceAssistant] Base64 encoding of audio blob was empty');
             setError('تعذر ترميز الملف الصوتي. حاول مرة أخرى.');
             return;
           }
           setProcessing(true);
           const sttStart = Date.now();
+          const uploadForTranscription = async () => {
+            const controller = new AbortController();
+            const timer = window.setTimeout(() => controller.abort(), 20000);
+            try {
+              return await apiFetch<{ transcript: string }>('/api/voice/transcribe', {
+                method: 'POST',
+                signal: controller.signal,
+                body: JSON.stringify({
+                  audioBase64: base64,
+                  mimeType: mime,
+                }),
+              });
+            } finally {
+              window.clearTimeout(timer);
+            }
+          };
+
           try {
             console.info('[VoiceAssistant] Uploading audio to /api/voice/transcribe', {
               mimeType: mime,
               base64Len: base64.length,
             });
-            const tr = await apiFetch<{ transcript: string }>('/api/voice/transcribe', {
-              method: 'POST',
-              body: JSON.stringify({
-                audioBase64: base64,
-                mimeType: mime,
-              }),
-            });
+            let tr: { transcript: string };
+            try {
+              tr = await uploadForTranscription();
+            } catch (firstErr: unknown) {
+              const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
+              const isTransient =
+                firstMsg.includes('تعذر الاتصال بالخادم') ||
+                firstMsg.includes('انتهت مهلة الاتصال') ||
+                firstMsg.includes('502') ||
+                firstMsg.includes('503');
+              if (!isTransient) throw firstErr;
+              console.warn('[VoiceAssistant] Transient transcription network error, retrying once...', firstMsg);
+              await new Promise((r) => setTimeout(r, 600));
+              tr = await uploadForTranscription();
+            }
+
             console.info(
               `[VoiceAssistant] Transcription succeeded in ${Date.now() - sttStart}ms:`,
               tr.transcript
             );
+            if (!tr.transcript || !tr.transcript.trim()) {
+              setError('لم يتم التقاط كلام واضح في التسجيل، حاول التحدث بصوت أوضح أو اكتب الأمر.');
+              setProcessing(false);
+              return;
+            }
             setInputText(tr.transcript);
             await runInterpret(tr.transcript);
           } catch (err: unknown) {
-            console.error(
-              `[VoiceAssistant] Transcription failed after ${Date.now() - sttStart}ms:`,
-              err
+            const msg = err instanceof Error ? err.message : 'تعذر نسخ الصوت';
+            console.warn(
+              `[VoiceAssistant] Transcription failed after ${Date.now() - sttStart}ms: ${msg}`
             );
-            setError(err instanceof Error ? err.message : 'تعذر نسخ الصوت');
+            setError(
+              msg.includes('Failed to fetch')
+                ? 'تعذر الاتصال بالخادم لتحويل الصوت، يرجى المحاولة مرة أخرى أو استخدام الإملاء الفوري.'
+                : msg
+            );
             setProcessing(false);
           }
         };
@@ -572,7 +629,7 @@ export const VoiceAssistantModule: React.FC = () => {
       setResult((prev) => (prev ? { ...prev, requiresConfirmation: false } : null));
       setEditablePayload(null);
       await loadLogs();
-      await speakArabic(res.replyArabic);
+      void speakArabic(res.replyArabic);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تنفيذ العملية المالية');
     } finally {
@@ -665,7 +722,7 @@ export const VoiceAssistantModule: React.FC = () => {
               type="text"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder="اكتب أمرك هنا بالمصري (مثال: ادي السواق رقم 1025 سلفة 500 جنيه)"
+              placeholder="اكتب أمرك هنا بالمصري..."
               className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm focus:border-[#0B1F3A] focus:outline-none"
             />
             <button
@@ -679,23 +736,25 @@ export const VoiceAssistantModule: React.FC = () => {
           </form>
         </div>
 
-        {/* Example Commands */}
-        <div>
-          <div className="text-xs font-semibold text-slate-500 mb-2">أمثلة أوامر جاهزة للتجربة:</div>
-          <div className="flex flex-wrap gap-2">
-            {EXAMPLE_COMMANDS.map((cmd) => (
-              <button
-                key={cmd}
-                onClick={() => {
-                  setInputText(cmd);
-                  runInterpret(cmd);
-                }}
-                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-100 cursor-pointer text-right"
-              >
-                {cmd}
-              </button>
-            ))}
-          </div>
+        {/* Egyptian Voice / Text Command Examples */}
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          <span className="font-semibold text-slate-500">أمثلة أوامر صوتية ونصية:</span>
+          {[
+            'ادي السواق 1025 سلفة 500 جنيه',
+            'عدل سلفة السواق 1025 لـ 350 جنيه',
+            'احذف آخر سلفة للسواق 1025',
+            'عدل تغطية السواق 1025 لخصم 300',
+            'احذف تغطية السواق 1025',
+          ].map((ex) => (
+            <button
+              key={ex}
+              type="button"
+              onClick={() => setInputText(ex)}
+              className="rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 px-2.5 py-1 text-slate-700 cursor-pointer"
+            >
+              {ex}
+            </button>
+          ))}
         </div>
 
         {error && (
@@ -727,10 +786,34 @@ export const VoiceAssistantModule: React.FC = () => {
             </div>
 
             {result.requiresConfirmation && editablePayload && (
-              <div className="bg-white border border-amber-300 rounded-xl p-5 space-y-4">
-                <div className="flex items-center gap-2 text-sm font-bold text-amber-800">
+              <div
+                className={`bg-white border rounded-xl p-5 space-y-4 ${
+                  editablePayload.intent === 'delete_advance' ||
+                  editablePayload.intent === 'delete_coverage'
+                    ? 'border-red-300'
+                    : 'border-amber-300'
+                }`}
+              >
+                <div
+                  className={`flex items-center gap-2 text-sm font-bold ${
+                    editablePayload.intent === 'delete_advance' ||
+                    editablePayload.intent === 'delete_coverage'
+                      ? 'text-red-700'
+                      : 'text-amber-800'
+                  }`}
+                >
                   <ShieldAlert className="w-5 h-5" />
-                  <span>تأكيد العملية المالية قبل الحفظ في قاعدة البيانات</span>
+                  <span>
+                    {editablePayload.intent === 'edit_advance'
+                      ? 'تأكيد تعديل السلفة قبل الحفظ في قاعدة البيانات'
+                      : editablePayload.intent === 'delete_advance'
+                      ? 'تأكيد حذف السلفة قبل التنفيذ'
+                      : editablePayload.intent === 'edit_coverage'
+                      ? 'تأكيد تعديل سجل التغطية قبل الحفظ'
+                      : editablePayload.intent === 'delete_coverage'
+                      ? 'تأكيد حذف سجل التغطية قبل التنفيذ'
+                      : 'تأكيد العملية المالية قبل الحفظ في قاعدة البيانات'}
+                  </span>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
@@ -754,93 +837,269 @@ export const VoiceAssistantModule: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs border-t border-slate-100 pt-3">
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">التاريخ</label>
-                    <input
-                      type="date"
-                      value={editablePayload.date}
-                      onChange={(e) =>
-                        setEditablePayload({ ...editablePayload, date: e.target.value })
-                      }
-                      className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                    />
-                  </div>
-                  {editablePayload.intent === 'record_coverage' ? (
-                    <>
-                      <div>
-                        <label className="block font-semibold text-slate-700 mb-1">
-                          التكلفة الفعلية للبديل (ج.م)
-                        </label>
-                        <input
-                          type="number"
-                          value={editablePayload.actualReplacementCost}
-                          onChange={(e) =>
-                            setEditablePayload({
-                              ...editablePayload,
-                              actualReplacementCost: Number(e.target.value),
-                            })
-                          }
-                          className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                        />
+                {/* Record Picker when editing/deleting existing Advances */}
+                {(editablePayload.intent === 'edit_advance' ||
+                  editablePayload.intent === 'delete_advance') &&
+                  result.queryResult?.availableAdvances &&
+                  result.queryResult.availableAdvances.length > 0 && (
+                    <div className="border-t border-slate-100 pt-3 space-y-2 text-xs">
+                      <div className="font-semibold text-slate-700">
+                        اختر السلفة المطلوب{' '}
+                        {editablePayload.intent === 'delete_advance' ? 'حذفها' : 'تعديلها'}:
                       </div>
-                      <div>
-                        <label className="block font-semibold text-slate-700 mb-1">
-                          الخصم من السائق الغائب (ج.م)
-                        </label>
-                        <input
-                          type="number"
-                          value={editablePayload.absentDriverDeduction}
-                          onChange={(e) =>
-                            setEditablePayload({
-                              ...editablePayload,
-                              absentDriverDeduction: Number(e.target.value),
-                            })
-                          }
-                          className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                        />
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {result.queryResult.availableAdvances.map((adv) => {
+                          const selected = editablePayload.targetRecordId === adv.id;
+                          return (
+                            <button
+                              key={adv.id}
+                              type="button"
+                              onClick={() =>
+                                setEditablePayload({
+                                  ...editablePayload,
+                                  targetRecordId: adv.id,
+                                  date: adv.date,
+                                  reason: adv.reason || '',
+                                  paymentMethod: adv.paymentMethod || 'cash',
+                                  amount:
+                                    editablePayload.intent === 'delete_advance'
+                                      ? adv.amount
+                                      : editablePayload.amount || adv.amount,
+                                })
+                              }
+                              className={`text-right rounded-lg border p-2.5 cursor-pointer transition-colors ${
+                                selected
+                                  ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                  : 'border-slate-200 bg-slate-50 text-slate-800 hover:bg-slate-100'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between font-mono font-bold">
+                                <span>{formatEGP(adv.amount)}</span>
+                                <span>{adv.date}</span>
+                              </div>
+                              <div
+                                className={`mt-1 text-[11px] truncate ${
+                                  selected ? 'text-slate-200' : 'text-slate-500'
+                                }`}
+                              >
+                                {adv.reason || 'بدون سبب'} · {adv.paymentMethod || 'كاش'}
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
-                    </>
-                  ) : (
-                    <>
-                      <div>
-                        <label className="block font-semibold text-slate-700 mb-1">
-                          المبلغ (ج.م)
-                        </label>
-                        <input
-                          type="number"
-                          value={editablePayload.amount}
-                          onChange={(e) =>
-                            setEditablePayload({
-                              ...editablePayload,
-                              amount: Number(e.target.value),
-                            })
-                          }
-                          className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-semibold text-slate-700 mb-1">السبب</label>
-                        <input
-                          value={editablePayload.reason}
-                          onChange={(e) =>
-                            setEditablePayload({ ...editablePayload, reason: e.target.value })
-                          }
-                          className="w-full rounded-lg border border-slate-200 px-3 py-2"
-                        />
-                      </div>
-                    </>
+                    </div>
                   )}
-                </div>
+
+                {/* Record Picker when editing/deleting existing Coverages */}
+                {(editablePayload.intent === 'edit_coverage' ||
+                  editablePayload.intent === 'delete_coverage') &&
+                  result.queryResult?.availableCoverages &&
+                  result.queryResult.availableCoverages.length > 0 && (
+                    <div className="border-t border-slate-100 pt-3 space-y-2 text-xs">
+                      <div className="font-semibold text-slate-700">
+                        اختر سجل التغطية المطلوب{' '}
+                        {editablePayload.intent === 'delete_coverage' ? 'حذفه' : 'تعديله'}:
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {result.queryResult.availableCoverages.map((cov) => {
+                          const selected = editablePayload.targetRecordId === cov.id;
+                          return (
+                            <button
+                              key={cov.id}
+                              type="button"
+                              onClick={() =>
+                                setEditablePayload({
+                                  ...editablePayload,
+                                  targetRecordId: cov.id,
+                                  date: cov.date,
+                                  replacementQuery: cov.replacementName,
+                                  actualReplacementCost:
+                                    editablePayload.intent === 'delete_coverage'
+                                      ? cov.actualReplacementCost
+                                      : editablePayload.actualReplacementCost ||
+                                        cov.actualReplacementCost,
+                                  absentDriverDeduction:
+                                    editablePayload.intent === 'delete_coverage'
+                                      ? cov.absentDriverDeduction
+                                      : editablePayload.absentDriverDeduction ||
+                                        cov.absentDriverDeduction,
+                                  reason: cov.reason || '',
+                                })
+                              }
+                              className={`text-right rounded-lg border p-2.5 cursor-pointer transition-colors ${
+                                selected
+                                  ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                  : 'border-slate-200 bg-slate-50 text-slate-800 hover:bg-slate-100'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between font-mono font-bold">
+                                <span>خصم {formatEGP(cov.absentDriverDeduction)}</span>
+                                <span>{cov.date}</span>
+                              </div>
+                              <div
+                                className={`mt-1 text-[11px] truncate ${
+                                  selected ? 'text-slate-200' : 'text-slate-500'
+                                }`}
+                              >
+                                البديل: {cov.replacementName || '—'} · تكلفة{' '}
+                                {formatEGP(cov.actualReplacementCost)}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                {/* Editable Inputs (Hidden in delete confirm modes where read-only summary suffices) */}
+                {editablePayload.intent !== 'delete_advance' &&
+                  editablePayload.intent !== 'delete_coverage' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs border-t border-slate-100 pt-3">
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">التاريخ</label>
+                        <input
+                          type="date"
+                          value={editablePayload.date}
+                          onChange={(e) =>
+                            setEditablePayload({ ...editablePayload, date: e.target.value })
+                          }
+                          className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                        />
+                      </div>
+                      {editablePayload.intent === 'record_coverage' ||
+                      editablePayload.intent === 'edit_coverage' ? (
+                        <>
+                          <div>
+                            <label className="block font-semibold text-slate-700 mb-1">
+                              التكلفة الفعلية للبديل (ج.م)
+                            </label>
+                            <input
+                              type="number"
+                              value={editablePayload.actualReplacementCost}
+                              onChange={(e) =>
+                                setEditablePayload({
+                                  ...editablePayload,
+                                  actualReplacementCost: Number(e.target.value),
+                                })
+                              }
+                              className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-semibold text-slate-700 mb-1">
+                              الخصم من السائق الغائب (ج.م)
+                            </label>
+                            <input
+                              type="number"
+                              value={editablePayload.absentDriverDeduction}
+                              onChange={(e) =>
+                                setEditablePayload({
+                                  ...editablePayload,
+                                  absentDriverDeduction: Number(e.target.value),
+                                })
+                              }
+                              className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-semibold text-slate-700 mb-1">
+                              السائق البديل
+                            </label>
+                            <input
+                              value={editablePayload.replacementQuery || ''}
+                              onChange={(e) =>
+                                setEditablePayload({
+                                  ...editablePayload,
+                                  replacementQuery: e.target.value,
+                                })
+                              }
+                              placeholder="اسم أو كود البديل"
+                              className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                            />
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="block font-semibold text-slate-700 mb-1">السبب</label>
+                            <input
+                              value={editablePayload.reason}
+                              onChange={(e) =>
+                                setEditablePayload({ ...editablePayload, reason: e.target.value })
+                              }
+                              className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div>
+                            <label className="block font-semibold text-slate-700 mb-1">
+                              المبلغ (ج.م)
+                            </label>
+                            <input
+                              type="number"
+                              value={editablePayload.amount}
+                              onChange={(e) =>
+                                setEditablePayload({
+                                  ...editablePayload,
+                                  amount: Number(e.target.value),
+                                })
+                              }
+                              className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-semibold text-slate-700 mb-1">السبب</label>
+                            <input
+                              value={editablePayload.reason}
+                              onChange={(e) =>
+                                setEditablePayload({ ...editablePayload, reason: e.target.value })
+                              }
+                              className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                            />
+                          </div>
+                          {editablePayload.intent === 'edit_advance' && (
+                            <div className="sm:col-span-3">
+                              <label className="block font-semibold text-slate-700 mb-1">
+                                طريقة الدفع
+                              </label>
+                              <input
+                                value={editablePayload.paymentMethod}
+                                onChange={(e) =>
+                                  setEditablePayload({
+                                    ...editablePayload,
+                                    paymentMethod: e.target.value,
+                                  })
+                                }
+                                className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                              />
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
 
                 <div className="flex items-center gap-3 pt-2">
                   <button
                     onClick={handleConfirmExecution}
                     disabled={processing}
-                    className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-5 py-2.5 text-xs font-bold text-white hover:bg-[#13325c] cursor-pointer"
+                    className={`flex items-center gap-2 rounded-lg px-5 py-2.5 text-xs font-bold text-white cursor-pointer ${
+                      editablePayload.intent === 'delete_advance' ||
+                      editablePayload.intent === 'delete_coverage'
+                        ? 'bg-red-600 hover:bg-red-700'
+                        : 'bg-[#0B1F3A] hover:bg-[#13325c]'
+                    }`}
                   >
                     <CheckCircle2 className="w-4 h-4 text-[#C89B3C]" />
-                    تأكيد وتنفيذ العملية
+                    {editablePayload.intent === 'edit_advance'
+                      ? 'تأكيد تعديل السلفة'
+                      : editablePayload.intent === 'delete_advance'
+                      ? 'تأكيد حذف السلفة'
+                      : editablePayload.intent === 'edit_coverage'
+                      ? 'تأكيد تعديل التغطية'
+                      : editablePayload.intent === 'delete_coverage'
+                      ? 'تأكيد حذف التغطية'
+                      : 'تأكيد وتنفيذ العملية'}
                   </button>
                   <button
                     onClick={() => {

@@ -103,13 +103,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const loginDriverWithPhoneCode = async (phone: string, driverCode: string) => {
+  const loginDriverWithPhoneCode = async (identifier: string, driverCode: string) => {
     setAuthError(null);
     try {
       const res = await fetch('/api/auth/driver-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone, driverCode }),
+        body: JSON.stringify({ identifier, phone: identifier, driverCode }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -127,7 +127,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setDriverRecord(data.driver);
       setAuthError(null);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'تعذر تسجيل الدخول برقم الموبايل والكود';
+      const msg =
+        err instanceof Error ? err.message : 'تعذر تسجيل الدخول برقم الموبايل أو الاسم والكود';
       setAuthError(msg);
       throw err;
     }

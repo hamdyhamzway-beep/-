@@ -1,6 +1,13 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { FileSpreadsheet, Printer } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Check, Copy, Download, FileSpreadsheet, Loader2, MessageCircle, X } from 'lucide-react';
 import { apiFetch, exportRowsToExcel, formatEGP, formatRelativeArabicTime } from '../../lib/api';
+import {
+  buildWhatsAppUrl,
+  captureElementAsPngBlob,
+  copyPngBlobToClipboard,
+  downloadBlob,
+  shareImageFileViaWebShare,
+} from '../../lib/whatsapp-statement';
 import type {
   AdvanceRecord,
   CoverageRecord,
@@ -35,16 +42,40 @@ type ReportKind =
 export const ReportsModule: React.FC = () => {
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [year, setYear] = useState(new Date().getFullYear());
+  const initialPeriodSyncedRef = useRef(false);
   const [reportType, setReportType] = useState<ReportKind>('salaries');
   const [data, setData] = useState<ReportsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const reportCaptureRef = useRef<HTMLDivElement | null>(null);
+  const [sharingWhatsApp, setSharingWhatsApp] = useState(false);
+  const [whatsappPreview, setWhatsappPreview] = useState<{
+    blob: Blob;
+    url: string;
+    filename: string;
+    copied: boolean;
+    statusText: string;
+    whatsappUrl: string;
+  } | null>(null);
+
+  const clearWhatsappPreview = useCallback(() => {
+    setWhatsappPreview((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+  }, []);
 
   const loadReports = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await apiFetch<ReportsResponse>(
-        `/api/reports/summary?month=${month}&year=${year}`
-      );
+      const url = initialPeriodSyncedRef.current
+        ? `/api/reports/summary?month=${month}&year=${year}`
+        : `/api/reports/summary`;
+      const res = await apiFetch<ReportsResponse>(url);
+      if (!initialPeriodSyncedRef.current && res.period) {
+        initialPeriodSyncedRef.current = true;
+        setMonth(res.period.month);
+        setYear(res.period.year);
+      }
       setData(res);
     } finally {
       setLoading(false);
@@ -52,8 +83,15 @@ export const ReportsModule: React.FC = () => {
   }, [month, year]);
 
   useEffect(() => {
+    clearWhatsappPreview();
     loadReports();
-  }, [loadReports]);
+  }, [loadReports, clearWhatsappPreview]);
+
+  useEffect(() => {
+    return () => {
+      if (whatsappPreview?.url) URL.revokeObjectURL(whatsappPreview.url);
+    };
+  }, [whatsappPreview]);
 
   const driverById: Record<number, EnrichedDriver> = {};
   if (data) {
@@ -153,6 +191,50 @@ export const ReportsModule: React.FC = () => {
   const totalOwnerCosts =
     data?.fleet.reduce((sum, v) => sum + Number(v.monthlyOwnerCost || 0), 0) || 0;
 
+  const handleSendReportToWhatsApp = async () => {
+    if (!reportCaptureRef.current || !data) return;
+    setSharingWhatsApp(true);
+    try {
+      const blob = await captureElementAsPngBlob(reportCaptureRef.current);
+      const label = reportTabs.find((r) => r.id === reportType)?.label || 'تقرير';
+      const filename = `تقرير-${reportType}-${month}-${year}.png`;
+      const caption = `الوليد ترافيل — ${label} (شهر ${month}/${year})`;
+      const whatsappUrl = buildWhatsAppUrl('', caption);
+
+      const webShareResult = await shareImageFileViaWebShare(blob, filename, caption, caption);
+      if (webShareResult === 'shared') {
+        clearWhatsappPreview();
+        const url = URL.createObjectURL(blob);
+        setWhatsappPreview({
+          blob,
+          url,
+          filename,
+          copied: false,
+          statusText: 'تم فتح المشاركة بالصورة بنجاح.',
+          whatsappUrl,
+        });
+        return;
+      }
+
+      const copied = await copyPngBlobToClipboard(blob);
+      downloadBlob(blob, filename);
+      clearWhatsappPreview();
+      const url = URL.createObjectURL(blob);
+      setWhatsappPreview({
+        blob,
+        url,
+        filename,
+        copied,
+        statusText: copied
+          ? 'تم تجهيز صورة التقرير ونسخها للحافظة وتحميلها — اضغط فتح واتساب ثم الصق الصورة (Ctrl+V) أو أرفقها.'
+          : 'تم تجهيز صورة التقرير وتحميلها — اضغط فتح واتساب وأرفق الصورة المحمّلة.',
+        whatsappUrl,
+      });
+    } finally {
+      setSharingWhatsApp(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 no-print">
@@ -161,33 +243,33 @@ export const ReportsModule: React.FC = () => {
             التقارير والتحليلات المالية والتشغيلية
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            تصدير فوري إلى Excel (UTF-8) و PDF / طباعة رسمية لشركة الوليد ترافيل
+            تصدير فوري إلى Excel (UTF-8) وإرسال صورة التقرير مباشرة عبر واتساب لشركة الوليد ترافيل
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <select
-            value={month}
-            onChange={(e) => setMonth(Number(e.target.value))}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold"
-          >
-            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-              <option key={m} value={m}>
-                شهر {m}
-              </option>
-            ))}
-          </select>
-          <select
-            value={year}
-            onChange={(e) => setYear(Number(e.target.value))}
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-mono font-semibold"
-          >
-            {[2025, 2026, 2027].map((y) => (
-              <option key={y} value={y}>
-                {y}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs">
+            <span className="text-slate-500">شهر</span>
+            <input
+              type="number"
+              min={1}
+              max={12}
+              value={month}
+              onChange={(e) => setMonth(Math.min(12, Math.max(1, Number(e.target.value) || 1)))}
+              className="w-12 font-mono font-semibold text-center focus:outline-none"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs">
+            <span className="text-slate-500">سنة</span>
+            <input
+              type="number"
+              min={2020}
+              max={2050}
+              value={year}
+              onChange={(e) => setYear(Number(e.target.value) || new Date().getFullYear())}
+              className="w-16 font-mono font-semibold text-center focus:outline-none"
+            />
+          </div>
           <button
             onClick={handleExportExcel}
             className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 cursor-pointer"
@@ -196,11 +278,17 @@ export const ReportsModule: React.FC = () => {
             تصدير Excel
           </button>
           <button
-            onClick={() => window.print()}
-            className="flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+            type="button"
+            disabled={loading || !data || sharingWhatsApp}
+            onClick={handleSendReportToWhatsApp}
+            className="flex items-center gap-1.5 rounded-lg bg-[#25D366] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#1ebe5d] disabled:opacity-50 cursor-pointer"
           >
-            <Printer className="w-4 h-4 text-[#C89B3C]" />
-            تصدير PDF / طباعة
+            {sharingWhatsApp ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <MessageCircle className="w-4 h-4" />
+            )}
+            {sharingWhatsApp ? 'جاري تجهيز الصورة...' : 'إرسال للواتساب (صورة)'}
           </button>
         </div>
       </div>
@@ -209,7 +297,10 @@ export const ReportsModule: React.FC = () => {
         {reportTabs.map((t) => (
           <button
             key={t.id}
-            onClick={() => setReportType(t.id)}
+            onClick={() => {
+              clearWhatsappPreview();
+              setReportType(t.id);
+            }}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
               reportType === t.id
                 ? 'bg-white text-[#0B1F3A] shadow-xs'
@@ -221,7 +312,69 @@ export const ReportsModule: React.FC = () => {
         ))}
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden print-only-full">
+      {whatsappPreview && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 space-y-3 text-xs">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="font-bold text-emerald-900 flex items-center gap-1.5">
+                <MessageCircle className="w-4 h-4 text-[#25D366]" />
+                <span>جاهز للإرسال عبر واتساب</span>
+              </div>
+              <p className="text-[11px] text-emerald-800 mt-1">{whatsappPreview.statusText}</p>
+            </div>
+            <button
+              type="button"
+              onClick={clearWhatsappPreview}
+              className="text-emerald-700 hover:text-emerald-950 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+            <img
+              src={whatsappPreview.url}
+              alt="معاينة صورة التقرير"
+              className="w-36 h-24 object-cover object-top rounded-lg border border-emerald-200 bg-white shadow-xs shrink-0"
+            />
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href={whatsappPreview.whatsappUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#25D366] px-4 py-2 text-xs font-bold text-white hover:bg-[#1ebe5d]"
+              >
+                <MessageCircle className="w-4 h-4" />
+                فتح واتساب وإرسال الصورة
+              </a>
+              <button
+                type="button"
+                onClick={async () => {
+                  const copied = await copyPngBlobToClipboard(whatsappPreview.blob);
+                  setWhatsappPreview((prev) => (prev ? { ...prev, copied } : null));
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
+              >
+                {whatsappPreview.copied ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
+                {whatsappPreview.copied ? 'تم نسخ الصورة' : 'نسخ الصورة'}
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadBlob(whatsappPreview.blob, whatsappPreview.filename)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                تحميل الصورة
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div ref={reportCaptureRef} dir="rtl" className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h2 className="font-display text-base font-bold text-[#0B1F3A]">

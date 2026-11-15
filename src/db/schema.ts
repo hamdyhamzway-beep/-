@@ -51,8 +51,8 @@ export const schools = pgTable('schools', {
   monthlyContractValue: numeric('monthly_contract_value', { precision: 12, scale: 2 })
     .notNull()
     .default('0'),
-  contractStartDate: text('contract_start_date').notNull().default('2026-09-01'),
-  contractEndDate: text('contract_end_date').notNull().default('2027-06-30'),
+  contractStartDate: text('contract_start_date').notNull().default(''),
+  contractEndDate: text('contract_end_date').notNull().default(''),
   notes: text('notes').default(''),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -73,7 +73,7 @@ export const vehicles = pgTable('vehicles', {
   id: serial('id').primaryKey(),
   busNumber: text('bus_number').notNull().unique(),
   registrationNumber: text('registration_number').notNull().unique(),
-  vehicleType: text('vehicle_type').notNull().default('باص سقف عالي'),
+  vehicleType: text('vehicle_type').notNull().default(''),
   ownerId: integer('owner_id').references(() => vehicleOwners.id),
   monthlyOwnerCost: numeric('monthly_owner_cost', { precision: 12, scale: 2 })
     .notNull()
@@ -88,17 +88,23 @@ export const vehicles = pgTable('vehicles', {
 export const routes = pgTable('routes', {
   id: serial('id').primaryKey(),
   name: text('name').notNull(),
-  schoolId: integer('school_id')
-    .references(() => schools.id)
-    .notNull(),
+  schoolId: integer('school_id').references(() => schools.id),
   pickupArea: text('pickup_area').notNull().default(''),
   dropoffArea: text('dropoff_area').notNull().default(''),
-  pickupTime: text('pickup_time').notNull().default('06:45'),
-  dropoffTime: text('dropoff_time').notNull().default('14:30'),
+  pickupTime: text('pickup_time').notNull().default(''),
+  dropoffTime: text('dropoff_time').notNull().default(''),
   estimatedDistanceKm: doublePrecision('estimated_distance_km').default(0),
   notes: text('notes').default(''),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+export interface DriverLicensePhoto {
+  id: string;
+  label: string;
+  imageUrl: string;
+  uploadedBy: 'admin' | 'driver';
+  uploadedAt: string;
+}
 
 // 7. Drivers
 export const drivers = pgTable(
@@ -114,9 +120,13 @@ export const drivers = pgTable(
     monthlyAgreedSalary: numeric('monthly_agreed_salary', { precision: 12, scale: 2 })
       .notNull()
       .default('0'),
-    employmentStartDate: text('employment_start_date').notNull().default('2026-09-01'),
+    employmentStartDate: text('employment_start_date').notNull().default(''),
     accountStatus: text('account_status').notNull().default('active'), // active | inactive | suspended
     photoUrl: text('photo_url').default(''),
+    licensePhotosJson: jsonb('license_photos_json')
+      .$type<DriverLicensePhoto[]>()
+      .notNull()
+      .default([]),
     notes: text('notes').default(''),
     documentsJson: jsonb('documents_json')
       .$type<Array<{ title: string; refNumber: string; expiryDate?: string }>>()
@@ -163,12 +173,8 @@ export const driverAssignments = pgTable(
     driverId: integer('driver_id')
       .references(() => drivers.id)
       .notNull(),
-    schoolId: integer('school_id')
-      .references(() => schools.id)
-      .notNull(),
-    vehicleId: integer('vehicle_id')
-      .references(() => vehicles.id)
-      .notNull(),
+    schoolId: integer('school_id').references(() => schools.id),
+    vehicleId: integer('vehicle_id').references(() => vehicles.id),
     routeId: integer('route_id').references(() => routes.id),
     isCurrent: boolean('is_current').notNull().default(true),
     assignedAt: timestamp('assigned_at').defaultNow().notNull(),
@@ -216,8 +222,8 @@ export const advances = pgTable(
       .notNull(),
     amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
     date: text('date').notNull(), // YYYY-MM-DD
-    reason: text('reason').notNull().default('سلفة نقدية'),
-    paymentMethod: text('payment_method').notNull().default('cash'), // cash | vodafone_cash | instapay | bank_transfer
+    reason: text('reason').notNull().default(''),
+    paymentMethod: text('payment_method').notNull().default(''),
     notes: text('notes').default(''),
     recordedByUserId: integer('recorded_by_user_id')
       .references(() => users.id)
@@ -248,7 +254,7 @@ export const coverageRecords = pgTable(
     absentDriverDeduction: numeric('absent_driver_deduction', { precision: 12, scale: 2 })
       .notNull()
       .default('0'),
-    reason: text('reason').notNull().default('تغطية غياب'),
+    reason: text('reason').notNull().default(''),
     notes: text('notes').default(''),
     recordedByUserId: integer('recorded_by_user_id')
       .references(() => users.id)
@@ -293,6 +299,17 @@ export const financialTransactions = pgTable(
       to: 'public',
       withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
     }),
+    pgPolicy('ft_admin_accountant_update', {
+      for: 'update',
+      to: 'public',
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
+    }),
+    pgPolicy('ft_admin_accountant_delete', {
+      for: 'delete',
+      to: 'public',
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
+    }),
     pgPolicy('ft_driver_self_select', {
       for: 'select',
       to: 'public',
@@ -323,9 +340,7 @@ export const gpsLocations = pgTable(
   'gps_locations',
   {
     id: serial('id').primaryKey(),
-    vehicleId: integer('vehicle_id')
-      .references(() => vehicles.id)
-      .notNull(),
+    vehicleId: integer('vehicle_id').references(() => vehicles.id),
     driverId: integer('driver_id').references(() => drivers.id),
     lat: doublePrecision('lat').notNull(),
     lng: doublePrecision('lng').notNull(),
@@ -382,6 +397,98 @@ export const auditLogs = pgTable('audit_logs', {
   afterJson: jsonb('after_json'),
   ipAddress: text('ip_address').default(''),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// 18. Non-Driver Employees (الموظفون غير السائقين)
+export const employees = pgTable('employees', {
+  id: serial('id').primaryKey(),
+  employeeCode: text('employee_code').notNull().default(''),
+  fullName: text('full_name').notNull(),
+  jobTitle: text('job_title').notNull().default(''),
+  phone: text('phone').notNull().default(''),
+  monthlySalary: numeric('monthly_salary', { precision: 12, scale: 2 }).notNull().default('0'),
+  bonuses: numeric('bonuses', { precision: 12, scale: 2 }).notNull().default('0'),
+  deductions: numeric('deductions', { precision: 12, scale: 2 }).notNull().default('0'),
+  employmentStartDate: text('employment_start_date').notNull().default(''),
+  status: text('status').notNull().default('active'), // active | inactive
+  notes: text('notes').default(''),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// 19. Monthly Closings (تصفية الشهر وأرشفة ملخصاته)
+export const monthlyClosings = pgTable(
+  'monthly_closings',
+  {
+    id: serial('id').primaryKey(),
+    month: integer('month').notNull(),
+    year: integer('year').notNull(),
+    closedByUserId: integer('closed_by_user_id').references(() => users.id),
+    driversCount: integer('drivers_count').notNull().default(0),
+    employeesCount: integer('employees_count').notNull().default(0),
+    totalDriverSalaries: numeric('total_driver_salaries', { precision: 12, scale: 2 })
+      .notNull()
+      .default('0'),
+    totalEmployeeSalaries: numeric('total_employee_salaries', { precision: 12, scale: 2 })
+      .notNull()
+      .default('0'),
+    totalAdvances: numeric('total_advances', { precision: 12, scale: 2 }).notNull().default('0'),
+    totalCoverageDeductions: numeric('total_coverage_deductions', {
+      precision: 12,
+      scale: 2,
+    })
+      .notNull()
+      .default('0'),
+    totalBonuses: numeric('total_bonuses', { precision: 12, scale: 2 }).notNull().default('0'),
+    totalOtherDeductions: numeric('total_other_deductions', { precision: 12, scale: 2 })
+      .notNull()
+      .default('0'),
+    totalSchoolContracts: numeric('total_school_contracts', { precision: 12, scale: 2 })
+      .notNull()
+      .default('0'),
+    netProfit: numeric('net_profit', { precision: 12, scale: 2 }).notNull().default('0'),
+    notes: text('notes').default(''),
+    snapshotJson: jsonb('snapshot_json')
+      .$type<{
+        drivers: Array<{
+          driverId: number;
+          driverCode: string;
+          fullName: string;
+          schoolName: string;
+          baseSalary: number;
+          totalAdvances: number;
+          totalCoverageDeductions: number;
+          otherDeductions: number;
+          bonuses: number;
+          netSalary: number;
+          status: string;
+        }>;
+        employees: Array<{
+          employeeId: number;
+          employeeCode: string;
+          fullName: string;
+          jobTitle: string;
+          monthlySalary: number;
+          bonuses: number;
+          deductions: number;
+          netSalary: number;
+        }>;
+      }>()
+      .notNull()
+      .default({ drivers: [], employees: [] }),
+    closedAt: timestamp('closed_at').defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex('uq_monthly_closings_month_year').on(table.month, table.year)]
+);
+
+// 20. Billing Periods (الشهر المالي المفتوح حالياً للعمل عليه على بياض)
+export const billingPeriods = pgTable('billing_periods', {
+  id: serial('id').primaryKey(),
+  key: text('key').notNull().unique(),
+  activeMonth: integer('active_month').notNull(),
+  activeYear: integer('active_year').notNull(),
+  updatedByUserId: integer('updated_by_user_id').references(() => users.id),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
 // Relations

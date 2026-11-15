@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Archive,
+  Briefcase,
   Bus,
   FileSpreadsheet,
   LayoutDashboard,
@@ -15,26 +17,34 @@ import {
   X,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { AppLogoBackdrop } from './components/AppLogoBackdrop';
+import { BrandLogo } from './components/BrandLogo';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstall';
 import { SignInScreen } from './components/SignInScreen';
+import { SplashScreen } from './components/SplashScreen';
+import splashScreenImg from './assets/images/alwaleed_splash_screen_1794752422708.jpg';
 import { AdminOverview } from './components/admin/AdminOverview';
 import { DriversModule } from './components/admin/DriversModule';
+import { EmployeesModule } from './components/admin/EmployeesModule';
 import { SchoolsVehiclesModule } from './components/admin/SchoolsVehiclesModule';
 import { FinanceModule } from './components/admin/FinanceModule';
 import { LiveMapModule } from './components/admin/LiveMapModule';
 import { VoiceAssistantModule } from './components/admin/VoiceAssistantModule';
 import { ReportsModule } from './components/admin/ReportsModule';
 import { SettingsUsersModule } from './components/admin/SettingsUsersModule';
+import { ArchiveModule } from './components/admin/ArchiveModule';
 import { DriverApp } from './components/driver/DriverApp';
 
 type AdminTabId =
   | 'overview'
   | 'drivers'
+  | 'employees'
   | 'schools'
   | 'finance'
   | 'map'
   | 'voice'
   | 'reports'
+  | 'archive'
   | 'settings';
 
 interface NavItem {
@@ -49,6 +59,12 @@ const AppShell: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AdminTabId>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [adminMode, setAdminMode] = useState<'admin' | 'driver_preview'>('admin');
+  const [splashElapsed, setSplashElapsed] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSplashElapsed(true), 750);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const isSuperAdmin = dbUser?.roleSlug === 'super_admin';
   const perms = dbUser?.permissions || [];
@@ -62,6 +78,12 @@ const AppShell: React.FC = () => {
         label: 'إدارة السائقين',
         icon: Users,
         visible: isSuperAdmin || can('drivers:read'),
+      },
+      {
+        id: 'employees',
+        label: 'الموظفون (غير السائقين)',
+        icon: Briefcase,
+        visible: isSuperAdmin || can('drivers:read') || can('finance:read'),
       },
       {
         id: 'schools',
@@ -94,6 +116,12 @@ const AppShell: React.FC = () => {
         visible: isSuperAdmin || can('reports:read'),
       },
       {
+        id: 'archive',
+        label: 'الأرشفة',
+        icon: Archive,
+        visible: isSuperAdmin || can('drivers:read'),
+      },
+      {
         id: 'settings',
         label: 'الصلاحيات والإشعارات',
         icon: Settings,
@@ -105,17 +133,13 @@ const AppShell: React.FC = () => {
 
   const visibleNav = navItems.filter((n) => n.visible);
 
-  if (loading) {
+  if (loading || !splashElapsed) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-4 p-6">
-        <div className="w-12 h-12 rounded-2xl bg-[#0B1F3A] text-[#C89B3C] flex items-center justify-center">
-          <Bus className="w-6 h-6" />
-        </div>
-        <div className="text-center">
-          <p className="font-display text-base font-bold text-[#0B1F3A]">الوليد ترافيل</p>
-          <p className="text-xs text-slate-500 mt-1">جاري التحقق من الجلسة وتحميل البيانات...</p>
-        </div>
-      </div>
+      <SplashScreen
+        message={
+          loading ? 'جاري التحقق من الجلسة وتحميل البيانات...' : 'الوليد ترافيل — أهلاً بك'
+        }
+      />
     );
   }
 
@@ -131,8 +155,8 @@ const AppShell: React.FC = () => {
   // Admin previewing Driver App
   if (isSuperAdmin && adminMode === 'driver_preview') {
     return (
-      <div>
-        <div className="bg-[#0B1F3A] border-b border-slate-700 px-4 py-2 text-xs text-white flex items-center justify-between">
+      <div className="relative">
+        <div className="relative z-30 bg-[#0B1F3A] border-b border-slate-700 px-4 py-2 text-xs text-white flex items-center justify-between">
           <span className="font-semibold text-[#C89B3C]">وضع معاينة تطبيق السائق</span>
           <button
             onClick={() => setAdminMode('admin')}
@@ -157,20 +181,32 @@ const AppShell: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex">
+    <div className="min-h-screen bg-[#eef2f7] relative flex">
       {/* Desktop Sidebar */}
-      <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 lg:right-0 bg-[#0B1F3A] text-white z-30 no-print">
-        <div className="h-16 px-5 flex items-center gap-3 border-b border-white/10">
-          <div className="w-9 h-9 rounded-xl bg-[#C89B3C] text-[#0B1F3A] flex items-center justify-center shrink-0">
-            <Bus className="w-5 h-5" />
+      <aside className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 lg:right-0 bg-[#0B1F3A] text-white z-30 no-print overflow-hidden">
+        <div
+          aria-hidden="true"
+          className="absolute inset-x-0 bottom-14 flex items-center justify-center pointer-events-none select-none"
+        >
+          <div className="w-56 h-56 rounded-full overflow-hidden opacity-40 ring-1 ring-[#C89B3C]/25">
+            <img
+              src={splashScreenImg}
+              alt=""
+              referrerPolicy="no-referrer"
+              className="w-full h-full object-cover object-center scale-110"
+            />
           </div>
+        </div>
+        <div className="absolute inset-0 bg-gradient-to-b from-[#0B1F3A]/80 via-[#0B1F3A]/45 to-[#081528]/80 pointer-events-none" />
+        <div className="relative z-10 h-16 px-5 flex items-center gap-3 border-b border-white/10">
+          <BrandLogo size="sm" />
           <div className="min-w-0">
             <div className="font-display text-base font-bold truncate">الوليد ترافيل</div>
             <div className="text-[11px] text-slate-300 truncate">إدارة النقل المدرسي</div>
           </div>
         </div>
 
-        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+        <nav className="relative z-10 flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {visibleNav.map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.id;
@@ -191,7 +227,7 @@ const AppShell: React.FC = () => {
           })}
         </nav>
 
-        <div className="p-4 border-t border-white/10 space-y-3">
+        <div className="relative z-10 p-4 border-t border-white/10 space-y-3">
           {isSuperAdmin && (
             <button
               onClick={() => setAdminMode('driver_preview')}
@@ -224,12 +260,24 @@ const AppShell: React.FC = () => {
             className="fixed inset-0 bg-slate-950/60"
             onClick={() => setMobileMenuOpen(false)}
           />
-          <div className="relative w-72 max-w-[85vw] bg-[#0B1F3A] text-white flex flex-col h-full z-50">
-            <div className="h-16 px-4 flex items-center justify-between border-b border-white/10">
+          <div className="relative w-72 max-w-[85vw] bg-[#0B1F3A] text-white flex flex-col h-full z-50 overflow-hidden">
+            <div
+              aria-hidden="true"
+              className="absolute inset-x-0 bottom-14 flex items-center justify-center pointer-events-none select-none"
+            >
+              <div className="w-56 h-56 rounded-full overflow-hidden opacity-40 ring-1 ring-[#C89B3C]/25">
+                <img
+                  src={splashScreenImg}
+                  alt=""
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover object-center scale-110"
+                />
+              </div>
+            </div>
+            <div className="absolute inset-0 bg-gradient-to-b from-[#0B1F3A]/80 via-[#0B1F3A]/45 to-[#081528]/80 pointer-events-none" />
+            <div className="relative z-10 h-16 px-4 flex items-center justify-between border-b border-white/10">
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-[#C89B3C] text-[#0B1F3A] flex items-center justify-center">
-                  <Bus className="w-4 h-4" />
-                </div>
+                <BrandLogo size="sm" />
                 <span className="font-display text-base font-bold">الوليد ترافيل</span>
               </div>
               <button
@@ -239,7 +287,7 @@ const AppShell: React.FC = () => {
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
+            <nav className="relative z-10 flex-1 p-3 space-y-1 overflow-y-auto">
               {visibleNav.map((item) => {
                 const Icon = item.icon;
                 const active = activeTab === item.id;
@@ -257,7 +305,7 @@ const AppShell: React.FC = () => {
                 );
               })}
             </nav>
-            <div className="p-4 border-t border-white/10 space-y-2.5">
+            <div className="relative z-10 p-4 border-t border-white/10 space-y-2.5">
               {isSuperAdmin && (
                 <button
                   onClick={() => {
@@ -282,9 +330,11 @@ const AppShell: React.FC = () => {
         </div>
       )}
 
+      <AppLogoBackdrop withSidebarOffset />
+
       {/* Main Content Area */}
-      <div className="flex-1 lg:pr-64 flex flex-col min-w-0">
-        <header className="sticky top-0 z-20 h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 no-print">
+      <div className="relative z-10 flex-1 lg:pr-64 flex flex-col min-w-0">
+        <header className="sticky top-0 z-20 h-16 bg-white/90 backdrop-blur-md border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 no-print">
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -309,14 +359,16 @@ const AppShell: React.FC = () => {
           </div>
         </header>
 
-        <main className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto">
+        <main className="app-glass-cards flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto">
           {activeTab === 'overview' && <AdminOverview onNavigate={handleNavigate} />}
           {activeTab === 'drivers' && <DriversModule />}
+          {activeTab === 'employees' && <EmployeesModule />}
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
           {activeTab === 'finance' && <FinanceModule />}
           {activeTab === 'map' && <LiveMapModule />}
           {activeTab === 'voice' && <VoiceAssistantModule />}
           {activeTab === 'reports' && <ReportsModule />}
+          {activeTab === 'archive' && <ArchiveModule />}
           {activeTab === 'settings' && <SettingsUsersModule />}
         </main>
       </div>

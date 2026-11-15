@@ -28,6 +28,15 @@ export function usePWAInstall() {
     const handleInstalled = () => {
       setIsInstalled(true);
       setDeferredPrompt(null);
+      try {
+        localStorage.setItem('alwaleed_pwa_installed', 'true');
+        if (localStorage.getItem('alwaleed_gps_consent') !== 'false') {
+          localStorage.setItem('alwaleed_gps_consent', 'true');
+        }
+      } catch {
+        // ignore storage failures
+      }
+      window.dispatchEvent(new CustomEvent('alwaleed-pwa-installed'));
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -45,6 +54,15 @@ export function usePWAInstall() {
     if (outcome === 'accepted') {
       setIsInstalled(true);
       setDeferredPrompt(null);
+      try {
+        localStorage.setItem('alwaleed_pwa_installed', 'true');
+        if (localStorage.getItem('alwaleed_gps_consent') !== 'false') {
+          localStorage.setItem('alwaleed_gps_consent', 'true');
+        }
+      } catch {
+        // ignore storage failures
+      }
+      window.dispatchEvent(new CustomEvent('alwaleed-pwa-installed'));
       return true;
     }
     return false;

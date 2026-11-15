@@ -20,8 +20,13 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatEGP, formatRelativeArabicTime } from '../../lib/api';
+import { AppLogoBackdrop } from '../AppLogoBackdrop';
 import { DriverAvatar } from '../DriverAvatar';
+import { DriverLicensesSection } from '../DriverLicensesSection';
 import { PWAInstallButton } from '../PWAInstall';
+import { SplashScreen } from '../SplashScreen';
+import splashScreenImg from '../../assets/images/alwaleed_splash_screen_1794752422708.jpg';
+import travelBackdropImg from '../../assets/images/alwaleed_travel_backdrop_1794752421692.jpg';
 import type {
   AdvanceRecord,
   CoverageRecord,
@@ -81,63 +86,110 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
   const [year, setYear] = useState<number>(now.getFullYear());
 
   const [allDrivers, setAllDrivers] = useState<EnrichedDriver[]>([]);
+  const [driversLoaded, setDriversLoaded] = useState(!allowDriverSelector);
   const [selectedDriverId, setSelectedDriverId] = useState<string>('');
   const [data, setData] = useState<DriverAppResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Live GPS transmission state
+  // Live GPS transmission state (auto-enabled once permission is granted or PWA is installed)
   const [gpsConsent, setGpsConsent] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('alwaleed_gps_consent') === 'true';
+      const saved = localStorage.getItem('alwaleed_gps_consent');
+      if (saved === 'false') return false;
+      if (saved === 'true') return true;
+      const isStandalone =
+        typeof window !== 'undefined' &&
+        (window.matchMedia('(display-mode: standalone)').matches ||
+          (window.navigator as unknown as { standalone?: boolean }).standalone === true ||
+          localStorage.getItem('alwaleed_pwa_installed') === 'true');
+      return isStandalone;
     } catch {
       return false;
     }
   });
+  const [geoPermState, setGeoPermState] = useState<'granted' | 'prompt' | 'denied' | 'unknown'>(
+    'unknown'
+  );
   const [isStreamingGps, setIsStreamingGps] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [gpsSending, setGpsSending] = useState(false);
   const [lastLocalPingAt, setLastLocalPingAt] = useState<string | null>(null);
   const watchIdRef = useRef<number | null>(null);
+  const heartbeatTimerRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const lastSentMsRef = useRef<number>(0);
+  const initialPeriodSyncedRef = useRef(false);
 
-  // Load driver selector list if super_admin is previewing
+  // Load driver selector list if super_admin is previewing (active first, archived fallback so preview always works)
   useEffect(() => {
-    if (!allowDriverSelector) return;
-    apiFetch<{ drivers: EnrichedDriver[] }>('/api/drivers')
+    if (!allowDriverSelector) {
+      setDriversLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    setDriversLoaded(false);
+    apiFetch<{ drivers: EnrichedDriver[] }>('/api/drivers?includeArchived=true')
       .then((res) => {
-        setAllDrivers(res.drivers);
-        if (res.drivers.length > 0 && !selectedDriverId) {
-          setSelectedDriverId(String(res.drivers[0].id));
+        if (cancelled) return;
+        const sorted = [...(res.drivers || [])].sort((a, b) => {
+          const aActive = a.accountStatus === 'active' ? 0 : 1;
+          const bActive = b.accountStatus === 'active' ? 0 : 1;
+          return aActive - bActive;
+        });
+        setAllDrivers(sorted);
+        if (sorted.length > 0) {
+          setSelectedDriverId((prev) =>
+            prev && sorted.some((d) => String(d.id) === prev) ? prev : String(sorted[0].id)
+          );
+        } else {
+          setLoading(false);
         }
       })
-      .catch(() => {
-        // ignore if unavailable
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'تعذر تحميل قائمة السائقين للمعاينة');
+        setLoading(false);
+      })
+      .finally(() => {
+        if (!cancelled) setDriversLoaded(true);
       });
-  }, [allowDriverSelector, selectedDriverId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [allowDriverSelector]);
 
   const loadDriverData = useCallback(async () => {
-    if (allowDriverSelector && !selectedDriverId && allDrivers.length === 0) {
-      // Wait for initial driver list load if admin selector is active
+    if (allowDriverSelector && (!driversLoaded || !selectedDriverId)) {
+      if (driversLoaded && !selectedDriverId) {
+        setLoading(false);
+      }
+      return;
     }
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams({
-        month: String(month),
-        year: String(year),
-      });
+      const params = new URLSearchParams();
+      if (initialPeriodSyncedRef.current) {
+        params.set('month', String(month));
+        params.set('year', String(year));
+      }
       if (allowDriverSelector && selectedDriverId) {
         params.set('asDriverId', selectedDriverId);
       }
       const res = await apiFetch<DriverAppResponse>(`/api/driver-app/me?${params.toString()}`);
+      if (!initialPeriodSyncedRef.current && res.period) {
+        initialPeriodSyncedRef.current = true;
+        setMonth(res.period.month);
+        setYear(res.period.year);
+      }
       setData(res);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات السائق');
     } finally {
       setLoading(false);
     }
-  }, [month, year, allowDriverSelector, selectedDriverId, allDrivers.length]);
+  }, [month, year, allowDriverSelector, driversLoaded, selectedDriverId]);
 
   useEffect(() => {
     loadDriverData();
@@ -147,6 +199,14 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
+    }
+    if (heartbeatTimerRef.current !== null) {
+      window.clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => undefined);
+      wakeLockRef.current = null;
     }
     setIsStreamingGps(false);
   }, []);
@@ -179,7 +239,65 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     [data?.driver?.vehicleId, loadDriverData]
   );
 
-  // Manage real navigator.geolocation.watchPosition when driver enables consent and isn't paused
+  // Sync with browser Permissions API so once granted (or upon PWA install), it stays enabled across every login without re-asking
+  useEffect(() => {
+    if (allowDriverSelector || typeof navigator === 'undefined') return;
+    let cancelled = false;
+    let permStatus: PermissionStatus | null = null;
+
+    const applyPermissionState = (state: PermissionState) => {
+      if (cancelled) return;
+      setGeoPermState(state);
+      try {
+        const explicitlyDisabled = localStorage.getItem('alwaleed_gps_consent') === 'false';
+        if (state === 'granted' && !explicitlyDisabled) {
+          localStorage.setItem('alwaleed_gps_consent', 'true');
+          setGpsConsent(true);
+        } else if (state === 'denied') {
+          setGpsError(
+            'تم حظر إذن الموقع من إعدادات المتصفح/الهاتف. يرجى تفعيله مرة واحدة فقط للسماح بالتشغيل التلقائي.'
+          );
+        }
+      } catch {
+        // ignore storage errors
+      }
+    };
+
+    const handlePwaInstalled = () => {
+      try {
+        if (localStorage.getItem('alwaleed_gps_consent') !== 'false') {
+          localStorage.setItem('alwaleed_gps_consent', 'true');
+          setGpsConsent(true);
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener('alwaleed-pwa-installed', handlePwaInstalled);
+
+    if (navigator.permissions && typeof navigator.permissions.query === 'function') {
+      navigator.permissions
+        .query({ name: 'geolocation' })
+        .then((status) => {
+          if (cancelled) return;
+          permStatus = status;
+          applyPermissionState(status.state);
+          status.onchange = () => applyPermissionState(status.state);
+        })
+        .catch(() => {
+          setGeoPermState('unknown');
+        });
+    }
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('alwaleed-pwa-installed', handlePwaInstalled);
+      if (permStatus) permStatus.onchange = null;
+    };
+  }, [allowDriverSelector]);
+
+  // Manage persistent navigator.geolocation.watchPosition + foreground heartbeat when enabled
   useEffect(() => {
     const isPaused = data?.gps?.vehicleGpsStatus === 'paused';
     const hasVehicle = Boolean(data?.linked && data?.driver?.vehicleId);
@@ -197,10 +315,43 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     setGpsError(null);
     setIsStreamingGps(true);
 
+    const requestAndSendNow = () => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setGeoPermState('granted');
+          try {
+            localStorage.setItem('alwaleed_gps_consent', 'true');
+          } catch {
+            // ignore
+          }
+          const speedKmh = pos.coords.speed ? pos.coords.speed * 3.6 : 0;
+          sendGpsCoordinates(
+            pos.coords.latitude,
+            pos.coords.longitude,
+            speedKmh,
+            pos.coords.accuracy || 10
+          );
+        },
+        (geoErr) => {
+          if (geoErr.code === geoErr.PERMISSION_DENIED) {
+            setGeoPermState('denied');
+            setIsStreamingGps(false);
+            setGpsError('تم رفض إذن الوصول للموقع. يرجى السماح بالموقع مرة واحدة من إعدادات التطبيق/المتصفح.');
+          }
+        },
+        { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 }
+      );
+    };
+
+    // Send initial position immediately on login/app launch
+    if (Date.now() - lastSentMsRef.current > 10000) {
+      requestAndSendNow();
+    }
+
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
+        setGeoPermState('granted');
         const nowMs = Date.now();
-        // Throttle server writes to once every 10 seconds
         if (nowMs - lastSentMsRef.current < 10000) return;
         const speedKmh = pos.coords.speed ? pos.coords.speed * 3.6 : 0;
         sendGpsCoordinates(
@@ -213,6 +364,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
       (geoErr) => {
         setIsStreamingGps(false);
         if (geoErr.code === geoErr.PERMISSION_DENIED) {
+          setGeoPermState('denied');
           setGpsError('تم رفض إذن الوصول للموقع من المتصفح. يرجى تفعيل الموقع من إعدادات المتصفح.');
         } else if (geoErr.code === geoErr.POSITION_UNAVAILABLE) {
           setGpsError('تعذر تحديد الموقع الحالي، تأكد من تشغيل GPS في الجهاز.');
@@ -227,7 +379,35 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
       }
     );
 
+    // Periodic heartbeat every 30s & immediate sync when app returns to foreground
+    heartbeatTimerRef.current = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && Date.now() - lastSentMsRef.current >= 25000) {
+        requestAndSendNow();
+      }
+    }, 30000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastSentMsRef.current >= 10000) {
+        requestAndSendNow();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Best-effort screen wake lock while driver tracking is active
+    const navWithWakeLock = navigator as unknown as {
+      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
+    };
+    if (navWithWakeLock.wakeLock && document.visibilityState === 'visible') {
+      navWithWakeLock.wakeLock
+        .request('screen')
+        .then((lock) => {
+          wakeLockRef.current = lock;
+        })
+        .catch(() => undefined);
+    }
+
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
       stopGpsWatch();
     };
   }, [
@@ -319,7 +499,8 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
   const isLiveSharing = vehicleGpsStatus !== 'paused' && Boolean(latestGps?.isLive);
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen bg-[#eef2f7] relative flex flex-col">
+      <AppLogoBackdrop />
       {/* Sticky Top Header (h-14, compact mobile thumb-friendly shell) */}
       <header className="sticky top-0 z-30 h-14 bg-[#0B1F3A] text-white border-b border-slate-800 px-4">
         <div className="max-w-3xl mx-auto h-full flex items-center justify-between gap-3">
@@ -358,7 +539,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
               >
                 {allDrivers.map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.fullName} ({d.driverCode})
+                    {d.fullName} ({d.driverCode}){d.accountStatus !== 'active' ? ' - مؤرشف' : ''}
                   </option>
                 ))}
               </select>
@@ -380,7 +561,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
       </header>
 
       {/* Main Scrollable Content */}
-      <main className="flex-1 w-full max-w-3xl mx-auto px-4 pt-4 pb-24 space-y-4">
+      <main className="app-glass-cards relative z-10 flex-1 w-full max-w-3xl mx-auto px-4 pt-4 pb-24 space-y-4">
         {allowDriverSelector && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 flex items-center justify-between gap-3">
             <span>وضع معاينة تطبيق السائق (حساب المدير العام)</span>
@@ -396,8 +577,25 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
         )}
 
         {loading && !data ? (
-          <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-sm text-slate-500">
-            جاري تحميل ملف السائق...
+          allowDriverSelector ? (
+            <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-sm text-slate-500">
+              جاري تحميل ملف السائق للمعاينة...
+            </div>
+          ) : (
+            <SplashScreen message="جاري تحميل ملف السائق وكشف الحساب..." />
+          )
+        ) : allowDriverSelector && driversLoaded && allDrivers.length === 0 ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-3">
+            <div className="w-12 h-12 rounded-2xl bg-amber-50 text-[#C89B3C] flex items-center justify-center mx-auto border border-amber-200">
+              <UserCheck className="w-6 h-6" />
+            </div>
+            <h2 className="font-display text-lg font-bold text-[#0B1F3A]">
+              لا يوجد سائقون مسجلون للمعاينة حالياً
+            </h2>
+            <p className="text-sm text-slate-600 leading-relaxed max-w-md mx-auto">
+              يرجى إضافة سائق واحد على الأقل من قسم «إدارة السائقين» أولاً لتتمكن من معاينة واجهة
+              تطبيق السائق الكاملة هنا.
+            </p>
           </div>
         ) : !data?.linked || !driver ? (
           <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 text-center space-y-4">
@@ -440,48 +638,72 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
             {activeTab === 'home' && (
               <div className="space-y-4">
                 {/* Identity & Salary Summary Card */}
-                <section className="rounded-2xl bg-[#0B1F3A] text-white p-5 space-y-5">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex items-center gap-3.5 min-w-0">
-                      <DriverAvatar
-                        name={driver.fullName}
-                        photoUrl={driver.photoUrl}
-                        size="lg"
-                        variant="dark"
+                <section className="relative overflow-hidden rounded-2xl bg-[#0B1F3A] text-white p-5">
+                  <img
+                    src={travelBackdropImg}
+                    alt=""
+                    referrerPolicy="no-referrer"
+                    className="absolute inset-0 w-full h-full object-cover opacity-30 pointer-events-none select-none"
+                  />
+                  <div
+                    aria-hidden="true"
+                    className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none select-none"
+                  >
+                    <div className="w-36 h-36 sm:w-44 sm:h-44 rounded-full overflow-hidden opacity-55 ring-1 ring-[#C89B3C]/40 shadow-2xl">
+                      <img
+                        src={splashScreenImg}
+                        alt=""
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover object-center scale-110"
                       />
-                      <div className="min-w-0">
-                        <p className="text-xs text-slate-300">ملف السائق الشخصي</p>
-                        <h1 className="font-display text-xl font-bold mt-0.5 truncate">
-                          {driver.fullName}
-                        </h1>
-                        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300">
-                          <span className="font-mono">الكود: {driver.driverCode}</span>
-                          <span className="flex items-center gap-1 font-mono" dir="ltr">
-                            <Phone className="w-3.5 h-3.5 text-[#C89B3C]" />
-                            {driver.phone}
-                          </span>
+                    </div>
+                  </div>
+                  <div className="absolute inset-0 bg-gradient-to-l from-[#0B1F3A]/85 via-[#0B1F3A]/45 to-transparent pointer-events-none" />
+                  <div className="relative z-10 space-y-5">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <DriverAvatar
+                          name={driver.fullName}
+                          photoUrl={driver.photoUrl}
+                          size="lg"
+                          variant="dark"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs text-slate-300">ملف السائق الشخصي</p>
+                          <h1 className="font-display text-xl font-bold mt-0.5 truncate">
+                            {driver.fullName}
+                          </h1>
+                          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300">
+                            <span className="font-mono">الكود: {driver.driverCode}</span>
+                            <span className="flex items-center gap-1 font-mono" dir="ltr">
+                              <Phone className="w-3.5 h-3.5 text-[#C89B3C]" />
+                              {driver.phone}
+                            </span>
+                          </div>
                         </div>
                       </div>
+                      {driver.accountStatus === 'active' && (
+                        <span className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-semibold text-[#C89B3C] shrink-0">
+                          حساب نشط
+                        </span>
+                      )}
                     </div>
-                    <span className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-semibold text-[#C89B3C] shrink-0">
-                      {driver.accountStatus === 'active' ? 'حساب نشط' : 'حساب موقوف'}
-                    </span>
-                  </div>
 
-                  <div className="grid grid-cols-2 gap-3 pt-4 border-t border-white/10">
-                    <div>
-                      <p className="text-xs text-slate-300">الراتب المتفق عليه</p>
-                      <p className="text-lg sm:text-xl font-bold tabular-nums mt-0.5">
-                        {formatEGP(driver.monthlyAgreedSalary)}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-slate-300">
-                        صافي المستحق ({ARABIC_MONTHS[month - 1]})
-                      </p>
-                      <p className="text-lg sm:text-xl font-bold text-[#C89B3C] tabular-nums mt-0.5">
-                        {formatEGP(salary?.netSalary || 0)}
-                      </p>
+                    <div className="grid grid-cols-2 gap-3 pt-4 border-t border-white/10">
+                      <div>
+                        <p className="text-xs text-slate-300">الراتب المتفق عليه</p>
+                        <p className="text-lg sm:text-xl font-bold tabular-nums mt-0.5">
+                          {formatEGP(driver.monthlyAgreedSalary)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-300">
+                          صافي المستحق ({ARABIC_MONTHS[month - 1]})
+                        </p>
+                        <p className="text-lg sm:text-xl font-bold text-[#C89B3C] tabular-nums mt-0.5">
+                          {formatEGP(salary?.netSalary || 0)}
+                        </p>
+                      </div>
                     </div>
                   </div>
                 </section>
@@ -527,8 +749,25 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                   </div>
                 </section>
 
+                {/* Driver License Photos Upload & View Section */}
+                <DriverLicensesSection
+                  photos={driver.licensePhotos || []}
+                  viewerRole={allowDriverSelector ? 'admin' : 'driver'}
+                  compact
+                  onSavePhotos={async (nextPhotos) => {
+                    await apiFetch('/api/driver-app/licenses', {
+                      method: 'PUT',
+                      body: JSON.stringify({
+                        licensePhotos: nextPhotos,
+                        driverId: allowDriverSelector ? driver.id : undefined,
+                      }),
+                    });
+                    await loadDriverData();
+                  }}
+                />
+
                 {/* Location Status Quick Card */}
-                <section className="bg-white border border-slate-200 rounded-2xl p-5">
+                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                       <div
@@ -552,18 +791,29 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                             : 'غير متصل'}
                         </p>
                         <p className="text-xs text-slate-500 mt-0.5">
-                          {latestGps?.recordedAt
+                          {geoPermState === 'granted' && gpsConsent
+                            ? 'إذن الموقع محفوظ ويعمل تلقائياً عند كل فتح للتطبيق'
+                            : latestGps?.recordedAt
                             ? `آخر تحديث: ${formatRelativeArabicTime(latestGps.recordedAt)}`
                             : 'لم يتم إرسال موقع بعد'}
                         </p>
                       </div>
                     </div>
-                    <button
-                      onClick={() => setActiveTab('location')}
-                      className="min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 px-3.5 py-2 text-xs font-semibold text-[#0B1F3A] shrink-0 cursor-pointer"
-                    >
-                      إدارة الموقع
-                    </button>
+                    {!allowDriverSelector && (!gpsConsent || geoPermState !== 'granted') ? (
+                      <button
+                        onClick={handleToggleConsent}
+                        className="min-h-[44px] rounded-xl bg-[#0B1F3A] hover:bg-[#13325c] px-4 py-2 text-xs font-bold text-white shrink-0 cursor-pointer"
+                      >
+                        تفعيل الموقع الدائم
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setActiveTab('location')}
+                        className="min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 px-3.5 py-2 text-xs font-semibold text-[#0B1F3A] shrink-0 cursor-pointer"
+                      >
+                        إدارة الموقع
+                      </button>
+                    )}
                   </div>
                 </section>
 

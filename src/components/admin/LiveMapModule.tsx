@@ -44,7 +44,9 @@ const AdvancedMarkerWithRef: React.FC<{
 const RouteTrailOverlay: React.FC<{ points: GpsHistoryPoint[] }> = ({ points }) => {
   const map = useMap();
   useEffect(() => {
-    if (!map || points.length < 2 || typeof google === 'undefined') return;
+    if (!map || points.length < 2 || typeof google === 'undefined' || !google.maps?.Polyline) {
+      return;
+    }
     const path = [...points]
       .reverse()
       .map((p) => ({ lat: p.lat, lng: p.lng }));
@@ -63,8 +65,27 @@ const RouteTrailOverlay: React.FC<{ points: GpsHistoryPoint[] }> = ({ points }) 
   return null;
 };
 
+const ALEXANDRIA_CENTER = { lat: 31.2156, lng: 29.9553 };
+
+const MapPanController: React.FC<{ target: { lat: number; lng: number; zoom?: number } | null }> = ({
+  target,
+}) => {
+  const map = useMap();
+  useEffect(() => {
+    if (!map || !target) return;
+    map.panTo({ lat: target.lat, lng: target.lng });
+    if (target.zoom) {
+      map.setZoom(target.zoom);
+    }
+  }, [map, target]);
+  return null;
+};
+
 export const LiveMapModule: React.FC = () => {
-  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  const apiKey = (import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '').trim();
+  const hasValidApiKey = Boolean(
+    apiKey && apiKey !== 'false' && apiKey !== 'undefined' && !apiKey.includes('MY_GOOGLE_MAPS_API_KEY')
+  );
   const [fleet, setFleet] = useState<FleetVehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +94,9 @@ export const LiveMapModule: React.FC = () => {
     useState<google.maps.marker.AdvancedMarkerElement | null>(null);
   const [history, setHistory] = useState<GpsHistoryPoint[]>([]);
   const [distanceKm, setDistanceKm] = useState<number>(0);
+  const [panTarget, setPanTarget] = useState<{ lat: number; lng: number; zoom?: number } | null>(
+    null
+  );
 
   const loadFleet = useCallback(async () => {
     try {
@@ -98,6 +122,9 @@ export const LiveMapModule: React.FC = () => {
   ) => {
     setSelectedVehicle(v);
     if (marker) setSelectedMarker(marker);
+    if (v.gps) {
+      setPanTarget({ lat: v.gps.lat, lng: v.gps.lng, zoom: 13 });
+    }
     try {
       const res = await apiFetch<{ history: GpsHistoryPoint[]; distanceKm: number }>(
         `/api/gps/vehicle/${v.id}/history`
@@ -108,26 +135,6 @@ export const LiveMapModule: React.FC = () => {
       setHistory([]);
       setDistanceKm(0);
     }
-  };
-
-  const simulateMovementPing = async (v: FleetVehicle) => {
-    const baseLat = v.gps?.lat ?? 30.0444;
-    const baseLng = v.gps?.lng ?? 31.3457;
-    const nextLat = baseLat + (Math.random() - 0.5) * 0.008;
-    const nextLng = baseLng + (Math.random() - 0.5) * 0.008;
-    const speedKmh = Math.floor(25 + Math.random() * 40);
-    await apiFetch('/api/gps/update', {
-      method: 'POST',
-      body: JSON.stringify({
-        vehicleId: v.id,
-        lat: nextLat,
-        lng: nextLng,
-        speedKmh,
-        accuracyMeters: 8,
-      }),
-    });
-    await loadFleet();
-    await handleSelectVehicle(v);
   };
 
   const onlineCount = fleet.filter((v) => v.isOnline).length;
@@ -145,10 +152,17 @@ export const LiveMapModule: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3 text-xs shrink-0">
+        <div className="flex flex-wrap items-center gap-3 text-xs shrink-0">
           <span className="font-semibold text-emerald-700">متصل مباشر: {onlineCount}</span>
           <span className="text-slate-300">|</span>
           <span className="font-semibold text-amber-700">غير متصل / مخزن: {offlineCount}</span>
+          <button
+            onClick={() => setPanTarget({ ...ALEXANDRIA_CENTER, zoom: 12 })}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+          >
+            <Navigation className="w-3.5 h-3.5 text-[#C89B3C]" />
+            الإسكندرية
+          </button>
           <button
             onClick={loadFleet}
             className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
@@ -224,20 +238,21 @@ export const LiveMapModule: React.FC = () => {
         {/* Google Map Area */}
         <div className="lg:col-span-8 space-y-4">
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden h-[480px] relative">
-            {!apiKey ? (
+            {!hasValidApiKey ? (
               <div className="h-full flex flex-col items-center justify-center p-6 text-center text-sm text-slate-500">
-                مفتاح خرائط جوجل (VITE_GOOGLE_MAPS_API_KEY) غير متوفر في البيئة.
+                مفتاح خرائط جوجل (VITE_GOOGLE_MAPS_API_KEY) غير متوفر أو غير صالح في البيئة.
               </div>
             ) : (
               <APIProvider apiKey={apiKey} libraries={['marker']} language="ar" region="EG">
                 <GoogleMap
                   mapId="DEMO_MAP_ID"
-                  defaultCenter={{ lat: 30.03, lng: 31.38 }}
-                  defaultZoom={11}
+                  defaultCenter={ALEXANDRIA_CENTER}
+                  defaultZoom={12}
                   gestureHandling="greedy"
                   internalUsageAttributionIds={['gmp_mcp_codeassist_v1_aistudio']}
                   style={{ width: '100%', height: '100%' }}
                 >
+                  <MapPanController target={panTarget} />
                   {fleet
                     .filter((v) => v.gps)
                     .map((v, idx) => (
@@ -315,13 +330,6 @@ export const LiveMapModule: React.FC = () => {
                     : 'لا توجد إحداثيات مسجلة'}
                 </div>
               </div>
-              <button
-                onClick={() => simulateMovementPing(selectedVehicle)}
-                className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-3.5 py-2 font-semibold text-white hover:bg-[#13325c] cursor-pointer shrink-0"
-              >
-                <Navigation className="w-3.5 h-3.5 text-[#C89B3C]" />
-                تحديث نبضة GPS للمركبة
-              </button>
             </div>
           )}
         </div>

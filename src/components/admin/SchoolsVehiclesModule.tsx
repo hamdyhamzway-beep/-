@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Building2, Bus, Plus, Route, User, X } from 'lucide-react';
+import { Building2, Bus, Edit3, Plus, Route, Trash2, User, X } from 'lucide-react';
 import { apiFetch, formatEGP } from '../../lib/api';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import type { FleetVehicle, RouteItem, SchoolItem, VehicleOwner } from '../../types';
@@ -13,11 +13,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Modals
+  // Modals & Editing state
   const [showSchoolModal, setShowSchoolModal] = useState(false);
+  const [editingSchoolId, setEditingSchoolId] = useState<number | null>(null);
   const [showVehicleModal, setShowVehicleModal] = useState(false);
+  const [editingVehicleId, setEditingVehicleId] = useState<number | null>(null);
   const [showOwnerModal, setShowOwnerModal] = useState(false);
   const [showRouteModal, setShowRouteModal] = useState(false);
+  const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [savingModal, setSavingModal] = useState(false);
 
   const [schoolForm, setSchoolForm] = useState({
     name: '',
@@ -25,16 +30,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
     contactPhone: '',
     address: '',
     monthlyContractValue: '',
-    contractStartDate: '2026-09-01',
-    contractEndDate: '2027-06-30',
+    contractStartDate: '',
+    contractEndDate: '',
     notes: '',
   });
 
   const [vehicleForm, setVehicleForm] = useState({
     busNumber: '',
     registrationNumber: '',
-    vehicleType: 'تويوتا هايس سقف عالي 14 راكب',
-    ownerId: '',
+    vehicleType: '',
+    ownerName: '',
     monthlyOwnerCost: '',
     operationalStatus: 'active',
   });
@@ -48,12 +53,12 @@ export const SchoolsVehiclesModule: React.FC = () => {
 
   const [routeForm, setRouteForm] = useState({
     name: '',
-    schoolId: '',
+    schoolName: '',
     pickupArea: '',
     dropoffArea: '',
-    pickupTime: '06:45',
-    dropoffTime: '14:30',
-    estimatedDistanceKm: '15',
+    pickupTime: '',
+    dropoffTime: '',
+    estimatedDistanceKm: '',
   });
 
   const loadData = useCallback(async () => {
@@ -82,78 +87,237 @@ export const SchoolsVehiclesModule: React.FC = () => {
 
   const handleAddSchool = async (e: React.FormEvent) => {
     e.preventDefault();
-    await apiFetch('/api/schools', {
-      method: 'POST',
-      body: JSON.stringify({
+    setModalError(null);
+    setSavingModal(true);
+    try {
+      const payload = {
         ...schoolForm,
         monthlyContractValue: Number(schoolForm.monthlyContractValue || 0),
-      }),
-    });
-    setShowSchoolModal(false);
+      };
+      if (editingSchoolId) {
+        await apiFetch(`/api/schools/${editingSchoolId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiFetch('/api/schools', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+      setShowSchoolModal(false);
+      setEditingSchoolId(null);
+      setSchoolForm({
+        name: '',
+        contactName: '',
+        contactPhone: '',
+        address: '',
+        monthlyContractValue: '',
+        contractStartDate: '',
+        contractEndDate: '',
+        notes: '',
+      });
+      await loadData();
+    } catch (err: unknown) {
+      setModalError(err instanceof Error ? err.message : 'تعذر حفظ بيانات المدرسة');
+    } finally {
+      setSavingModal(false);
+    }
+  };
+
+  const handleAddVehicle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setModalError(null);
+    setSavingModal(true);
+    try {
+      const payload = {
+        ...vehicleForm,
+        ownerName: vehicleForm.ownerName.trim(),
+        monthlyOwnerCost: Number(vehicleForm.monthlyOwnerCost || 0),
+      };
+      if (editingVehicleId) {
+        await apiFetch(`/api/vehicles/${editingVehicleId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiFetch('/api/vehicles', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+      setShowVehicleModal(false);
+      setEditingVehicleId(null);
+      setVehicleForm({
+        busNumber: '',
+        registrationNumber: '',
+        vehicleType: '',
+        ownerName: '',
+        monthlyOwnerCost: '',
+        operationalStatus: 'active',
+      });
+      await loadData();
+    } catch (err: unknown) {
+      setModalError(err instanceof Error ? err.message : 'تعذر حفظ بيانات المركبة');
+    } finally {
+      setSavingModal(false);
+    }
+  };
+
+  const handleAddOwner = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setModalError(null);
+    setSavingModal(true);
+    try {
+      await apiFetch('/api/owners', { method: 'POST', body: JSON.stringify(ownerForm) });
+      setShowOwnerModal(false);
+      setOwnerForm({ fullName: '', phone: '', nationalId: '', notes: '' });
+      await loadData();
+    } catch (err: unknown) {
+      setModalError(err instanceof Error ? err.message : 'تعذر إضافة مالك المركبة');
+    } finally {
+      setSavingModal(false);
+    }
+  };
+
+  const handleAddRoute = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setModalError(null);
+    setSavingModal(true);
+    try {
+      const payload = {
+        ...routeForm,
+        schoolName: routeForm.schoolName.trim(),
+        estimatedDistanceKm: Number(routeForm.estimatedDistanceKm || 0),
+      };
+      if (editingRouteId) {
+        await apiFetch(`/api/routes/${editingRouteId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiFetch('/api/routes', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+      setShowRouteModal(false);
+      setEditingRouteId(null);
+      setRouteForm({
+        name: '',
+        schoolName: '',
+        pickupArea: '',
+        dropoffArea: '',
+        pickupTime: '',
+        dropoffTime: '',
+        estimatedDistanceKm: '',
+      });
+      await loadData();
+    } catch (err: unknown) {
+      setModalError(err instanceof Error ? err.message : 'تعذر حفظ خط السير');
+    } finally {
+      setSavingModal(false);
+    }
+  };
+
+  const handleDeleteRoute = async (id: number) => {
+    try {
+      await apiFetch(`/api/routes/${id}`, { method: 'DELETE' });
+      await loadData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر حذف خط السير');
+    }
+  };
+
+  const openAddSchool = () => {
+    setModalError(null);
+    setEditingSchoolId(null);
     setSchoolForm({
       name: '',
       contactName: '',
       contactPhone: '',
       address: '',
       monthlyContractValue: '',
-      contractStartDate: '2026-09-01',
-      contractEndDate: '2027-06-30',
+      contractStartDate: '',
+      contractEndDate: '',
       notes: '',
     });
-    await loadData();
+    setShowSchoolModal(true);
   };
 
-  const handleAddVehicle = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await apiFetch('/api/vehicles', {
-      method: 'POST',
-      body: JSON.stringify({
-        ...vehicleForm,
-        ownerId: vehicleForm.ownerId ? Number(vehicleForm.ownerId) : null,
-        monthlyOwnerCost: Number(vehicleForm.monthlyOwnerCost || 0),
-      }),
+  const openEditSchool = (s: SchoolItem) => {
+    setModalError(null);
+    setEditingSchoolId(s.id);
+    setSchoolForm({
+      name: s.name,
+      contactName: s.contactName || '',
+      contactPhone: s.contactPhone || '',
+      address: s.address || '',
+      monthlyContractValue: String(s.monthlyContractValue || 0),
+      contractStartDate: s.contractStartDate || '',
+      contractEndDate: s.contractEndDate || '',
+      notes: s.notes || '',
     });
-    setShowVehicleModal(false);
+    setShowSchoolModal(true);
+  };
+
+  const openAddVehicle = () => {
+    setModalError(null);
+    setEditingVehicleId(null);
     setVehicleForm({
       busNumber: '',
       registrationNumber: '',
-      vehicleType: 'تويوتا هايس سقف عالي 14 راكب',
-      ownerId: '',
+      vehicleType: '',
+      ownerName: '',
       monthlyOwnerCost: '',
       operationalStatus: 'active',
     });
-    await loadData();
+    setShowVehicleModal(true);
   };
 
-  const handleAddOwner = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await apiFetch('/api/owners', { method: 'POST', body: JSON.stringify(ownerForm) });
-    setShowOwnerModal(false);
-    setOwnerForm({ fullName: '', phone: '', nationalId: '', notes: '' });
-    await loadData();
-  };
-
-  const handleAddRoute = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await apiFetch('/api/routes', {
-      method: 'POST',
-      body: JSON.stringify({
-        ...routeForm,
-        schoolId: Number(routeForm.schoolId),
-        estimatedDistanceKm: Number(routeForm.estimatedDistanceKm || 0),
-      }),
+  const openEditVehicle = (v: FleetVehicle) => {
+    setModalError(null);
+    setEditingVehicleId(v.id);
+    setVehicleForm({
+      busNumber: v.busNumber,
+      registrationNumber: v.registrationNumber,
+      vehicleType: v.vehicleType || '',
+      ownerName: v.ownerName && v.ownerName !== '—' ? v.ownerName : '',
+      monthlyOwnerCost: String(v.monthlyOwnerCost || 0),
+      operationalStatus: v.operationalStatus || 'active',
     });
-    setShowRouteModal(false);
+    setShowVehicleModal(true);
+  };
+
+  const openAddRoute = () => {
+    setModalError(null);
+    setEditingRouteId(null);
     setRouteForm({
       name: '',
-      schoolId: '',
+      schoolName: '',
       pickupArea: '',
       dropoffArea: '',
-      pickupTime: '06:45',
-      dropoffTime: '14:30',
-      estimatedDistanceKm: '15',
+      pickupTime: '',
+      dropoffTime: '',
+      estimatedDistanceKm: '',
     });
-    await loadData();
+    setShowRouteModal(true);
+  };
+
+  const openEditRoute = (r: RouteItem) => {
+    setModalError(null);
+    setEditingRouteId(r.id);
+    const linkedSchool = schoolsList.find((s) => s.id === r.schoolId);
+    setRouteForm({
+      name: r.name,
+      schoolName: linkedSchool?.name || '',
+      pickupArea: r.pickupArea || '',
+      dropoffArea: r.dropoffArea || '',
+      pickupTime: r.pickupTime || '',
+      dropoffTime: r.dropoffTime || '',
+      estimatedDistanceKm: r.estimatedDistanceKm ? String(r.estimatedDistanceKm) : '',
+    });
+    setShowRouteModal(true);
   };
 
   return (
@@ -171,7 +335,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
         <div className="flex items-center gap-2 shrink-0">
           {tab === 'schools' && (
             <button
-              onClick={() => setShowSchoolModal(true)}
+              onClick={openAddSchool}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
             >
               <Plus className="w-4 h-4 text-[#C89B3C]" />
@@ -180,13 +344,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
           )}
           {tab === 'vehicles' && (
             <button
-              onClick={() => {
-                setVehicleForm((f) => ({
-                  ...f,
-                  ownerId: ownersList[0]?.id ? String(ownersList[0].id) : '',
-                }));
-                setShowVehicleModal(true);
-              }}
+              onClick={openAddVehicle}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
             >
               <Plus className="w-4 h-4 text-[#C89B3C]" />
@@ -195,7 +353,10 @@ export const SchoolsVehiclesModule: React.FC = () => {
           )}
           {tab === 'owners' && (
             <button
-              onClick={() => setShowOwnerModal(true)}
+              onClick={() => {
+                setModalError(null);
+                setShowOwnerModal(true);
+              }}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
             >
               <Plus className="w-4 h-4 text-[#C89B3C]" />
@@ -204,13 +365,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
           )}
           {tab === 'routes' && (
             <button
-              onClick={() => {
-                setRouteForm((f) => ({
-                  ...f,
-                  schoolId: schoolsList[0]?.id ? String(schoolsList[0].id) : '',
-                }));
-                setShowRouteModal(true);
-              }}
+              onClick={openAddRoute}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
             >
               <Plus className="w-4 h-4 text-[#C89B3C]" />
@@ -297,11 +452,20 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 </div>
               </div>
 
-              <div className="text-[11px] text-slate-400 border-t border-slate-100 pt-2.5 flex items-center justify-between">
+              <div className="text-[11px] text-slate-400 border-t border-slate-100 pt-2.5 flex items-center justify-between gap-2">
                 <span className="font-mono tabular-nums">
                   العقد: {s.contractStartDate} إلى {s.contractEndDate}
                 </span>
-                <span>{s.isActive ? 'عقد ساري' : 'غير نشط'}</span>
+                <div className="flex items-center gap-2">
+                  <span>{s.isActive ? 'عقد ساري' : 'غير نشط'}</span>
+                  <button
+                    onClick={() => openEditSchool(s)}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                  >
+                    <Edit3 className="w-3 h-3" />
+                    تعديل
+                  </button>
+                </div>
               </div>
             </div>
           ))}
@@ -318,6 +482,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
                   <th className="py-3 px-4 font-semibold">المدرسة والسائق</th>
                   <th className="py-3 px-4 font-semibold">حالة التشغيل و GPS</th>
+                  <th className="py-3 px-4 font-semibold">تعديل</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -357,6 +522,15 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         {v.isOnline ? 'GPS متصل مباشر' : 'GPS غير متصل'}
                       </div>
                     </td>
+                    <td className="py-3.5 px-4">
+                      <button
+                        onClick={() => openEditVehicle(v)}
+                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        تعديل
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -378,49 +552,89 @@ export const SchoolsVehiclesModule: React.FC = () => {
         </div>
       ) : (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <table className="w-full text-right text-xs">
-            <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
-              <tr>
-                <th className="py-3 px-4 font-semibold">اسم الخط</th>
-                <th className="py-3 px-4 font-semibold">المدرسة</th>
-                <th className="py-3 px-4 font-semibold">نقطة التجمع / الانطلاق</th>
-                <th className="py-3 px-4 font-semibold">مواعيد الذهاب والعودة</th>
-                <th className="py-3 px-4 font-semibold">المسافة التقديرية</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {routesList.map((r) => {
-                const school = schoolsList.find((s) => s.id === r.schoolId);
-                return (
-                  <tr key={r.id}>
-                    <td className="py-3 px-4 font-semibold text-[#0B1F3A]">{r.name}</td>
-                    <td className="py-3 px-4 text-slate-700">{school?.name || '—'}</td>
-                    <td className="py-3 px-4 text-slate-600">{r.pickupArea}</td>
-                    <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
-                      {r.pickupTime} — {r.dropoffTime}
-                    </td>
-                    <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
-                      {r.estimatedDistanceKm} كم
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
+            <span className="font-bold text-xs text-[#0B1F3A]">
+              خطوط السير المسجلة ({routesList.length})
+            </span>
+            <button
+              onClick={openAddRoute}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5 text-[#C89B3C]" />
+              إضافة خط سير جديد
+            </button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-right text-xs">
+              <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                <tr>
+                  <th className="py-3 px-4 font-semibold">اسم الخط</th>
+                  <th className="py-3 px-4 font-semibold">المدرسة</th>
+                  <th className="py-3 px-4 font-semibold">نقطة التجمع / الانطلاق</th>
+                  <th className="py-3 px-4 font-semibold">مواعيد الذهاب والعودة</th>
+                  <th className="py-3 px-4 font-semibold">المسافة التقديرية</th>
+                  <th className="py-3 px-4 font-semibold">الإجراءات</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {routesList.map((r) => {
+                  const school = schoolsList.find((s) => s.id === r.schoolId);
+                  return (
+                    <tr key={r.id} className="hover:bg-slate-50/70">
+                      <td className="py-3 px-4 font-semibold text-[#0B1F3A]">{r.name}</td>
+                      <td className="py-3 px-4 text-slate-700">{school?.name || '—'}</td>
+                      <td className="py-3 px-4 text-slate-600">{r.pickupArea || '—'}</td>
+                      <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
+                        {r.pickupTime} — {r.dropoffTime}
+                      </td>
+                      <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
+                        {r.estimatedDistanceKm} كم
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => openEditRoute(r)}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            تعديل
+                          </button>
+                          <button
+                            onClick={() => handleDeleteRoute(r.id)}
+                            className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            حذف
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      {/* Add School Modal */}
+      {/* Add/Edit School Modal */}
       {showSchoolModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-lg bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
             <div className="px-6 py-4 bg-[#0B1F3A] text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">إضافة مدرسة وعقد شهري جديد</h3>
+              <h3 className="font-bold text-sm">
+                {editingSchoolId ? 'تعديل بيانات المدرسة' : 'إضافة مدرسة وعقد شهري جديد'}
+              </h3>
               <button onClick={() => setShowSchoolModal(false)} className="cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleAddSchool} className="p-6 space-y-3 text-xs">
+              {modalError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
+                  {modalError}
+                </div>
+              )}
               <input
                 required
                 placeholder="اسم المدرسة *"
@@ -497,21 +711,28 @@ export const SchoolsVehiclesModule: React.FC = () => {
         </div>
       )}
 
-      {/* Add Vehicle Modal */}
+      {/* Add/Edit Vehicle Modal */}
       {showVehicleModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-lg bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
             <div className="px-6 py-4 bg-[#0B1F3A] text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">إضافة مركبة / باص جديد</h3>
+              <h3 className="font-bold text-sm">
+                {editingVehicleId ? 'تعديل بيانات المركبة' : 'إضافة مركبة / باص جديد'}
+              </h3>
               <button onClick={() => setShowVehicleModal(false)} className="cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleAddVehicle} className="p-6 space-y-3 text-xs">
+              {modalError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
+                  {modalError}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <input
                   required
-                  placeholder="رقم الباص (مثال: B-104) *"
+                  placeholder="رقم الباص *"
                   value={vehicleForm.busNumber}
                   onChange={(e) => setVehicleForm({ ...vehicleForm, busNumber: e.target.value })}
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
@@ -527,24 +748,19 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 />
               </div>
               <input
-                placeholder="نوع المركبة (مثال: تويوتا هايس سقف عالي)"
+                placeholder="نوع المركبة"
                 value={vehicleForm.vehicleType}
                 onChange={(e) => setVehicleForm({ ...vehicleForm, vehicleType: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
               <div className="grid grid-cols-2 gap-3">
-                <select
-                  value={vehicleForm.ownerId}
-                  onChange={(e) => setVehicleForm({ ...vehicleForm, ownerId: e.target.value })}
+                <input
+                  type="text"
+                  placeholder="اكتب اسم مالك المركبة"
+                  value={vehicleForm.ownerName}
+                  onChange={(e) => setVehicleForm({ ...vehicleForm, ownerName: e.target.value })}
                   className="w-full rounded-lg border border-slate-200 px-3 py-2"
-                >
-                  <option value="">اختر مالك المركبة</option>
-                  {ownersList.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.fullName}
-                    </option>
-                  ))}
-                </select>
+                />
                 <input
                   type="number"
                   required
@@ -578,6 +794,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
               </button>
             </div>
             <form onSubmit={handleAddOwner} className="p-6 space-y-3 text-xs">
+              {modalError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
+                  {modalError}
+                </div>
+              )}
               <input
                 required
                 placeholder="الاسم الكامل للمالك *"
@@ -615,17 +836,24 @@ export const SchoolsVehiclesModule: React.FC = () => {
         </div>
       )}
 
-      {/* Add Route Modal */}
+      {/* Add/Edit Route Modal */}
       {showRouteModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
             <div className="px-6 py-4 bg-[#0B1F3A] text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">إضافة خط سير جديد</h3>
+              <h3 className="font-bold text-sm">
+                {editingRouteId ? 'تعديل خط السير' : 'إضافة خط سير جديد'}
+              </h3>
               <button onClick={() => setShowRouteModal(false)} className="cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
             <form onSubmit={handleAddRoute} className="p-6 space-y-3 text-xs">
+              {modalError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
+                  {modalError}
+                </div>
+              )}
               <input
                 required
                 placeholder="اسم الخط *"
@@ -633,44 +861,63 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 onChange={(e) => setRouteForm({ ...routeForm, name: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
-              <select
-                required
-                value={routeForm.schoolId}
-                onChange={(e) => setRouteForm({ ...routeForm, schoolId: e.target.value })}
+              <input
+                type="text"
+                placeholder="اكتب اسم المدرسة (اختياري)"
+                value={routeForm.schoolName}
+                onChange={(e) => setRouteForm({ ...routeForm, schoolName: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              >
-                <option value="">اختر المدرسة</option>
-                {schoolsList.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
+              />
               <input
                 placeholder="منطقة الانطلاق / التجمع"
                 value={routeForm.pickupArea}
                 onChange={(e) => setRouteForm({ ...routeForm, pickupArea: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
-              <div className="grid grid-cols-2 gap-3">
-                <input
-                  type="time"
-                  value={routeForm.pickupTime}
-                  onChange={(e) => setRouteForm({ ...routeForm, pickupTime: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
-                <input
-                  type="time"
-                  value={routeForm.dropoffTime}
-                  onChange={(e) => setRouteForm({ ...routeForm, dropoffTime: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
+              <input
+                placeholder="نقطة الوصول"
+                value={routeForm.dropoffArea}
+                onChange={(e) => setRouteForm({ ...routeForm, dropoffArea: e.target.value })}
+                className="w-full rounded-lg border border-slate-200 px-3 py-2"
+              />
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] text-slate-500 mb-1">وقت الذهاب</label>
+                  <input
+                    type="time"
+                    value={routeForm.pickupTime}
+                    onChange={(e) => setRouteForm({ ...routeForm, pickupTime: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-2.5 py-2 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-500 mb-1">وقت العودة</label>
+                  <input
+                    type="time"
+                    value={routeForm.dropoffTime}
+                    onChange={(e) => setRouteForm({ ...routeForm, dropoffTime: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-2.5 py-2 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-500 mb-1">المسافة (كم)</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={routeForm.estimatedDistanceKm}
+                    onChange={(e) =>
+                      setRouteForm({ ...routeForm, estimatedDistanceKm: e.target.value })
+                    }
+                    className="w-full rounded-lg border border-slate-200 px-2.5 py-2 font-mono"
+                  />
+                </div>
               </div>
               <button
                 type="submit"
                 className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
               >
-                حفظ الخط
+                {editingRouteId ? 'حفظ التعديلات' : 'حفظ الخط'}
               </button>
             </form>
           </div>

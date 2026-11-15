@@ -3,6 +3,7 @@
   "appId": "1:187493350796:web:e8ecd83991b87a75a9eaa9",
   "apiKey": "AIzaSyD4X2EsTLAqHElsiBKmDzNn638XloIak7o",
   "authDomain": "massive-century-b7cvm.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-remix-c34a8348-02d3-4057-99ec-fa0955d9700e",
   "storageBucket": "massive-century-b7cvm.firebasestorage.app",
   "messagingSenderId": "187493350796",
   "measurementId": "",

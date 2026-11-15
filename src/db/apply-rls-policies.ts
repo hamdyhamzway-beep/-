@@ -46,7 +46,7 @@ const POLICY_SPECS: PolicySpec[] = [
     usingExpr:
       "current_setting('app.user_role', true) = 'driver' AND id = CASE WHEN current_setting('app.driver_id', true) ~ '^[0-9]+$' THEN current_setting('app.driver_id', true)::integer ELSE NULL END",
   },
-  // financial_transactions policies (immutable ledger: SELECT + INSERT only, no UPDATE/DELETE)
+  // financial_transactions policies
   {
     table: 'financial_transactions',
     name: 'ft_admin_accountant_select',
@@ -58,6 +58,19 @@ const POLICY_SPECS: PolicySpec[] = [
     name: 'ft_admin_accountant_insert',
     forCmd: 'INSERT',
     withCheckExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
+  },
+  {
+    table: 'financial_transactions',
+    name: 'ft_admin_accountant_update',
+    forCmd: 'UPDATE',
+    usingExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
+    withCheckExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
+  },
+  {
+    table: 'financial_transactions',
+    name: 'ft_admin_accountant_delete',
+    forCmd: 'DELETE',
+    usingExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
   },
   {
     table: 'financial_transactions',

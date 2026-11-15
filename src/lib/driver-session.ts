@@ -11,7 +11,7 @@ export interface DriverSessionPayload {
 }
 
 const TOKEN_PREFIX = 'drv_';
-const DEFAULT_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const DEFAULT_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 days persistent session for installed app
 
 function getSigningSecret(): Buffer {
   const rawSecret = [
@@ -36,6 +36,18 @@ export function normalizeArabicDigits(input: string): string {
 export function normalizeDriverCode(raw: unknown): string {
   if (typeof raw !== 'string' && typeof raw !== 'number') return '';
   return normalizeArabicDigits(String(raw)).trim();
+}
+
+export function normalizeArabicName(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 export function normalizeEgyptPhone(raw: unknown): string {
