@@ -10,8 +10,19 @@ export interface DriverSessionPayload {
   exp: number;
 }
 
-const TOKEN_PREFIX = 'drv_';
+export interface SupervisorSessionPayload {
+  typ: 'supervisor_session';
+  userId: number;
+  supervisorId: number;
+  supervisorCode: string;
+  iat: number;
+  exp: number;
+}
+
+const DRIVER_PREFIX = 'drv_';
+const SUPERVISOR_PREFIX = 'sup_';
 const DEFAULT_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 days persistent session for installed app
+const REFRESH_THRESHOLD_MS = 150 * 24 * 60 * 60 * 1000; // Sliding refresh if <150 days remain
 
 function getSigningSecret(): Buffer {
   const rawSecret = [
@@ -65,33 +76,19 @@ export function normalizeEgyptPhone(raw: unknown): string {
   return cleaned;
 }
 
-export function issueDriverSessionToken(input: {
-  userId: number;
-  driverId: number;
-  driverCode: string;
-}): string {
-  const now = Date.now();
-  const payload: DriverSessionPayload = {
-    typ: 'driver_session',
-    userId: input.userId,
-    driverId: input.driverId,
-    driverCode: input.driverCode,
-    iat: now,
-    exp: now + DEFAULT_TTL_MS,
-  };
-
+function signPayload<T extends object>(prefix: string, payload: T): string {
   const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const signature = crypto
     .createHmac('sha256', getSigningSecret())
     .update(payloadB64)
     .digest('base64url');
 
-  return `${TOKEN_PREFIX}${payloadB64}.${signature}`;
+  return `${prefix}${payloadB64}.${signature}`;
 }
 
-export function verifyDriverSessionToken(token: string): DriverSessionPayload | null {
-  if (!token.startsWith(TOKEN_PREFIX)) return null;
-  const body = token.slice(TOKEN_PREFIX.length);
+function verifySignedPayload<T>(token: string, prefix: string): T | null {
+  if (!token.startsWith(prefix)) return null;
+  const body = token.slice(prefix.length);
   const dotIndex = body.indexOf('.');
   if (dotIndex === -1) return null;
 
@@ -116,22 +113,76 @@ export function verifyDriverSessionToken(token: string): DriverSessionPayload | 
   }
 
   try {
-    const parsed = JSON.parse(
-      Buffer.from(payloadB64, 'base64url').toString('utf8')
-    ) as DriverSessionPayload;
-
-    if (
-      parsed.typ !== 'driver_session' ||
-      typeof parsed.userId !== 'number' ||
-      typeof parsed.driverId !== 'number' ||
-      typeof parsed.exp !== 'number' ||
-      parsed.exp <= Date.now()
-    ) {
-      return null;
-    }
-
-    return parsed;
+    return JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as T;
   } catch {
     return null;
   }
+}
+
+export function issueDriverSessionToken(input: {
+  userId: number;
+  driverId: number;
+  driverCode: string;
+}): string {
+  const now = Date.now();
+  const payload: DriverSessionPayload = {
+    typ: 'driver_session',
+    userId: input.userId,
+    driverId: input.driverId,
+    driverCode: input.driverCode,
+    iat: now,
+    exp: now + DEFAULT_TTL_MS,
+  };
+  return signPayload(DRIVER_PREFIX, payload);
+}
+
+export function verifyDriverSessionToken(token: string): DriverSessionPayload | null {
+  const parsed = verifySignedPayload<DriverSessionPayload>(token, DRIVER_PREFIX);
+  if (
+    !parsed ||
+    parsed.typ !== 'driver_session' ||
+    typeof parsed.userId !== 'number' ||
+    typeof parsed.driverId !== 'number' ||
+    typeof parsed.exp !== 'number' ||
+    parsed.exp <= Date.now()
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+export function issueSupervisorSessionToken(input: {
+  userId: number;
+  supervisorId: number;
+  supervisorCode: string;
+}): string {
+  const now = Date.now();
+  const payload: SupervisorSessionPayload = {
+    typ: 'supervisor_session',
+    userId: input.userId,
+    supervisorId: input.supervisorId,
+    supervisorCode: input.supervisorCode,
+    iat: now,
+    exp: now + DEFAULT_TTL_MS,
+  };
+  return signPayload(SUPERVISOR_PREFIX, payload);
+}
+
+export function verifySupervisorSessionToken(token: string): SupervisorSessionPayload | null {
+  const parsed = verifySignedPayload<SupervisorSessionPayload>(token, SUPERVISOR_PREFIX);
+  if (
+    !parsed ||
+    parsed.typ !== 'supervisor_session' ||
+    typeof parsed.userId !== 'number' ||
+    typeof parsed.supervisorId !== 'number' ||
+    typeof parsed.exp !== 'number' ||
+    parsed.exp <= Date.now()
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+export function shouldRefreshSessionToken(expMs: number): boolean {
+  return expMs - Date.now() < REFRESH_THRESHOLD_MS;
 }

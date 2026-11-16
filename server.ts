@@ -3,7 +3,7 @@ import http from 'http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { and, desc, eq, gte, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, ne, or, sql } from 'drizzle-orm';
 import { db } from './src/db/index.ts';
 import {
   advances,
@@ -20,6 +20,8 @@ import {
   routes,
   salaries,
   schools,
+  supervisors,
+  supervisorTrips,
   userRoles,
   users,
   type DriverLicensePhoto,
@@ -39,6 +41,7 @@ import {
 } from './src/middleware/auth.ts';
 import {
   issueDriverSessionToken,
+  issueSupervisorSessionToken,
   normalizeArabicDigits,
   normalizeArabicName,
   normalizeDriverCode,
@@ -82,7 +85,23 @@ function isGpsFresh(recordedAt: Date | string | null | undefined, isLiveFlag: bo
 }
 
 function getTodayDateString(): string {
-  return new Date().toISOString().slice(0, 10);
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function isValidGpsCoordinate(lat: number, lng: number): boolean {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
+  if (Math.abs(lat) < 0.0001 && Math.abs(lng) < 0.0001) return false;
+  return true;
 }
 
 function sanitizeDriverPhotoUrl(value: unknown): string {
@@ -90,7 +109,7 @@ function sanitizeDriverPhotoUrl(value: unknown): string {
   const trimmed = value.trim();
   if (!trimmed) return '';
   if (trimmed.length > 650_000) {
-    throw new Error('حجم صورة السائق كبير جداً، يرجى اختيار صورة أصغر');
+    throw new Error('حجم الصورة كبير جداً، يرجى اختيار صورة أصغر');
   }
   if (
     trimmed.startsWith('data:image/') ||
@@ -152,15 +171,15 @@ function sanitizeLicensePhotos(
 }
 
 async function getEnrichedDrivers() {
-  const allDrivers = await db.select().from(drivers).orderBy(drivers.driverCode);
-  const currentAssignments = await db
-    .select()
-    .from(driverAssignments)
-    .where(eq(driverAssignments.isCurrent, true));
-  const allSchools = await db.select().from(schools);
-  const allVehicles = await db.select().from(vehicles);
-  const allOwners = await db.select().from(vehicleOwners);
-  const allRoutes = await db.select().from(routes);
+  const [allDrivers, currentAssignments, allSchools, allVehicles, allOwners, allRoutes] =
+    await Promise.all([
+      db.select().from(drivers).orderBy(drivers.driverCode),
+      db.select().from(driverAssignments).where(eq(driverAssignments.isCurrent, true)),
+      db.select().from(schools),
+      db.select().from(vehicles),
+      db.select().from(vehicleOwners),
+      db.select().from(routes),
+    ]);
 
   const schoolById: Record<number, typeof schools.$inferSelect> = {};
   for (const s of allSchools) schoolById[s.id] = s;
@@ -207,21 +226,23 @@ async function getEnrichedDrivers() {
 }
 
 async function getFleetWithLatestGps() {
-  const allVehicles = await db.select().from(vehicles).orderBy(vehicles.busNumber);
-  const allOwners = await db.select().from(vehicleOwners);
-  const allSchools = await db.select().from(schools);
-  const allRoutes = await db.select().from(routes);
-  const allDrivers = await db.select().from(drivers);
-  const currentAssignments = await db
-    .select()
-    .from(driverAssignments)
-    .where(eq(driverAssignments.isCurrent, true));
-
-  const latestGpsRows = await db
-    .select()
-    .from(gpsLocations)
-    .orderBy(desc(gpsLocations.recordedAt))
-    .limit(500);
+  const [
+    allVehicles,
+    allOwners,
+    allSchools,
+    allRoutes,
+    allDrivers,
+    currentAssignments,
+    latestGpsRows,
+  ] = await Promise.all([
+    db.select().from(vehicles).orderBy(vehicles.busNumber),
+    db.select().from(vehicleOwners),
+    db.select().from(schools),
+    db.select().from(routes),
+    db.select().from(drivers),
+    db.select().from(driverAssignments).where(eq(driverAssignments.isCurrent, true)),
+    db.select().from(gpsLocations).orderBy(desc(gpsLocations.recordedAt)).limit(500),
+  ]);
 
   const latestByVehicle: Record<number, typeof gpsLocations.$inferSelect> = {};
   for (const g of latestGpsRows) {
@@ -300,13 +321,22 @@ async function startServer() {
     res.json({ ok: true, service: 'al-waleed-travel' });
   });
 
-  // 0. Driver Phone + Code Login (Public endpoint with rate limiting & live status checks)
-  const driverLoginAttempts: Record<string, { count: number; resetAt: number }> = {};
+  // 0. Driver & Supervisor Code Login (Public endpoints with isolated rate limiting & pruning)
+  const codeLoginAttempts: Record<string, { count: number; resetAt: number }> = {};
+
+  function pruneExpiredLoginAttempts(nowMs: number) {
+    for (const key of Object.keys(codeLoginAttempts)) {
+      if (codeLoginAttempts[key].resetAt <= nowMs) {
+        delete codeLoginAttempts[key];
+      }
+    }
+  }
 
   app.post('/api/auth/driver-login', async (req, res) => {
     const clientIp = req.ip || 'unknown';
+    const rateKey = `drv:${clientIp}`;
     const nowMs = Date.now();
-    const attempt = driverLoginAttempts[clientIp];
+    const attempt = codeLoginAttempts[rateKey];
     if (attempt && attempt.resetAt > nowMs && attempt.count >= 15) {
       return res.status(429).json({
         error: 'تم تجاوز الحد المسموح لمحاولات الدخول. يرجى المحاولة بعد 10 دقائق.',
@@ -314,9 +344,10 @@ async function startServer() {
     }
 
     const recordFailedAttempt = () => {
-      const cur = driverLoginAttempts[clientIp];
+      pruneExpiredLoginAttempts(nowMs);
+      const cur = codeLoginAttempts[rateKey];
       if (!cur || cur.resetAt <= nowMs) {
-        driverLoginAttempts[clientIp] = { count: 1, resetAt: nowMs + 10 * 60 * 1000 };
+        codeLoginAttempts[rateKey] = { count: 1, resetAt: nowMs + 10 * 60 * 1000 };
       } else {
         cur.count += 1;
       }
@@ -506,11 +537,226 @@ async function startServer() {
         return res.status(result.status).json({ error: result.error });
       }
 
-      delete driverLoginAttempts[clientIp];
+      delete codeLoginAttempts[rateKey];
       return res.json(result.payload);
     } catch (error) {
       console.error('Driver login error:', error);
       return res.status(500).json({ error: 'تعذر تسجيل دخول السائق، يرجى المحاولة لاحقاً' });
+    }
+  });
+
+  // 0b. Supervisor Phone/Name + Code Login (نسخة المشرفة - دخول بالكود والموبايل أو الاسم)
+  app.post('/api/auth/supervisor-login', async (req, res) => {
+    const clientIp = req.ip || 'unknown';
+    const rateKey = `sup:${clientIp}`;
+    const nowMs = Date.now();
+    const attempt = codeLoginAttempts[rateKey];
+    if (attempt && attempt.resetAt > nowMs && attempt.count >= 15) {
+      return res.status(429).json({
+        error: 'تم تجاوز الحد المسموح لمحاولات الدخول. يرجى المحاولة بعد 10 دقائق.',
+      });
+    }
+
+    const recordFailedAttempt = () => {
+      pruneExpiredLoginAttempts(nowMs);
+      const cur = codeLoginAttempts[rateKey];
+      if (!cur || cur.resetAt <= nowMs) {
+        codeLoginAttempts[rateKey] = { count: 1, resetAt: nowMs + 10 * 60 * 1000 };
+      } else {
+        cur.count += 1;
+      }
+    };
+
+    try {
+      const rawIdentifier = String(
+        req.body?.identifier ?? req.body?.phone ?? req.body?.name ?? ''
+      ).trim();
+      const normCode = normalizeDriverCode(req.body?.supervisorCode ?? req.body?.code);
+      const normPhone = normalizeEgyptPhone(rawIdentifier);
+      const rawPhoneDigits = normalizeArabicDigits(rawIdentifier).replace(/\D/g, '');
+      const normInputName = normalizeArabicName(rawIdentifier);
+
+      if (!normCode || !rawIdentifier) {
+        return res.status(400).json({ error: 'يرجى إدخال رقم الموبايل أو الاسم وكود المشرفة' });
+      }
+
+      const result = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        await ensureRolesExist();
+        await ensureSeedOwnerUserId();
+
+        let [sup] = await db
+          .select()
+          .from(supervisors)
+          .where(eq(supervisors.supervisorCode, normCode))
+          .limit(1);
+
+        if (!sup) {
+          const allSups = await db.select().from(supervisors);
+          sup = allSups.find(
+            (s) => normalizeDriverCode(s.supervisorCode).toLowerCase() === normCode.toLowerCase()
+          )!;
+        }
+
+        if (!sup) {
+          return { status: 401 as const, error: 'الاسم / رقم الموبايل أو كود المشرفة غير صحيح' };
+        }
+
+        const storedPhoneNorm = normalizeEgyptPhone(sup.phone);
+        const storedPhoneDigits = normalizeArabicDigits(sup.phone).replace(/\D/g, '');
+        const phoneMatches =
+          (Boolean(normPhone) && storedPhoneNorm === normPhone) ||
+          (rawPhoneDigits.length >= 8 &&
+            (storedPhoneDigits === rawPhoneDigits ||
+              storedPhoneDigits.endsWith(rawPhoneDigits) ||
+              rawPhoneDigits.endsWith(storedPhoneDigits)));
+
+        const normStoredName = normalizeArabicName(sup.fullName);
+        const nameMatches =
+          normInputName.length >= 2 &&
+          (normStoredName === normInputName || normStoredName.includes(normInputName));
+
+        if (!phoneMatches && !nameMatches) {
+          return { status: 401 as const, error: 'الاسم / رقم الموبايل أو كود المشرفة غير صحيح' };
+        }
+
+        if (sup.accountStatus !== 'active') {
+          return {
+            status: 403 as const,
+            error: 'تم إيقاف حساب المشرفة من قبل الإدارة. يرجى التواصل مع المسؤول.',
+          };
+        }
+
+        const [supRole] = await db
+          .select()
+          .from(userRoles)
+          .where(eq(userRoles.slug, 'supervisor'))
+          .limit(1);
+
+        if (!supRole) {
+          return { status: 500 as const, error: 'تعذر تهيئة صلاحية المشرفة' };
+        }
+
+        let userRow: typeof users.$inferSelect | undefined;
+        if (sup.userId) {
+          const [found] = await db.select().from(users).where(eq(users.id, sup.userId)).limit(1);
+          userRow = found;
+        }
+        if (!userRow && sup.linkedEmail?.trim()) {
+          const [found] = await db
+            .select()
+            .from(users)
+            .where(eq(users.email, sup.linkedEmail.trim().toLowerCase()))
+            .limit(1);
+          userRow = found;
+        }
+        if (!userRow) {
+          const fallbackUid = `supervisor_${sup.id}`;
+          const [found] = await db
+            .select()
+            .from(users)
+            .where(eq(users.uid, fallbackUid))
+            .limit(1);
+          userRow = found;
+        }
+
+        if (!userRow) {
+          const fallbackUid = `supervisor_${sup.id}`;
+          let candidateEmail = `supervisor.${sup.id}@supervisor.alwaleed.local`;
+          if (sup.linkedEmail?.trim()) {
+            const cleanEmail = sup.linkedEmail.trim().toLowerCase();
+            const [emailTaken] = await db
+              .select({ id: users.id })
+              .from(users)
+              .where(eq(users.email, cleanEmail))
+              .limit(1);
+            if (!emailTaken) {
+              candidateEmail = cleanEmail;
+            }
+          }
+
+          const [createdUser] = await db
+            .insert(users)
+            .values({
+              uid: fallbackUid,
+              email: candidateEmail,
+              fullName: sup.fullName,
+              phone: storedPhoneNorm || normPhone,
+              roleId: supRole.id,
+              isActive: true,
+            })
+            .onConflictDoUpdate({
+              target: users.uid,
+              set: {
+                fullName: sup.fullName,
+                phone: storedPhoneNorm || normPhone,
+                updatedAt: new Date(),
+              },
+            })
+            .returning();
+          userRow = createdUser;
+        }
+
+        if (!userRow.isActive) {
+          return { status: 403 as const, error: 'تم إيقاف هذا الحساب من قبل الإدارة' };
+        }
+
+        if (sup.userId !== userRow.id) {
+          await db.update(supervisors).set({ userId: userRow.id }).where(eq(supervisors.id, sup.id));
+        }
+
+        const token = issueSupervisorSessionToken({
+          userId: userRow.id,
+          supervisorId: sup.id,
+          supervisorCode: sup.supervisorCode,
+        });
+
+        await db.insert(auditLogs).values({
+          actorUserId: userRow.id,
+          action: 'SUPERVISOR_CODE_LOGIN',
+          entityType: 'supervisors',
+          entityId: String(sup.id),
+          afterJson: { supervisorCode: sup.supervisorCode },
+          ipAddress: clientIp,
+        });
+
+        const permissions = Array.isArray(supRole.permissions) ? supRole.permissions : [];
+
+        return {
+          status: 200 as const,
+          payload: {
+            token,
+            user: {
+              id: userRow.id,
+              uid: userRow.uid,
+              email: userRow.email,
+              fullName: sup.fullName,
+              phone: sup.phone,
+              roleId: userRow.roleId,
+              roleSlug: 'supervisor',
+              roleNameAr: supRole.nameAr,
+              permissions,
+              isActive: userRow.isActive,
+            },
+            supervisor: {
+              id: sup.id,
+              supervisorCode: sup.supervisorCode,
+              fullName: sup.fullName,
+              phone: sup.phone,
+            },
+          },
+        };
+      });
+
+      if (result.status !== 200) {
+        if (result.status === 401) recordFailedAttempt();
+        return res.status(result.status).json({ error: result.error });
+      }
+
+      delete codeLoginAttempts[rateKey];
+      return res.json(result.payload);
+    } catch (error) {
+      console.error('Supervisor login error:', error);
+      return res.status(500).json({ error: 'تعذر تسجيل دخول المشرفة، يرجى المحاولة لاحقاً' });
     }
   });
 
@@ -519,7 +765,22 @@ async function startServer() {
     try {
       res.json({
         user: req.dbUser,
-        driver: req.driverRecord || null,
+        driver: req.driverRecord
+          ? {
+              id: req.driverRecord.id,
+              driverCode: req.driverRecord.driverCode,
+              fullName: req.driverRecord.fullName,
+            }
+          : null,
+        supervisor: req.supervisorRecord
+          ? {
+              id: req.supervisorRecord.id,
+              supervisorCode: req.supervisorRecord.supervisorCode,
+              fullName: req.supervisorRecord.fullName,
+              phone: req.supervisorRecord.phone,
+            }
+          : null,
+        refreshedSessionToken: req.refreshedSessionToken || null,
       });
     } catch (error) {
       console.error('Error in /api/me:', error);
@@ -543,17 +804,18 @@ async function startServer() {
       const vehicleQuery = String(req.query.vehicleQuery || '').trim().toLowerCase();
       const statusQuery = String(req.query.statusQuery || '').trim().toLowerCase();
 
-      let enrichedDrivers = (await getEnrichedDrivers()).filter(
-        (d) => d.accountStatus === 'active'
-      );
-      let fleet = (await getFleetWithLatestGps()).filter(
-        (v) => v.operationalStatus !== 'inactive'
-      );
-      const allSchools = await db.select().from(schools);
-      const todayAttendance = await db
-        .select()
-        .from(attendance)
-        .where(eq(attendance.date, dateStr));
+      const [allEnrichedDrivers, rawFleet, allSchools, todayAttendance, allSalaries, rawEmployees] =
+        await Promise.all([
+          getEnrichedDrivers(),
+          getFleetWithLatestGps(),
+          db.select().from(schools),
+          db.select().from(attendance).where(eq(attendance.date, dateStr)),
+          db.select().from(salaries).where(and(eq(salaries.month, month), eq(salaries.year, year))),
+          db.select().from(employees).orderBy(employees.fullName),
+        ]);
+
+      let enrichedDrivers = allEnrichedDrivers.filter((d) => d.accountStatus === 'active');
+      let fleet = rawFleet.filter((v) => v.operationalStatus !== 'inactive');
 
       const attByDriver: Record<number, typeof attendance.$inferSelect> = {};
       for (const a of todayAttendance) attByDriver[a.driverId] = a;
@@ -631,11 +893,6 @@ async function startServer() {
       }
 
       const driverIds = new Set(enrichedDrivers.map((d) => d.id));
-      const allSalaries = await db
-        .select()
-        .from(salaries)
-        .where(and(eq(salaries.month, month), eq(salaries.year, year)));
-
       const filteredSalaries = allSalaries.filter((s) => driverIds.has(s.driverId));
       const salaryByDriver: Record<number, typeof salaries.$inferSelect> = {};
       for (const s of filteredSalaries) salaryByDriver[s.driverId] = s;
@@ -659,10 +916,7 @@ async function startServer() {
         }
       }
 
-      const allEmployees = (
-        await db.select().from(employees).orderBy(employees.fullName)
-      ).filter((e) => e.status === 'active');
-      const activeEmployees = allEmployees;
+      const activeEmployees = rawEmployees.filter((e) => e.status === 'active');
 
       // School contract revenue vs total payroll (drivers + non-driver employees)
       const relevantSchools = schoolFilter
@@ -740,7 +994,7 @@ async function startServer() {
         isMonthClosed: Boolean(closingRow),
         kpis: {
           totalRegisteredDrivers: enrichedDrivers.length,
-          totalEmployeesCount: closingRow ? closingRow.employeesCount : allEmployees.length,
+          totalEmployeesCount: closingRow ? closingRow.employeesCount : activeEmployees.length,
           activeEmployeesCount: closingRow ? closingRow.employeesCount : activeEmployees.length,
           totalActiveVehicles: activeVehicles.length,
           vehiclesOnline: onlineVehicles.length,
@@ -787,7 +1041,7 @@ async function startServer() {
                 },
           };
         }),
-        employees: allEmployees.map((e) => {
+        employees: activeEmployees.map((e) => {
           const snap = snapshotEmpById[e.id];
           const mSal = snap ? snap.monthlySalary : Number(e.monthlySalary || 0);
           const bon = snap ? snap.bonuses : Number(e.bonuses || 0);
@@ -824,13 +1078,15 @@ async function startServer() {
     }
   });
 
+  const PLACEHOLDER_ASSIGNMENTS = new Set(['غير معين', 'غير معينة', 'غير محدد', '—', '-']);
+
   async function resolveSchoolIdForDriver(
     tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
     opts: { schoolId?: unknown; schoolName?: unknown }
   ): Promise<number | null> {
     if (opts.schoolName !== undefined) {
-      const trimmed = String(opts.schoolName || '').trim();
-      if (!trimmed) return null;
+      const trimmed = String(opts.schoolName ?? '').trim();
+      if (!trimmed || PLACEHOLDER_ASSIGNMENTS.has(trimmed)) return null;
 
       const [existingByName] = await tx
         .select()
@@ -860,8 +1116,8 @@ async function startServer() {
     opts: { vehicleId?: unknown; busNumber?: unknown }
   ): Promise<number | null> {
     if (opts.busNumber !== undefined) {
-      const trimmed = String(opts.busNumber || '').trim();
-      if (!trimmed) return null;
+      const trimmed = normalizeArabicDigits(String(opts.busNumber ?? '')).trim();
+      if (!trimmed || PLACEHOLDER_ASSIGNMENTS.has(trimmed)) return null;
 
       const [existingVehicle] = await tx
         .select()
@@ -1062,9 +1318,9 @@ async function startServer() {
         const normalizedPhone = normalizeEgyptPhone(phone) || String(phone).trim();
 
         const existingCode = await db
-          .select()
+          .select({ id: drivers.id })
           .from(drivers)
-          .where(eq(drivers.driverCode, normalizedCode))
+          .where(sql`LOWER(TRIM(${drivers.driverCode})) = LOWER(${normalizedCode})`)
           .limit(1);
 
         if (existingCode[0]) {
@@ -1390,40 +1646,40 @@ async function startServer() {
       const salary = await getOrRecalculateDriverSalaryForRead(db, driverId, month, year);
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
 
-      const driverAdvances = await db
-        .select()
-        .from(advances)
-        .where(and(eq(advances.driverId, driverId), sql`${advances.date} LIKE ${monthPrefix + '%'}`))
-        .orderBy(desc(advances.date), desc(advances.id));
-
-      const driverCoverages = await db
-        .select()
-        .from(coverageRecords)
-        .where(
-          and(
-            eq(coverageRecords.absentDriverId, driverId),
-            sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`
+      const [driverAdvances, driverCoverages, transactions, todayAttRows] = await Promise.all([
+        db
+          .select()
+          .from(advances)
+          .where(and(eq(advances.driverId, driverId), sql`${advances.date} LIKE ${monthPrefix + '%'}`))
+          .orderBy(desc(advances.date), desc(advances.id)),
+        db
+          .select()
+          .from(coverageRecords)
+          .where(
+            and(
+              eq(coverageRecords.absentDriverId, driverId),
+              sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`
+            )
           )
-        )
-        .orderBy(desc(coverageRecords.date), desc(coverageRecords.id));
-
-      const transactions = await db
-        .select()
-        .from(financialTransactions)
-        .where(
-          and(
-            eq(financialTransactions.driverId, driverId),
-            eq(financialTransactions.month, month),
-            eq(financialTransactions.year, year)
+          .orderBy(desc(coverageRecords.date), desc(coverageRecords.id)),
+        db
+          .select()
+          .from(financialTransactions)
+          .where(
+            and(
+              eq(financialTransactions.driverId, driverId),
+              eq(financialTransactions.month, month),
+              eq(financialTransactions.year, year)
+            )
           )
-        )
-        .orderBy(desc(financialTransactions.createdAt));
-
-      const [todayAtt] = await db
-        .select()
-        .from(attendance)
-        .where(and(eq(attendance.driverId, driverId), eq(attendance.date, getTodayDateString())))
-        .limit(1);
+          .orderBy(desc(financialTransactions.createdAt)),
+        db
+          .select()
+          .from(attendance)
+          .where(and(eq(attendance.driverId, driverId), eq(attendance.date, getTodayDateString())))
+          .limit(1),
+      ]);
+      const [todayAtt] = todayAttRows;
 
       const driverNameById: Record<number, string> = {};
       for (const d of allDrivers) driverNameById[d.id] = d.fullName;
@@ -1871,34 +2127,33 @@ async function startServer() {
         }
       }
 
-      const rawMonthSalaries = await db
-        .select()
-        .from(salaries)
-        .where(and(eq(salaries.month, month), eq(salaries.year, year)));
+      const [rawMonthSalaries, monthAdvances, monthCoverages, monthLedger] = await Promise.all([
+        db
+          .select()
+          .from(salaries)
+          .where(and(eq(salaries.month, month), eq(salaries.year, year))),
+        db
+          .select()
+          .from(advances)
+          .where(sql`${advances.date} LIKE ${monthPrefix + '%'}`)
+          .orderBy(desc(advances.date), desc(advances.id)),
+        db
+          .select()
+          .from(coverageRecords)
+          .where(sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`)
+          .orderBy(desc(coverageRecords.date), desc(coverageRecords.id)),
+        db
+          .select()
+          .from(financialTransactions)
+          .where(and(eq(financialTransactions.month, month), eq(financialTransactions.year, year)))
+          .orderBy(desc(financialTransactions.createdAt)),
+      ]);
 
       // If the month is already closed, keep ALL recorded salaries for that ended month intact;
       // otherwise show active drivers for the open month.
       const monthSalaries = currentClosing
         ? rawMonthSalaries
         : rawMonthSalaries.filter((s) => activeDriverIds.has(s.driverId));
-
-      const monthAdvances = await db
-        .select()
-        .from(advances)
-        .where(sql`${advances.date} LIKE ${monthPrefix + '%'}`)
-        .orderBy(desc(advances.date), desc(advances.id));
-
-      const monthCoverages = await db
-        .select()
-        .from(coverageRecords)
-        .where(sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`)
-        .orderBy(desc(coverageRecords.date), desc(coverageRecords.id));
-
-      const monthLedger = await db
-        .select()
-        .from(financialTransactions)
-        .where(and(eq(financialTransactions.month, month), eq(financialTransactions.year, year)))
-        .orderBy(desc(financialTransactions.createdAt));
 
       const driverMap: Record<number, (typeof allDrivers)[number]> = {};
       for (const d of allDrivers) driverMap[d.id] = d;
@@ -2710,7 +2965,7 @@ async function startServer() {
   // Admin simulation / manual GPS ping or driver update
   app.post('/api/gps/update', requireAuth, async (req: AuthRequest, res) => {
     try {
-      const { vehicleId, lat, lng, speedKmh, heading, accuracyMeters } = req.body;
+      const { vehicleId, lat, lng, speedKmh, heading, accuracyMeters, recordedAt, source } = req.body;
       let targetVehicleId = vehicleId ? Number(vehicleId) : null;
       let targetDriverId: number | null = req.driverRecord?.id || null;
 
@@ -2732,34 +2987,130 @@ async function startServer() {
         return res.status(403).json({ error: 'ليس لديك صلاحية تحديث إحداثيات المركبات' });
       }
 
-      if (!targetVehicleId || typeof lat !== 'number' || typeof lng !== 'number') {
-        return res.status(400).json({ error: 'بيانات الموقع الجغرافي غير مكتملة' });
+      const numLat = Number(lat);
+      const numLng = Number(lng);
+      if (!targetVehicleId || !isValidGpsCoordinate(numLat, numLng)) {
+        return res.status(400).json({ error: 'بيانات الموقع الجغرافي غير صالحة أو خارج النطاق' });
       }
+
+      const parsedRecordedAt =
+        typeof recordedAt === 'string' || typeof recordedAt === 'number'
+          ? new Date(recordedAt)
+          : new Date();
+      const validRecordedAt = Number.isNaN(parsedRecordedAt.getTime())
+        ? new Date()
+        : parsedRecordedAt;
+      const pointSource =
+        source === 'buffered' || source === 'manual' ? String(source) : 'live';
+      const isFreshNow = Date.now() - validRecordedAt.getTime() <= GPS_STALE_THRESHOLD_MS;
 
       const [ping] = await db
         .insert(gpsLocations)
         .values({
           vehicleId: targetVehicleId,
           driverId: targetDriverId,
-          lat,
-          lng,
-          speedKmh: Number(speedKmh || 0),
-          heading: Number(heading || 0),
-          accuracyMeters: Number(accuracyMeters || 10),
-          isLive: true,
-          recordedAt: new Date(),
+          lat: numLat,
+          lng: numLng,
+          speedKmh: Math.max(0, Math.min(200, Number(speedKmh || 0))),
+          heading: Number.isFinite(Number(heading)) ? Number(heading) : 0,
+          accuracyMeters: Number.isFinite(Number(accuracyMeters)) ? Number(accuracyMeters) : 10,
+          isLive: isFreshNow,
+          source: pointSource,
+          recordedAt: validRecordedAt,
         })
         .returning();
 
-      await db
-        .update(vehicles)
-        .set({ gpsStatus: 'online' })
-        .where(eq(vehicles.id, targetVehicleId));
+      if (isFreshNow) {
+        await db
+          .update(vehicles)
+          .set({ gpsStatus: 'online' })
+          .where(eq(vehicles.id, targetVehicleId));
+      }
 
       res.status(201).json({ ping });
     } catch (error) {
       console.error('GPS update error:', error);
       res.status(500).json({ error: 'تعذر تحديث الموقع الجغرافي' });
+    }
+  });
+
+  // Batch GPS offline buffer flush (for Driver background/offline sync)
+  app.post('/api/gps/sync-batch', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'driver' && !hasPermission(req.dbUser, 'gps:write')) {
+        return res.status(403).json({ error: 'غير مصرح لك بمزامنة نقاط GPS' });
+      }
+
+      const points = Array.isArray(req.body?.points) ? req.body.points : [];
+      if (points.length === 0) {
+        return res.json({ ok: true, inserted: 0 });
+      }
+      if (points.length > 250) {
+        return res.status(400).json({ error: 'الحد الأقصى للدفعة الواحدة هو 250 نقطة' });
+      }
+
+      let driverVehicleId: number | null = null;
+      let driverId: number | null = req.driverRecord?.id || null;
+      if (req.dbUser?.roleSlug === 'driver') {
+        if (!req.driverRecord) {
+          return res.status(403).json({ error: 'لا يوجد ملف سائق مرتبط بحسابك' });
+        }
+        const [assign] = await db
+          .select()
+          .from(driverAssignments)
+          .where(and(eq(driverAssignments.driverId, req.driverRecord.id), eq(driverAssignments.isCurrent, true)))
+          .limit(1);
+        if (!assign?.vehicleId) {
+          return res.status(400).json({ error: 'لم يتم تعيين مركبة لك بعد' });
+        }
+        driverVehicleId = assign.vehicleId;
+        driverId = req.driverRecord.id;
+      }
+
+      const rowsToInsert: Array<typeof gpsLocations.$inferInsert> = [];
+      let newestFreshVehicleId: number | null = null;
+
+      for (const rawPt of points) {
+        if (!rawPt || typeof rawPt !== 'object') continue;
+        const pt = rawPt as Record<string, unknown>;
+        const lat = Number(pt.lat);
+        const lng = Number(pt.lng);
+        const vId = driverVehicleId || (pt.vehicleId ? Number(pt.vehicleId) : null);
+        if (!vId || !isValidGpsCoordinate(lat, lng)) continue;
+
+        const recDate = pt.recordedAt ? new Date(String(pt.recordedAt)) : new Date();
+        const validDate = Number.isNaN(recDate.getTime()) ? new Date() : recDate;
+        const fresh = Date.now() - validDate.getTime() <= GPS_STALE_THRESHOLD_MS;
+        if (fresh) newestFreshVehicleId = vId;
+
+        rowsToInsert.push({
+          vehicleId: vId,
+          driverId,
+          lat,
+          lng,
+          speedKmh: Math.max(0, Math.min(200, Number(pt.speedKmh || 0))),
+          heading: Number.isFinite(Number(pt.heading)) ? Number(pt.heading) : 0,
+          accuracyMeters: Number.isFinite(Number(pt.accuracyMeters)) ? Number(pt.accuracyMeters) : 15,
+          isLive: fresh,
+          source: 'buffered',
+          recordedAt: validDate,
+        });
+      }
+
+      if (rowsToInsert.length > 0) {
+        await db.insert(gpsLocations).values(rowsToInsert);
+        if (newestFreshVehicleId) {
+          await db
+            .update(vehicles)
+            .set({ gpsStatus: 'online' })
+            .where(eq(vehicles.id, newestFreshVehicleId));
+        }
+      }
+
+      res.status(201).json({ ok: true, inserted: rowsToInsert.length });
+    } catch (error) {
+      console.error('GPS sync-batch error:', error);
+      res.status(500).json({ error: 'تعذر مزامنة نقاط الموقع المخزنة' });
     }
   });
 
@@ -3535,6 +3886,9 @@ async function startServer() {
         })
         .where(eq(users.id, userId))
         .returning();
+      if (!updated) {
+        return res.status(404).json({ error: 'المستخدم غير موجود' });
+      }
       res.json({ user: updated });
     } catch (error) {
       res.status(500).json({ error: 'تعذر تحديث صلاحية المستخدم' });
@@ -3572,10 +3926,34 @@ async function startServer() {
         }
       }
 
-      const rawMonthSalaries = await db
-        .select()
-        .from(salaries)
-        .where(and(eq(salaries.month, month), eq(salaries.year, year)));
+      const [
+        rawMonthSalaries,
+        monthAdvances,
+        monthCoverages,
+        monthAttendance,
+        allSchools,
+        fleet,
+      ] = await Promise.all([
+        db
+          .select()
+          .from(salaries)
+          .where(and(eq(salaries.month, month), eq(salaries.year, year))),
+        db
+          .select()
+          .from(advances)
+          .where(and(eq(advances.isReversed, false), sql`${advances.date} LIKE ${monthPrefix + '%'}`)),
+        db
+          .select()
+          .from(coverageRecords)
+          .where(and(eq(coverageRecords.isReversed, false), sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`)),
+        db
+          .select()
+          .from(attendance)
+          .where(sql`${attendance.date} LIKE ${monthPrefix + '%'}`),
+        db.select().from(schools),
+        getFleetWithLatestGps(),
+      ]);
+
       const activeIds = new Set(activeDrivers.map((d) => d.id));
       const monthSalaries = closingRow
         ? rawMonthSalaries
@@ -3584,20 +3962,6 @@ async function startServer() {
       const enrichedDrivers = closingRow
         ? allDrivers.filter((d) => reportDriverIds.has(d.id) || d.accountStatus === 'active')
         : activeDrivers;
-      const monthAdvances = await db
-        .select()
-        .from(advances)
-        .where(and(eq(advances.isReversed, false), sql`${advances.date} LIKE ${monthPrefix + '%'}`));
-      const monthCoverages = await db
-        .select()
-        .from(coverageRecords)
-        .where(and(eq(coverageRecords.isReversed, false), sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`));
-      const monthAttendance = await db
-        .select()
-        .from(attendance)
-        .where(sql`${attendance.date} LIKE ${monthPrefix + '%'}`);
-      const allSchools = await db.select().from(schools);
-      const fleet = await getFleetWithLatestGps();
 
       res.json({
         period: { month, year },
@@ -3644,57 +4008,58 @@ async function startServer() {
       const salary = await getOrRecalculateDriverSalaryForRead(db, driver.id, month, year);
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
 
-      const driverAdvances = await db
-        .select()
-        .from(advances)
-        .where(and(eq(advances.driverId, driver.id), sql`${advances.date} LIKE ${monthPrefix + '%'}`))
-        .orderBy(desc(advances.date));
-
-      const driverCoverages = await db
-        .select()
-        .from(coverageRecords)
-        .where(
-          and(
-            eq(coverageRecords.absentDriverId, driver.id),
-            sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`
-          )
-        )
-        .orderBy(desc(coverageRecords.date));
-
-      const transactions = await db
-        .select()
-        .from(financialTransactions)
-        .where(
-          and(
-            eq(financialTransactions.driverId, driver.id),
-            eq(financialTransactions.month, month),
-            eq(financialTransactions.year, year)
-          )
-        )
-        .orderBy(desc(financialTransactions.createdAt));
-
-      const driverNotifications = await db
-        .select()
-        .from(notifications)
-        .where(eq(notifications.recipientDriverId, driver.id))
-        .orderBy(desc(notifications.createdAt))
-        .limit(20);
+      const [driverAdvances, driverCoverages, transactions, driverNotifications, vehicleGpsData] =
+        await Promise.all([
+          db
+            .select()
+            .from(advances)
+            .where(and(eq(advances.driverId, driver.id), sql`${advances.date} LIKE ${monthPrefix + '%'}`))
+            .orderBy(desc(advances.date)),
+          db
+            .select()
+            .from(coverageRecords)
+            .where(
+              and(
+                eq(coverageRecords.absentDriverId, driver.id),
+                sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`
+              )
+            )
+            .orderBy(desc(coverageRecords.date)),
+          db
+            .select()
+            .from(financialTransactions)
+            .where(
+              and(
+                eq(financialTransactions.driverId, driver.id),
+                eq(financialTransactions.month, month),
+                eq(financialTransactions.year, year)
+              )
+            )
+            .orderBy(desc(financialTransactions.createdAt)),
+          db
+            .select()
+            .from(notifications)
+            .where(eq(notifications.recipientDriverId, driver.id))
+            .orderBy(desc(notifications.createdAt))
+            .limit(20),
+          driver.vehicleId
+            ? Promise.all([
+                db.select().from(vehicles).where(eq(vehicles.id, driver.vehicleId)).limit(1),
+                db
+                  .select()
+                  .from(gpsLocations)
+                  .where(eq(gpsLocations.vehicleId, driver.vehicleId))
+                  .orderBy(desc(gpsLocations.recordedAt))
+                  .limit(1),
+              ])
+            : Promise.resolve(null),
+        ]);
 
       let latestGps = null;
       let vehicleGpsStatus = 'offline';
-      if (driver.vehicleId) {
-        const [veh] = await db
-          .select()
-          .from(vehicles)
-          .where(eq(vehicles.id, driver.vehicleId))
-          .limit(1);
+      if (vehicleGpsData) {
+        const [[veh], [g]] = vehicleGpsData;
         vehicleGpsStatus = veh?.gpsStatus || 'offline';
-        const [g] = await db
-          .select()
-          .from(gpsLocations)
-          .where(eq(gpsLocations.vehicleId, driver.vehicleId))
-          .orderBy(desc(gpsLocations.recordedAt))
-          .limit(1);
         if (g) {
           latestGps = {
             ...g,
@@ -3892,6 +4257,1187 @@ async function startServer() {
     } catch (error) {
       console.error('Driver license update error:', error);
       res.status(500).json({ error: 'تعذر حفظ صور الرخص' });
+    }
+  });
+
+  // 13. Supervisors Management (Admin) & Dedicated Supervisor App (Strictly Non-Financial!)
+  async function getEnrichedSupervisors() {
+    const todayDate = getTodayDateString();
+    const [
+      allSups,
+      allSchools,
+      allVehicles,
+      allRoutes,
+      currentAssignments,
+      allDrivers,
+      todayTrips,
+    ] = await Promise.all([
+      db.select().from(supervisors).orderBy(supervisors.supervisorCode),
+      db
+        .select({
+          id: schools.id,
+          name: schools.name,
+          address: schools.address,
+          lat: schools.lat,
+          lng: schools.lng,
+          contactName: schools.contactName,
+          contactPhone: schools.contactPhone,
+        })
+        .from(schools),
+      db
+        .select({
+          id: vehicles.id,
+          busNumber: vehicles.busNumber,
+          registrationNumber: vehicles.registrationNumber,
+          vehicleType: vehicles.vehicleType,
+          operationalStatus: vehicles.operationalStatus,
+          gpsStatus: vehicles.gpsStatus,
+        })
+        .from(vehicles),
+      db.select().from(routes),
+      db.select().from(driverAssignments).where(eq(driverAssignments.isCurrent, true)),
+      db
+        .select({
+          id: drivers.id,
+          fullName: drivers.fullName,
+          phone: drivers.phone,
+          accountStatus: drivers.accountStatus,
+        })
+        .from(drivers),
+      db.select().from(supervisorTrips).where(eq(supervisorTrips.tripDate, todayDate)),
+    ]);
+
+    const schoolById: Record<number, (typeof allSchools)[number]> = {};
+    for (const s of allSchools) schoolById[s.id] = s;
+
+    const vehicleById: Record<number, (typeof allVehicles)[number]> = {};
+    for (const v of allVehicles) vehicleById[v.id] = v;
+
+    const routeById: Record<number, (typeof allRoutes)[number]> = {};
+    for (const r of allRoutes) routeById[r.id] = r;
+
+    const driverById: Record<number, (typeof allDrivers)[number]> = {};
+    for (const d of allDrivers) driverById[d.id] = d;
+
+    const assignByVehicle: Record<number, (typeof currentAssignments)[number]> = {};
+    for (const a of currentAssignments) {
+      if (a.vehicleId) assignByVehicle[a.vehicleId] = a;
+    }
+
+    const tripBySupervisor: Record<number, (typeof todayTrips)[number]> = {};
+    for (const t of todayTrips) {
+      tripBySupervisor[t.supervisorId] = t;
+    }
+
+    return allSups.map((sup) => {
+      const school = sup.schoolId ? schoolById[sup.schoolId] : undefined;
+      const vehicle = sup.vehicleId ? vehicleById[sup.vehicleId] : undefined;
+      const route = sup.routeId ? routeById[sup.routeId] : undefined;
+      const assign = sup.vehicleId ? assignByVehicle[sup.vehicleId] : undefined;
+      const drv =
+        assign && driverById[assign.driverId]?.accountStatus === 'active'
+          ? driverById[assign.driverId]
+          : undefined;
+      const trip = tripBySupervisor[sup.id];
+      const hasLiveCoords =
+        sup.liveLat !== null &&
+        sup.liveLat !== undefined &&
+        sup.liveLng !== null &&
+        sup.liveLng !== undefined;
+      const supLive = hasLiveCoords
+        ? {
+            lat: sup.liveLat!,
+            lng: sup.liveLng!,
+            speedKmh: Math.round(Number(sup.liveSpeedKmh || 0)),
+            accuracyMeters: sup.liveAccuracyMeters ?? null,
+            recordedAt: sup.liveUpdatedAt ? sup.liveUpdatedAt.toISOString() : '',
+            isLive: isGpsFresh(sup.liveUpdatedAt, true),
+          }
+        : null;
+
+      return {
+        id: sup.id,
+        userId: sup.userId,
+        linkedEmail: sup.linkedEmail || '',
+        supervisorCode: sup.supervisorCode,
+        fullName: sup.fullName,
+        phone: sup.phone,
+        photoUrl: sup.photoUrl || '',
+        schoolId: sup.schoolId,
+        schoolName: school?.name || 'غير معينة',
+        schoolAddress: school?.address || '',
+        schoolLat: school?.lat ?? null,
+        schoolLng: school?.lng ?? null,
+        vehicleId: sup.vehicleId,
+        busNumber: vehicle?.busNumber || '—',
+        registrationNumber: vehicle?.registrationNumber || '—',
+        routeId: sup.routeId,
+        routeName: route?.name || 'غير محدد',
+        pickupArea: route?.pickupArea || '',
+        dropoffArea: route?.dropoffArea || '',
+        pickupTime: route?.pickupTime || '',
+        dropoffTime: route?.dropoffTime || '',
+        estimatedDistanceKm: route?.estimatedDistanceKm ?? null,
+        assignedDriverName: drv?.fullName || 'غير معين',
+        assignedDriverPhone: drv?.phone || '',
+        accountStatus: sup.accountStatus,
+        notes: sup.notes || '',
+        liveLocation: supLive,
+        todayTrip: trip
+          ? {
+              tripDate: trip.tripDate,
+              morningStartedAt: trip.morningStartedAt ? trip.morningStartedAt.toISOString() : null,
+              morningLat: trip.morningLat ?? null,
+              morningLng: trip.morningLng ?? null,
+              eveningEndedAt: trip.eveningEndedAt ? trip.eveningEndedAt.toISOString() : null,
+              eveningLat: trip.eveningLat ?? null,
+              eveningLng: trip.eveningLng ?? null,
+            }
+          : null,
+        createdAt: sup.createdAt,
+      };
+    });
+  }
+
+  app.get(
+    '/api/supervisors',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['drivers:read', 'gps:read']),
+    async (_req: AuthRequest, res) => {
+      try {
+        const list = await getEnrichedSupervisors();
+        res.json({ supervisors: list });
+      } catch (error) {
+        console.error('Get supervisors error:', error);
+        res.status(500).json({ error: 'تعذر تحميل قائمة المشرفات' });
+      }
+    }
+  );
+
+  function extractDatabaseErrorInfo(error: unknown): {
+    code?: string;
+    constraint?: string;
+    detail?: string;
+    message: string;
+  } {
+    const errObj = (error && typeof error === 'object' ? error : {}) as {
+      code?: unknown;
+      constraint?: unknown;
+      detail?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+    const cause = (
+      errObj.cause && typeof errObj.cause === 'object' ? errObj.cause : {}
+    ) as {
+      code?: unknown;
+      constraint?: unknown;
+      detail?: unknown;
+      message?: unknown;
+    };
+    const code =
+      typeof cause.code === 'string'
+        ? cause.code
+        : typeof errObj.code === 'string'
+        ? errObj.code
+        : undefined;
+    const constraint =
+      typeof cause.constraint === 'string'
+        ? cause.constraint
+        : typeof errObj.constraint === 'string'
+        ? errObj.constraint
+        : undefined;
+    const detail =
+      typeof cause.detail === 'string'
+        ? cause.detail
+        : typeof errObj.detail === 'string'
+        ? errObj.detail
+        : undefined;
+    const message =
+      typeof cause.message === 'string'
+        ? cause.message
+        : typeof errObj.message === 'string'
+        ? errObj.message
+        : String(error || 'Unknown database error');
+    return { code, constraint, detail, message };
+  }
+
+  app.post(
+    '/api/supervisors',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('*'),
+    async (req: AuthRequest, res) => {
+      try {
+        const {
+          supervisorCode,
+          fullName,
+          phone,
+          photoUrl,
+          linkedEmail,
+          schoolId,
+          schoolName,
+          vehicleId,
+          busNumber,
+          routeId,
+          routeName,
+          pickupArea,
+          dropoffArea,
+          pickupTime,
+          dropoffTime,
+          accountStatus,
+          notes,
+        } = req.body ?? {};
+
+        const cleanCode = normalizeDriverCode(supervisorCode);
+        const cleanName = String(fullName ?? '').trim();
+        const rawPhone = normalizeArabicDigits(String(phone ?? '')).trim();
+        const cleanPhone = normalizeEgyptPhone(rawPhone) || rawPhone;
+
+        if (!cleanCode || !cleanName || !cleanPhone) {
+          return res
+            .status(400)
+            .json({ error: 'كود المشرفة والاسم الكامل ورقم الموبايل حقول إلزامية' });
+        }
+
+        let safePhotoUrl = '';
+        if (photoUrl !== undefined && photoUrl !== null && String(photoUrl).trim() !== '') {
+          try {
+            safePhotoUrl = sanitizeDriverPhotoUrl(photoUrl);
+          } catch (err: unknown) {
+            return res.status(400).json({
+              error: err instanceof Error ? err.message : 'صورة المشرفة غير صالحة',
+            });
+          }
+        }
+
+        const existingSups = await db
+          .select({
+            id: supervisors.id,
+            supervisorCode: supervisors.supervisorCode,
+            fullName: supervisors.fullName,
+          })
+          .from(supervisors);
+        const duplicateSup = existingSups.find(
+          (s) => s.supervisorCode.trim().toLowerCase() === cleanCode.toLowerCase()
+        );
+        if (duplicateSup) {
+          return res.status(409).json({
+            error: `كود المشرفة «${cleanCode}» مسجل بالفعل للمشرفة (${duplicateSup.fullName})`,
+          });
+        }
+
+        const cleanRouteNameInput = String(routeName ?? '').trim();
+        const safeRouteName = PLACEHOLDER_ASSIGNMENTS.has(cleanRouteNameInput)
+          ? ''
+          : cleanRouteNameInput;
+        const cleanPickupArea = String(pickupArea ?? '').trim();
+        const cleanDropoffArea = String(dropoffArea ?? '').trim();
+        const cleanPickupTime = normalizeArabicDigits(String(pickupTime ?? '')).trim();
+        const cleanDropoffTime = normalizeArabicDigits(String(dropoffTime ?? '')).trim();
+        const cleanSchoolName = String(schoolName ?? '').trim();
+        const safeSchoolName = PLACEHOLDER_ASSIGNMENTS.has(cleanSchoolName) ? '' : cleanSchoolName;
+
+        const hasTripDetails = Boolean(
+          cleanPickupArea || cleanDropoffArea || cleanPickupTime || cleanDropoffTime
+        );
+        const effectiveRouteName =
+          safeRouteName ||
+          (hasTripDetails
+            ? cleanPickupArea && (cleanDropoffArea || safeSchoolName)
+              ? `${cleanPickupArea} - ${cleanDropoffArea || safeSchoolName}`
+              : cleanPickupArea || `خط ${cleanName}`
+            : '');
+
+        const created = await db.transaction(async (tx) => {
+          const resolvedSchoolId = await resolveSchoolIdForDriver(tx, {
+            schoolId,
+            schoolName: safeSchoolName,
+          });
+          const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
+          const resolvedRouteId = await resolveRouteIdForDriver(tx, {
+            schoolId: resolvedSchoolId,
+            routeId,
+            routeName: effectiveRouteName || undefined,
+            pickupArea: cleanPickupArea,
+            pickupTime: cleanPickupTime,
+            dropoffTime: cleanDropoffTime,
+          });
+
+          if (resolvedRouteId && hasTripDetails) {
+            const [curRoute] = await tx
+              .select()
+              .from(routes)
+              .where(eq(routes.id, resolvedRouteId))
+              .limit(1);
+            if (curRoute) {
+              await tx
+                .update(routes)
+                .set({
+                  pickupArea: cleanPickupArea || curRoute.pickupArea,
+                  dropoffArea: cleanDropoffArea || curRoute.dropoffArea,
+                  pickupTime: cleanPickupTime || curRoute.pickupTime,
+                  dropoffTime: cleanDropoffTime || curRoute.dropoffTime,
+                })
+                .where(eq(routes.id, resolvedRouteId));
+            }
+          }
+
+          const [row] = await tx
+            .insert(supervisors)
+            .values({
+              supervisorCode: cleanCode,
+              fullName: cleanName,
+              phone: cleanPhone,
+              photoUrl: safePhotoUrl,
+              linkedEmail: String(linkedEmail ?? '').trim().toLowerCase(),
+              schoolId: resolvedSchoolId,
+              vehicleId: resolvedVehicleId,
+              routeId: resolvedRouteId,
+              accountStatus: accountStatus === 'inactive' ? 'inactive' : 'active',
+              notes: String(notes ?? '').trim(),
+            })
+            .returning();
+
+          if (req.dbUser?.id) {
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser.id,
+              action: 'CREATE_SUPERVISOR',
+              entityType: 'supervisors',
+              entityId: String(row.id),
+              afterJson: { supervisorCode: row.supervisorCode, fullName: row.fullName },
+              ipAddress: req.ip || '',
+            });
+          }
+
+          return row;
+        });
+
+        const enriched = (await getEnrichedSupervisors()).find((s) => s.id === created.id);
+        res.status(201).json({ supervisor: enriched || created });
+      } catch (error: unknown) {
+        console.error('Create supervisor error:', error);
+        const pgInfo = extractDatabaseErrorInfo(error);
+        const lowerMsg = pgInfo.message.toLowerCase();
+
+        if (pgInfo.code === '23505' || lowerMsg.includes('unique')) {
+          if (pgInfo.constraint?.includes('supervisor_code') || lowerMsg.includes('supervisor_code')) {
+            return res.status(409).json({
+              error: 'كود المشرفة مسجل بالفعل لمشرفة أخرى',
+              details: pgInfo.detail || pgInfo.message,
+            });
+          }
+          if (pgInfo.constraint?.includes('vehicles') || lowerMsg.includes('vehicles')) {
+            return res.status(409).json({
+              error: 'رقم الباص المدخل متعارض مع مركبة أخرى مسجلة',
+              details: pgInfo.detail || pgInfo.message,
+            });
+          }
+          return res.status(409).json({
+            error: `بيانات مكررة غير مسموح بتكرارها: ${pgInfo.detail || pgInfo.message}`,
+            details: pgInfo.message,
+          });
+        }
+
+        if (pgInfo.code === '42501' || lowerMsg.includes('row-level security')) {
+          return res.status(403).json({
+            error: 'صلاحيات قاعدة البيانات لا تسمح بإضافة المشرفة من هذا الحساب',
+            details: pgInfo.message,
+          });
+        }
+
+        if (pgInfo.code === '23502' || pgInfo.code === '23503') {
+          return res.status(400).json({
+            error: `بيانات غير مكتملة أو ربط غير صالح: ${pgInfo.detail || pgInfo.message}`,
+            details: pgInfo.message,
+          });
+        }
+
+        res.status(500).json({
+          error: `تعذر إضافة المشرفة: ${pgInfo.message}`,
+          details: pgInfo.detail || pgInfo.message,
+        });
+      }
+    }
+  );
+
+  app.patch(
+    '/api/supervisors/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('*'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const [existing] = await db
+          .select()
+          .from(supervisors)
+          .where(eq(supervisors.id, id))
+          .limit(1);
+        if (!existing) return res.status(404).json({ error: 'المشرفة غير موجودة' });
+
+        const {
+          supervisorCode,
+          fullName,
+          phone,
+          photoUrl,
+          linkedEmail,
+          schoolId,
+          schoolName,
+          vehicleId,
+          busNumber,
+          routeId,
+          routeName,
+          pickupArea,
+          dropoffArea,
+          pickupTime,
+          dropoffTime,
+          accountStatus,
+          notes,
+        } = req.body ?? {};
+
+        const nextCode =
+          supervisorCode !== undefined
+            ? normalizeDriverCode(supervisorCode) || existing.supervisorCode
+            : existing.supervisorCode;
+        const nextName =
+          fullName !== undefined ? String(fullName ?? '').trim() : existing.fullName;
+        const rawPhone =
+          phone !== undefined ? normalizeArabicDigits(String(phone ?? '')).trim() : existing.phone;
+        const nextPhone = normalizeEgyptPhone(rawPhone) || rawPhone;
+
+        if (!nextCode || !nextName || !nextPhone) {
+          return res
+            .status(400)
+            .json({ error: 'كود المشرفة والاسم الكامل ورقم الموبايل حقول إلزامية' });
+        }
+
+        let nextPhotoUrl = existing.photoUrl || '';
+        if (photoUrl !== undefined) {
+          try {
+            nextPhotoUrl = sanitizeDriverPhotoUrl(photoUrl);
+          } catch (err: unknown) {
+            return res.status(400).json({
+              error: err instanceof Error ? err.message : 'صورة المشرفة غير صالحة',
+            });
+          }
+        }
+
+        if (nextCode.toLowerCase() !== existing.supervisorCode.toLowerCase()) {
+          const [dupSup] = await db
+            .select({ id: supervisors.id })
+            .from(supervisors)
+            .where(
+              and(
+                ne(supervisors.id, id),
+                sql`LOWER(TRIM(${supervisors.supervisorCode})) = LOWER(${nextCode})`
+              )
+            )
+            .limit(1);
+          if (dupSup) {
+            return res
+              .status(409)
+              .json({ error: `كود المشرفة ${nextCode} مسجل مسبقاً لمشرفة أخرى` });
+          }
+        }
+
+        const cleanRouteNameInput = routeName !== undefined ? String(routeName ?? '').trim() : undefined;
+        const safeRouteName =
+          cleanRouteNameInput !== undefined && PLACEHOLDER_ASSIGNMENTS.has(cleanRouteNameInput)
+            ? ''
+            : cleanRouteNameInput;
+        const cleanPickupArea =
+          pickupArea !== undefined ? String(pickupArea ?? '').trim() : undefined;
+        const cleanDropoffArea =
+          dropoffArea !== undefined ? String(dropoffArea ?? '').trim() : undefined;
+        const cleanPickupTime =
+          pickupTime !== undefined ? normalizeArabicDigits(String(pickupTime ?? '')).trim() : undefined;
+        const cleanDropoffTime =
+          dropoffTime !== undefined
+            ? normalizeArabicDigits(String(dropoffTime ?? '')).trim()
+            : undefined;
+
+        await db.transaction(async (tx) => {
+          const nextSchoolId =
+            schoolName !== undefined || schoolId !== undefined
+              ? await resolveSchoolIdForDriver(tx, { schoolId, schoolName })
+              : existing.schoolId;
+          const nextVehicleId =
+            busNumber !== undefined || vehicleId !== undefined
+              ? await resolveVehicleIdForDriver(tx, { vehicleId, busNumber })
+              : existing.vehicleId;
+
+          const hasTripUpdate = Boolean(
+            cleanPickupArea || cleanDropoffArea || cleanPickupTime || cleanDropoffTime
+          );
+          const effectiveRouteName =
+            safeRouteName !== undefined
+              ? safeRouteName ||
+                (hasTripUpdate
+                  ? cleanPickupArea && cleanDropoffArea
+                    ? `${cleanPickupArea} - ${cleanDropoffArea}`
+                    : cleanPickupArea || `خط ${nextName}`
+                  : '')
+              : undefined;
+
+          const nextRouteId =
+            effectiveRouteName !== undefined || routeId !== undefined
+              ? await resolveRouteIdForDriver(tx, {
+                  schoolId: nextSchoolId,
+                  routeId,
+                  routeName: effectiveRouteName,
+                  pickupArea: cleanPickupArea,
+                  pickupTime: cleanPickupTime,
+                  dropoffTime: cleanDropoffTime,
+                })
+              : existing.routeId;
+
+          if (
+            nextRouteId &&
+            (cleanPickupArea !== undefined ||
+              cleanDropoffArea !== undefined ||
+              cleanPickupTime !== undefined ||
+              cleanDropoffTime !== undefined)
+          ) {
+            const [curRoute] = await tx
+              .select()
+              .from(routes)
+              .where(eq(routes.id, nextRouteId))
+              .limit(1);
+            if (curRoute) {
+              await tx
+                .update(routes)
+                .set({
+                  pickupArea: cleanPickupArea !== undefined ? cleanPickupArea : curRoute.pickupArea,
+                  dropoffArea:
+                    cleanDropoffArea !== undefined ? cleanDropoffArea : curRoute.dropoffArea,
+                  pickupTime: cleanPickupTime !== undefined ? cleanPickupTime : curRoute.pickupTime,
+                  dropoffTime:
+                    cleanDropoffTime !== undefined ? cleanDropoffTime : curRoute.dropoffTime,
+                })
+                .where(eq(routes.id, nextRouteId));
+            }
+          }
+
+          await tx
+            .update(supervisors)
+            .set({
+              supervisorCode: nextCode,
+              fullName: nextName,
+              phone: nextPhone,
+              photoUrl: nextPhotoUrl,
+              linkedEmail:
+                linkedEmail !== undefined
+                  ? String(linkedEmail ?? '').trim().toLowerCase()
+                  : existing.linkedEmail,
+              schoolId: nextSchoolId,
+              vehicleId: nextVehicleId,
+              routeId: nextRouteId,
+              accountStatus:
+                accountStatus === 'inactive' || accountStatus === 'active'
+                  ? accountStatus
+                  : existing.accountStatus,
+              notes: notes !== undefined ? String(notes ?? '').trim() : existing.notes,
+              updatedAt: new Date(),
+            })
+            .where(eq(supervisors.id, id));
+
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'UPDATE_SUPERVISOR',
+            entityType: 'supervisors',
+            entityId: String(id),
+            beforeJson: {
+              supervisorCode: existing.supervisorCode,
+              fullName: existing.fullName,
+              accountStatus: existing.accountStatus,
+            },
+            afterJson: {
+              supervisorCode: nextCode,
+              fullName: nextName,
+              accountStatus:
+                accountStatus === 'inactive' || accountStatus === 'active'
+                  ? accountStatus
+                  : existing.accountStatus,
+            },
+            ipAddress: req.ip || '',
+          });
+        });
+
+        const enriched = (await getEnrichedSupervisors()).find((s) => s.id === id);
+        res.json({ supervisor: enriched });
+      } catch (error: unknown) {
+        console.error('Update supervisor error:', error);
+        const pgInfo = extractDatabaseErrorInfo(error);
+        if (pgInfo.code === '23505') {
+          return res.status(409).json({
+            error: 'كود المشرفة أو رقم الباص مسجل بالفعل لبيان آخر',
+            details: pgInfo.detail || pgInfo.message,
+          });
+        }
+        res.status(400).json({
+          error: `تعذر تحديث بيانات المشرفة: ${pgInfo.message}`,
+          details: pgInfo.detail || pgInfo.message,
+        });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/supervisors/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('*'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const [existing] = await db
+          .select()
+          .from(supervisors)
+          .where(eq(supervisors.id, id))
+          .limit(1);
+        if (!existing) return res.status(404).json({ error: 'المشرفة غير موجودة' });
+
+        await db.transaction(async (tx) => {
+          await tx.delete(supervisorTrips).where(eq(supervisorTrips.supervisorId, id));
+          await tx.delete(supervisors).where(eq(supervisors.id, id));
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'DELETE_SUPERVISOR',
+            entityType: 'supervisors',
+            entityId: String(id),
+            beforeJson: { supervisorCode: existing.supervisorCode, fullName: existing.fullName },
+            ipAddress: req.ip || '',
+          });
+        });
+        res.json({ ok: true, deletedId: id });
+      } catch (error) {
+        console.error('Delete supervisor error:', error);
+        res.status(500).json({ error: 'تعذر حذف المشرفة' });
+      }
+    }
+  );
+
+  // Dedicated Supervisor App Endpoint — STRICTLY NON-FINANCIAL (zero salary/contract/accounting fields)
+  app.get('/api/supervisor-app/me', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'supervisor' && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'هذا المسار مخصص لنسخة المشرفة والمدير العام فقط' });
+      }
+
+      let targetSupervisorId: number | null = req.supervisorRecord?.id || null;
+      if (req.dbUser?.roleSlug === 'super_admin' && req.query.asSupervisorId) {
+        targetSupervisorId = Number(req.query.asSupervisorId);
+      }
+
+      if (!targetSupervisorId) {
+        return res.json({ linked: false, supervisor: null });
+      }
+
+      const payload = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        const [sup] = await db
+          .select()
+          .from(supervisors)
+          .where(eq(supervisors.id, targetSupervisorId))
+          .limit(1);
+
+        if (!sup) return { kind: 'not_found' as const };
+        if (req.dbUser?.roleSlug === 'supervisor' && sup.accountStatus !== 'active') {
+          return { kind: 'inactive' as const };
+        }
+
+        const todayDate = getTodayDateString();
+        const [schoolRows, routeRows, activeAssignments, todayTripRows] = await Promise.all([
+          sup.schoolId
+            ? db
+                .select({
+                  id: schools.id,
+                  name: schools.name,
+                  address: schools.address,
+                  lat: schools.lat,
+                  lng: schools.lng,
+                  contactName: schools.contactName,
+                  contactPhone: schools.contactPhone,
+                })
+                .from(schools)
+                .where(eq(schools.id, sup.schoolId))
+                .limit(1)
+            : Promise.resolve([]),
+          sup.routeId
+            ? db
+                .select({
+                  id: routes.id,
+                  name: routes.name,
+                  pickupArea: routes.pickupArea,
+                  dropoffArea: routes.dropoffArea,
+                  pickupTime: routes.pickupTime,
+                  dropoffTime: routes.dropoffTime,
+                  estimatedDistanceKm: routes.estimatedDistanceKm,
+                })
+                .from(routes)
+                .where(eq(routes.id, sup.routeId))
+                .limit(1)
+            : Promise.resolve([]),
+          db
+            .select({
+              driverId: driverAssignments.driverId,
+              schoolId: driverAssignments.schoolId,
+              vehicleId: driverAssignments.vehicleId,
+              routeId: driverAssignments.routeId,
+            })
+            .from(driverAssignments)
+            .where(eq(driverAssignments.isCurrent, true)),
+          db
+            .select()
+            .from(supervisorTrips)
+            .where(
+              and(eq(supervisorTrips.supervisorId, sup.id), eq(supervisorTrips.tripDate, todayDate))
+            )
+            .limit(1),
+        ]);
+
+        const schoolInfo = schoolRows[0] || null;
+        const routeInfo = routeRows[0] || null;
+        const todayTripRow = todayTripRows[0] || null;
+
+        const targetVehicleIds = new Set<number>();
+        if (sup.vehicleId) {
+          targetVehicleIds.add(sup.vehicleId);
+        } else if (sup.routeId) {
+          for (const a of activeAssignments) {
+            if (a.routeId === sup.routeId && a.vehicleId) targetVehicleIds.add(a.vehicleId);
+          }
+        } else if (sup.schoolId) {
+          for (const a of activeAssignments) {
+            if (a.schoolId === sup.schoolId && a.vehicleId) targetVehicleIds.add(a.vehicleId);
+          }
+        }
+
+        const vehicleResults = await Promise.all(
+          [...targetVehicleIds].map(async (vId) => {
+            const assign = activeAssignments.find((a) => a.vehicleId === vId);
+            const needExtraRoute = Boolean(
+              assign?.routeId && (!routeInfo || assign.routeId !== routeInfo.id)
+            );
+
+            const [vehRows, drvRows, extraRouteRows, trailRows] = await Promise.all([
+              db
+                .select({
+                  id: vehicles.id,
+                  busNumber: vehicles.busNumber,
+                  registrationNumber: vehicles.registrationNumber,
+                  vehicleType: vehicles.vehicleType,
+                  gpsStatus: vehicles.gpsStatus,
+                })
+                .from(vehicles)
+                .where(eq(vehicles.id, vId))
+                .limit(1),
+              assign?.driverId
+                ? db
+                    .select({
+                      fullName: drivers.fullName,
+                      phone: drivers.phone,
+                      accountStatus: drivers.accountStatus,
+                    })
+                    .from(drivers)
+                    .where(eq(drivers.id, assign.driverId))
+                    .limit(1)
+                : Promise.resolve([]),
+              needExtraRoute && assign?.routeId
+                ? db
+                    .select({ name: routes.name })
+                    .from(routes)
+                    .where(eq(routes.id, assign.routeId))
+                    .limit(1)
+                : Promise.resolve([]),
+              db
+                .select({
+                  id: gpsLocations.id,
+                  lat: gpsLocations.lat,
+                  lng: gpsLocations.lng,
+                  speedKmh: gpsLocations.speedKmh,
+                  heading: gpsLocations.heading,
+                  accuracyMeters: gpsLocations.accuracyMeters,
+                  isLive: gpsLocations.isLive,
+                  recordedAt: gpsLocations.recordedAt,
+                })
+                .from(gpsLocations)
+                .where(eq(gpsLocations.vehicleId, vId))
+                .orderBy(desc(gpsLocations.recordedAt))
+                .limit(25),
+            ]);
+
+            const veh = vehRows[0];
+            if (!veh) return null;
+
+            const drv = drvRows[0];
+            const driverName = drv && drv.accountStatus === 'active' ? drv.fullName : 'غير معين';
+            const driverPhone = drv && drv.accountStatus === 'active' ? drv.phone : '';
+            const busRouteName = extraRouteRows[0]?.name || routeInfo?.name || 'غير محدد';
+
+            const latest = trailRows[0] || null;
+            const fresh = latest ? isGpsFresh(latest.recordedAt, latest.isLive) : false;
+
+            return {
+              vehicleId: veh.id,
+              busNumber: veh.busNumber,
+              registrationNumber: veh.registrationNumber,
+              vehicleType: veh.vehicleType,
+              gpsStatus: veh.gpsStatus,
+              routeName: busRouteName,
+              driverName,
+              driverPhone,
+              isOnline: veh.gpsStatus !== 'paused' && fresh,
+              gps: latest
+                ? {
+                    lat: latest.lat,
+                    lng: latest.lng,
+                    speedKmh: fresh ? Math.round(latest.speedKmh) : 0,
+                    heading: latest.heading,
+                    accuracyMeters: latest.accuracyMeters,
+                    recordedAt: latest.recordedAt,
+                    isLive: veh.gpsStatus !== 'paused' && fresh,
+                    statusLabel:
+                      veh.gpsStatus === 'paused'
+                        ? 'متوقف مؤقتاً من السائق'
+                        : fresh
+                        ? 'متصل مباشر'
+                        : 'آخر موقع مسجل (غير متصل)',
+                  }
+                : null,
+              trail: trailRows.map((p) => ({
+                id: p.id,
+                lat: p.lat,
+                lng: p.lng,
+                speedKmh: Math.round(p.speedKmh),
+                recordedAt: p.recordedAt,
+              })),
+            };
+          })
+        );
+
+        const trackedVehicles = vehicleResults.filter(
+          (item): item is NonNullable<typeof item> => item !== null
+        );
+
+        const hasSupLiveCoords =
+          sup.liveLat !== null &&
+          sup.liveLat !== undefined &&
+          sup.liveLng !== null &&
+          sup.liveLng !== undefined;
+
+        return {
+          kind: 'ok' as const,
+          data: {
+            linked: true,
+            supervisor: {
+              id: sup.id,
+              supervisorCode: sup.supervisorCode,
+              fullName: sup.fullName,
+              phone: sup.phone,
+              photoUrl: sup.photoUrl || '',
+              accountStatus: sup.accountStatus,
+              notes: sup.notes || '',
+              liveLocation: hasSupLiveCoords
+                ? {
+                    lat: sup.liveLat!,
+                    lng: sup.liveLng!,
+                    speedKmh: Math.round(Number(sup.liveSpeedKmh || 0)),
+                    accuracyMeters: sup.liveAccuracyMeters ?? null,
+                    recordedAt: sup.liveUpdatedAt ? sup.liveUpdatedAt.toISOString() : '',
+                    isLive: isGpsFresh(sup.liveUpdatedAt, true),
+                  }
+                : null,
+            },
+            todayTrip: todayTripRow
+              ? {
+                  tripDate: todayTripRow.tripDate,
+                  morningStartedAt: todayTripRow.morningStartedAt
+                    ? todayTripRow.morningStartedAt.toISOString()
+                    : null,
+                  morningLat: todayTripRow.morningLat ?? null,
+                  morningLng: todayTripRow.morningLng ?? null,
+                  eveningEndedAt: todayTripRow.eveningEndedAt
+                    ? todayTripRow.eveningEndedAt.toISOString()
+                    : null,
+                  eveningLat: todayTripRow.eveningLat ?? null,
+                  eveningLng: todayTripRow.eveningLng ?? null,
+                }
+              : {
+                  tripDate: todayDate,
+                  morningStartedAt: null,
+                  morningLat: null,
+                  morningLng: null,
+                  eveningEndedAt: null,
+                  eveningLat: null,
+                  eveningLng: null,
+                },
+            school: schoolInfo,
+            route: routeInfo,
+            trackedVehicles,
+          },
+        };
+      });
+
+      if (payload.kind === 'not_found') {
+        return res.json({ linked: false, supervisor: null });
+      }
+      if (payload.kind === 'inactive') {
+        return res.status(403).json({
+          error: 'تم إيقاف حساب المشرفة من قبل الإدارة. يرجى التواصل مع المشرف.',
+        });
+      }
+
+      res.json(payload.data);
+    } catch (error) {
+      console.error('Supervisor app me error:', error);
+      res.status(500).json({ error: 'تعذر تحميل بيانات المشرفة' });
+    }
+  });
+
+  // Supervisor App: Live GPS Stream (Auto-started when supervisor opens app)
+  app.post('/api/supervisor-app/gps', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'supervisor' && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'هذا المسار مخصص لنسخة المشرفة والمدير العام فقط' });
+      }
+
+      let targetSupervisorId: number | null = req.supervisorRecord?.id || null;
+      if (req.dbUser?.roleSlug === 'super_admin') {
+        const override = req.query.asSupervisorId || req.body?.supervisorId;
+        if (override) targetSupervisorId = Number(override);
+      }
+
+      if (!targetSupervisorId) {
+        return res.status(403).json({ error: 'لا يوجد ملف مشرفة مرتبط بهذا الحساب' });
+      }
+
+      const numLat = Number(req.body?.lat);
+      const numLng = Number(req.body?.lng);
+      if (!isValidGpsCoordinate(numLat, numLng)) {
+        return res.status(400).json({ error: 'إحداثيات الموقع المباشر غير صالحة' });
+      }
+
+      const safeSpeed = Math.max(0, Math.min(200, Number(req.body?.speedKmh || 0)));
+      const safeAccuracy = Number.isFinite(Number(req.body?.accuracyMeters))
+        ? Math.round(Number(req.body.accuracyMeters))
+        : 15;
+      const safeHeading = Number.isFinite(Number(req.body?.heading)) ? Number(req.body.heading) : 0;
+      const now = new Date();
+
+      const result = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        const [sup] = await db
+          .select()
+          .from(supervisors)
+          .where(eq(supervisors.id, targetSupervisorId))
+          .limit(1);
+
+        if (!sup) return { kind: 'not_found' as const };
+        if (req.dbUser?.roleSlug === 'supervisor' && sup.accountStatus !== 'active') {
+          return { kind: 'inactive' as const };
+        }
+
+        await db
+          .update(supervisors)
+          .set({
+            liveLat: numLat,
+            liveLng: numLng,
+            liveSpeedKmh: safeSpeed,
+            liveAccuracyMeters: safeAccuracy,
+            liveUpdatedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(supervisors.id, sup.id));
+
+        if (sup.vehicleId) {
+          await db.insert(gpsLocations).values({
+            vehicleId: sup.vehicleId,
+            driverId: null,
+            lat: numLat,
+            lng: numLng,
+            speedKmh: safeSpeed,
+            heading: safeHeading,
+            accuracyMeters: safeAccuracy,
+            isLive: true,
+            source: 'live',
+            recordedAt: now,
+          });
+          await db
+            .update(vehicles)
+            .set({ gpsStatus: 'online' })
+            .where(eq(vehicles.id, sup.vehicleId));
+        }
+
+        return {
+          kind: 'ok' as const,
+          liveLocation: {
+            lat: numLat,
+            lng: numLng,
+            speedKmh: Math.round(safeSpeed),
+            accuracyMeters: safeAccuracy,
+            recordedAt: now.toISOString(),
+            isLive: true,
+          },
+        };
+      });
+
+      if (result.kind === 'not_found') {
+        return res.status(404).json({ error: 'ملف المشرفة غير موجود' });
+      }
+      if (result.kind === 'inactive') {
+        return res.status(403).json({ error: 'حساب المشرفة غير نشط' });
+      }
+
+      res.json({ ok: true, liveLocation: result.liveLocation });
+    } catch (error) {
+      console.error('Supervisor GPS update error:', error);
+      res.status(500).json({ error: 'تعذر تحديث الموقع المباشر للمشرفة' });
+    }
+  });
+
+  // Supervisor App: Two Daily Missions (1: Morning Trip Start / 2: Evening Trip End)
+  app.post('/api/supervisor-app/trip-action', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'supervisor' && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'هذا المسار مخصص لنسخة المشرفة والمدير العام فقط' });
+      }
+
+      let targetSupervisorId: number | null = req.supervisorRecord?.id || null;
+      if (req.dbUser?.roleSlug === 'super_admin') {
+        const override = req.query.asSupervisorId || req.body?.supervisorId;
+        if (override) targetSupervisorId = Number(override);
+      }
+
+      if (!targetSupervisorId) {
+        return res.status(403).json({ error: 'لا يوجد ملف مشرفة مرتبط بهذا الحساب' });
+      }
+
+      const action = req.body?.action;
+      if (action !== 'start_morning' && action !== 'end_evening') {
+        return res.status(400).json({ error: 'نوع المهمة غير صالح (start_morning | end_evening)' });
+      }
+
+      const numLat = Number(req.body?.lat);
+      const numLng = Number(req.body?.lng);
+      const hasValidCoords = isValidGpsCoordinate(numLat, numLng);
+      const now = new Date();
+      const todayDate = getTodayDateString();
+
+      const result = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        const [sup] = await db
+          .select()
+          .from(supervisors)
+          .where(eq(supervisors.id, targetSupervisorId))
+          .limit(1);
+
+        if (!sup) return { kind: 'not_found' as const };
+        if (req.dbUser?.roleSlug === 'supervisor' && sup.accountStatus !== 'active') {
+          return { kind: 'inactive' as const };
+        }
+
+        if (hasValidCoords) {
+          await db
+            .update(supervisors)
+            .set({
+              liveLat: numLat,
+              liveLng: numLng,
+              liveUpdatedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(supervisors.id, sup.id));
+        }
+
+        const insertValues =
+          action === 'start_morning'
+            ? {
+                supervisorId: sup.id,
+                vehicleId: sup.vehicleId,
+                tripDate: todayDate,
+                morningStartedAt: now,
+                morningLat: hasValidCoords ? numLat : null,
+                morningLng: hasValidCoords ? numLng : null,
+                updatedAt: now,
+              }
+            : {
+                supervisorId: sup.id,
+                vehicleId: sup.vehicleId,
+                tripDate: todayDate,
+                eveningEndedAt: now,
+                eveningLat: hasValidCoords ? numLat : null,
+                eveningLng: hasValidCoords ? numLng : null,
+                updatedAt: now,
+              };
+
+        const updateSet =
+          action === 'start_morning'
+            ? {
+                vehicleId: sup.vehicleId,
+                morningStartedAt: now,
+                ...(hasValidCoords ? { morningLat: numLat, morningLng: numLng } : {}),
+                updatedAt: now,
+              }
+            : {
+                vehicleId: sup.vehicleId,
+                eveningEndedAt: now,
+                ...(hasValidCoords ? { eveningLat: numLat, eveningLng: numLng } : {}),
+                updatedAt: now,
+              };
+
+        const [tripRow] = await db
+          .insert(supervisorTrips)
+          .values(insertValues)
+          .onConflictDoUpdate({
+            target: [supervisorTrips.supervisorId, supervisorTrips.tripDate],
+            set: updateSet,
+          })
+          .returning();
+
+        if (req.dbUser?.id) {
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser.id,
+            action:
+              action === 'start_morning' ? 'SUPERVISOR_MORNING_START' : 'SUPERVISOR_EVENING_END',
+            entityType: 'supervisor_trips',
+            entityId: String(tripRow.id),
+            afterJson: {
+              supervisorId: sup.id,
+              tripDate: todayDate,
+              action,
+              lat: hasValidCoords ? numLat : null,
+              lng: hasValidCoords ? numLng : null,
+            },
+            ipAddress: req.ip || '',
+          });
+        }
+
+        return {
+          kind: 'ok' as const,
+          todayTrip: {
+            tripDate: tripRow.tripDate,
+            morningStartedAt: tripRow.morningStartedAt
+              ? tripRow.morningStartedAt.toISOString()
+              : null,
+            morningLat: tripRow.morningLat ?? null,
+            morningLng: tripRow.morningLng ?? null,
+            eveningEndedAt: tripRow.eveningEndedAt ? tripRow.eveningEndedAt.toISOString() : null,
+            eveningLat: tripRow.eveningLat ?? null,
+            eveningLng: tripRow.eveningLng ?? null,
+          },
+        };
+      });
+
+      if (result.kind === 'not_found') {
+        return res.status(404).json({ error: 'ملف المشرفة غير موجود' });
+      }
+      if (result.kind === 'inactive') {
+        return res.status(403).json({ error: 'حساب المشرفة غير نشط' });
+      }
+
+      res.json({ ok: true, action, todayTrip: result.todayTrip });
+    } catch (error) {
+      console.error('Supervisor trip action error:', error);
+      res.status(500).json({ error: 'تعذر تسجيل حركة الرحلة' });
     }
   });
 

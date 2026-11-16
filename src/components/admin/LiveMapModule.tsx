@@ -1,14 +1,15 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  APIProvider,
-  AdvancedMarker,
-  InfoWindow,
-  Map as GoogleMap,
-  useAdvancedMarkerRef,
-  useMap,
-} from '@vis.gl/react-google-maps';
-import { Bus, Navigation, RefreshCw, Signal, SignalZero } from 'lucide-react';
+import { APIProvider, InfoWindow, Map as GoogleMap } from '@vis.gl/react-google-maps';
+import { Bus, Navigation, RefreshCw, Signal, SignalZero, X } from 'lucide-react';
 import { apiFetch, formatRelativeArabicTime } from '../../lib/api';
+import {
+  ALEXANDRIA_CENTER,
+  AdvancedMarkerWithRef,
+  MapPanController,
+  RouteTrailOverlay,
+  getGoogleMapsApiKey,
+  hasValidGoogleMapsKey,
+} from '../MapPrimitives';
 import type { FleetVehicle } from '../../types';
 
 interface GpsHistoryPoint {
@@ -20,72 +21,9 @@ interface GpsHistoryPoint {
   isLive: boolean;
 }
 
-const AdvancedMarkerWithRef: React.FC<{
-  position: { lat: number; lng: number };
-  zIndex?: number;
-  onMarkerClick: (marker: google.maps.marker.AdvancedMarkerElement) => void;
-  children: React.ReactNode;
-}> = ({ position, zIndex, onMarkerClick, children }) => {
-  const [markerRef, marker] = useAdvancedMarkerRef();
-  return (
-    <AdvancedMarker
-      ref={markerRef}
-      position={position}
-      zIndex={zIndex}
-      onClick={() => {
-        if (marker) onMarkerClick(marker);
-      }}
-    >
-      {children}
-    </AdvancedMarker>
-  );
-};
-
-const RouteTrailOverlay: React.FC<{ points: GpsHistoryPoint[] }> = ({ points }) => {
-  const map = useMap();
-  useEffect(() => {
-    if (!map || points.length < 2 || typeof google === 'undefined' || !google.maps?.Polyline) {
-      return;
-    }
-    const path = [...points]
-      .reverse()
-      .map((p) => ({ lat: p.lat, lng: p.lng }));
-    const polyline = new google.maps.Polyline({
-      path,
-      geodesic: true,
-      strokeColor: '#0B1F3A',
-      strokeOpacity: 0.75,
-      strokeWeight: 4,
-    });
-    polyline.setMap(map);
-    return () => {
-      polyline.setMap(null);
-    };
-  }, [map, points]);
-  return null;
-};
-
-const ALEXANDRIA_CENTER = { lat: 31.2156, lng: 29.9553 };
-
-const MapPanController: React.FC<{ target: { lat: number; lng: number; zoom?: number } | null }> = ({
-  target,
-}) => {
-  const map = useMap();
-  useEffect(() => {
-    if (!map || !target) return;
-    map.panTo({ lat: target.lat, lng: target.lng });
-    if (target.zoom) {
-      map.setZoom(target.zoom);
-    }
-  }, [map, target]);
-  return null;
-};
-
 export const LiveMapModule: React.FC = () => {
-  const apiKey = (import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '').trim();
-  const hasValidApiKey = Boolean(
-    apiKey && apiKey !== 'false' && apiKey !== 'undefined' && !apiKey.includes('MY_GOOGLE_MAPS_API_KEY')
-  );
+  const apiKey = getGoogleMapsApiKey();
+  const hasValidApiKey = hasValidGoogleMapsKey(apiKey);
   const [fleet, setFleet] = useState<FleetVehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +40,12 @@ export const LiveMapModule: React.FC = () => {
     try {
       const res = await apiFetch<{ fleet: FleetVehicle[] }>('/api/gps/fleet');
       setFleet(res.fleet);
+      setSelectedVehicle((prev) => {
+        if (!prev) return null;
+        const fresh = res.fleet.find((item) => item.id === prev.id) || null;
+        if (!fresh || !fresh.gps) setSelectedMarker(null);
+        return fresh;
+      });
       setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل مواقع الأسطول');
@@ -112,8 +56,21 @@ export const LiveMapModule: React.FC = () => {
 
   useEffect(() => {
     loadFleet();
-    const timer = setInterval(loadFleet, 15000);
-    return () => clearInterval(timer);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadFleet();
+      }
+    }, 15000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        loadFleet();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, [loadFleet]);
 
   const handleSelectVehicle = async (
@@ -174,8 +131,16 @@ export const LiveMapModule: React.FC = () => {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800">
-          {error}
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 

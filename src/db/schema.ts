@@ -348,6 +348,7 @@ export const gpsLocations = pgTable(
     heading: doublePrecision('heading').default(0),
     accuracyMeters: doublePrecision('accuracy_meters').default(10),
     isLive: boolean('is_live').notNull().default(true),
+    source: text('source').notNull().default('live'), // live | buffered | manual
     recordedAt: timestamp('recorded_at').defaultNow().notNull(),
   },
   (table) => [index('idx_gps_vehicle_recorded').on(table.vehicleId, table.recordedAt)]
@@ -522,3 +523,99 @@ export const driversRelations = relations(drivers, ({ one, many }) => ({
   advances: many(advances),
   financialTransactions: many(financialTransactions),
 }));
+
+// 21. Supervisors (المشرفات - نسخة المشرفة بدون أي صلاحيات مالية)
+export const supervisors = pgTable(
+  'supervisors',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id').references(() => users.id),
+    linkedEmail: text('linked_email').default(''),
+    supervisorCode: text('supervisor_code').notNull().unique(),
+    fullName: text('full_name').notNull(),
+    phone: text('phone').notNull(),
+    photoUrl: text('photo_url').default(''),
+    schoolId: integer('school_id').references(() => schools.id),
+    vehicleId: integer('vehicle_id').references(() => vehicles.id),
+    routeId: integer('route_id').references(() => routes.id),
+    liveLat: doublePrecision('live_lat'),
+    liveLng: doublePrecision('live_lng'),
+    liveSpeedKmh: doublePrecision('live_speed_kmh').default(0),
+    liveAccuracyMeters: doublePrecision('live_accuracy_meters'),
+    liveUpdatedAt: timestamp('live_updated_at'),
+    accountStatus: text('account_status').notNull().default('active'), // active | inactive
+    notes: text('notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_supervisors_code').on(table.supervisorCode),
+    pgPolicy('supervisors_admin_select', {
+      for: 'select',
+      to: 'public',
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager')`,
+    }),
+    pgPolicy('supervisors_admin_insert', {
+      for: 'insert',
+      to: 'public',
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+    }),
+    pgPolicy('supervisors_admin_update', {
+      for: 'update',
+      to: 'public',
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+    }),
+    pgPolicy('supervisors_admin_delete', {
+      for: 'delete',
+      to: 'public',
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+    }),
+    pgPolicy('supervisors_self_select', {
+      for: 'select',
+      to: 'public',
+      using: sql`current_setting('app.user_role', true) = 'supervisor' AND id = CASE WHEN current_setting('app.supervisor_id', true) ~ '^[0-9]+$' THEN current_setting('app.supervisor_id', true)::integer ELSE NULL END`,
+    }),
+  ]
+);
+
+// 22. Supervisor Daily Trips (سجل مهمتي المشرفة اليومية: بداية الرحلة صباحاً / نهاية الرحلة مساءً)
+export const supervisorTrips = pgTable(
+  'supervisor_trips',
+  {
+    id: serial('id').primaryKey(),
+    supervisorId: integer('supervisor_id')
+      .references(() => supervisors.id, { onDelete: 'cascade' })
+      .notNull(),
+    vehicleId: integer('vehicle_id').references(() => vehicles.id),
+    tripDate: text('trip_date').notNull(), // YYYY-MM-DD (Africa/Cairo)
+    morningStartedAt: timestamp('morning_started_at'),
+    morningLat: doublePrecision('morning_lat'),
+    morningLng: doublePrecision('morning_lng'),
+    eveningEndedAt: timestamp('evening_ended_at'),
+    eveningLat: doublePrecision('evening_lat'),
+    eveningLng: doublePrecision('evening_lng'),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_supervisor_trips_sup_date').on(table.supervisorId, table.tripDate),
+    index('idx_supervisor_trips_date').on(table.tripDate),
+  ]
+);
+
+export const supervisorsRelations = relations(supervisors, ({ one, many }) => ({
+  user: one(users, { fields: [supervisors.userId], references: [users.id] }),
+  school: one(schools, { fields: [supervisors.schoolId], references: [schools.id] }),
+  vehicle: one(vehicles, { fields: [supervisors.vehicleId], references: [vehicles.id] }),
+  route: one(routes, { fields: [supervisors.routeId], references: [routes.id] }),
+  trips: many(supervisorTrips),
+}));
+
+export const supervisorTripsRelations = relations(supervisorTrips, ({ one }) => ({
+  supervisor: one(supervisors, {
+    fields: [supervisorTrips.supervisorId],
+    references: [supervisors.id],
+  }),
+  vehicle: one(vehicles, { fields: [supervisorTrips.vehicleId], references: [vehicles.id] }),
+}));
+

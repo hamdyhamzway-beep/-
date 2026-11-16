@@ -12,7 +12,8 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { apiFetch, formatEGP } from '../../lib/api';
+import { apiFetch, formatEGP, getLocalTodayDateString } from '../../lib/api';
+import { useEscapeKey } from '../../lib/useEscapeKey';
 import type {
   AdvanceRecord,
   CoverageRecord,
@@ -100,7 +101,7 @@ export const FinanceModule: React.FC = () => {
   const [advForm, setAdvForm] = useState({
     driverQuery: '',
     amount: '',
-    date: new Date().toISOString().slice(0, 10),
+    date: getLocalTodayDateString(),
     reason: '',
     paymentMethod: '',
     notes: '',
@@ -109,7 +110,7 @@ export const FinanceModule: React.FC = () => {
   const [covForm, setCovForm] = useState({
     absentDriverQuery: '',
     replacementQuery: '',
-    date: new Date().toISOString().slice(0, 10),
+    date: getLocalTodayDateString(),
     actualReplacementCost: '',
     absentDriverDeduction: '',
     reason: '',
@@ -152,6 +153,27 @@ export const FinanceModule: React.FC = () => {
 
   const [deletingRecord, setDeletingRecord] = useState(false);
 
+  useEscapeKey(
+    Boolean(
+      inspectClosing ||
+        confirmResetOpen ||
+        confirmCloseOpen ||
+        deletingCoverage ||
+        editingCoverage ||
+        deletingAdvance ||
+        editingAdvance
+    ),
+    () => {
+      if (inspectClosing) setInspectClosing(null);
+      else if (confirmResetOpen) setConfirmResetOpen(false);
+      else if (confirmCloseOpen) setConfirmCloseOpen(false);
+      else if (deletingCoverage) setDeletingCoverage(null);
+      else if (editingCoverage) setEditingCoverage(null);
+      else if (deletingAdvance) setDeletingAdvance(null);
+      else if (editingAdvance) setEditingAdvance(null);
+    }
+  );
+
   const loadFinance = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -182,7 +204,7 @@ export const FinanceModule: React.FC = () => {
     const prefix = `${year}-${String(month).padStart(2, '0')}`;
     const targetDate =
       month === curNow.getMonth() + 1 && year === curNow.getFullYear()
-        ? curNow.toISOString().slice(0, 10)
+        ? getLocalTodayDateString()
         : `${prefix}-01`;
     setAdvForm((f) => (f.date.startsWith(prefix) ? f : { ...f, date: targetDate }));
     setCovForm((f) => (f.date.startsWith(prefix) ? f : { ...f, date: targetDate }));
@@ -407,11 +429,16 @@ export const FinanceModule: React.FC = () => {
   };
 
   const handleSalaryStatus = async (salaryId: number, status: 'open' | 'approved' | 'paid') => {
-    await apiFetch(`/api/finance/salaries/${salaryId}/status`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status }),
-    });
-    await loadFinance();
+    setError(null);
+    try {
+      await apiFetch(`/api/finance/salaries/${salaryId}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      });
+      await loadFinance();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر تحديث حالة الراتب');
+    }
   };
 
   const handleCloseMonthAndStartNext = async () => {
@@ -586,14 +613,32 @@ export const FinanceModule: React.FC = () => {
       )}
 
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800">
-          {error}
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
       {successMsg && (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-800 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 shrink-0" />
-          <span>{successMsg}</span>
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-800 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>{successMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSuccessMsg(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-emerald-600 hover:text-emerald-900 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 

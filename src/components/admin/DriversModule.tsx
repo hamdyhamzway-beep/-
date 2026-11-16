@@ -15,7 +15,14 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { apiFetch, formatEGP } from '../../lib/api';
+import {
+  apiFetch,
+  formatEGP,
+  getLocalTodayDateString,
+  normalizeLookupText,
+  normalizeTimeInputValue,
+} from '../../lib/api';
+import { useEscapeKey } from '../../lib/useEscapeKey';
 import {
   buildWhatsAppUrl,
   captureElementAsPngBlob,
@@ -107,7 +114,7 @@ export const DriversModule: React.FC = () => {
     driverPhone: string;
   } | null>(null);
 
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = getLocalTodayDateString();
   const [newAdv, setNewAdv] = useState({
     amount: '',
     date: todayStr,
@@ -156,6 +163,12 @@ export const DriversModule: React.FC = () => {
   const [deleteTarget, setDeleteTarget] = useState<EnrichedDriver | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  useEscapeKey(Boolean(deleteTarget || statementDriverId || showForm), () => {
+    if (deleteTarget) setDeleteTarget(null);
+    else if (statementDriverId) setStatementDriverId(null);
+    else if (showForm) setShowForm(false);
+  });
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -222,8 +235,8 @@ export const DriversModule: React.FC = () => {
       routeId: d.routeId ? String(d.routeId) : '',
       routeName: d.routeId && d.routeName && d.routeName !== '—' ? d.routeName : '',
       routePickupArea: d.pickupArea || '',
-      routePickupTime: d.pickupTime || '',
-      routeDropoffTime: d.dropoffTime || '',
+      routePickupTime: normalizeTimeInputValue(d.pickupTime),
+      routeDropoffTime: normalizeTimeInputValue(d.dropoffTime),
     });
     setShowForm(true);
   };
@@ -351,8 +364,12 @@ export const DriversModule: React.FC = () => {
     setEditingCovId(null);
     setEditingAdjId(null);
     setStatementTab(initialTab);
-    setStatementDriverId(id);
-    loadStatement(id, statementMonth, statementYear);
+    if (id === statementDriverId) {
+      loadStatement(id, statementMonth, statementYear);
+    } else {
+      setStatementData(null);
+      setStatementDriverId(id);
+    }
   };
 
   const handleAddDriverAdvance = async (e: React.FormEvent) => {
@@ -673,14 +690,16 @@ export const DriversModule: React.FC = () => {
   };
 
   const filtered = driversList.filter((d) => {
-    const q = search.trim();
+    const q = normalizeLookupText(search);
     if (!q) return true;
+    const digitsOnly = q.replace(/\D/g, '');
     return (
-      d.fullName.includes(q) ||
-      d.driverCode.includes(q) ||
-      d.phone.includes(q) ||
-      d.schoolName.includes(q) ||
-      d.busNumber.includes(q)
+      normalizeLookupText(d.fullName).includes(q) ||
+      normalizeLookupText(d.driverCode).includes(q) ||
+      normalizeLookupText(d.phone).includes(q) ||
+      (digitsOnly.length >= 2 && normalizeLookupText(d.phone).replace(/\D/g, '').includes(digitsOnly)) ||
+      normalizeLookupText(d.schoolName).includes(q) ||
+      normalizeLookupText(d.busNumber).includes(q)
     );
   });
 
@@ -705,14 +724,24 @@ export const DriversModule: React.FC = () => {
       {/* Search */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="relative flex-1 max-w-md">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="بحث بالاسم، كود السائق، الهاتف، المدرسة، أو رقم الباص..."
-            className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-3 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
+            className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-8 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
           />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              aria-label="مسح البحث"
+              className="absolute left-2.5 top-2 text-slate-400 hover:text-slate-700 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
         <div className="text-xs font-semibold text-slate-500">
           إجمالي السائقين النشطين: <span className="font-mono text-[#0B1F3A]">{filtered.length}</span>
@@ -720,14 +749,30 @@ export const DriversModule: React.FC = () => {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800">
-          {error}
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
       {successMsg && (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs font-semibold text-emerald-900">
-          {successMsg}
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs font-semibold text-emerald-900 flex items-center justify-between gap-2">
+          <span>{successMsg}</span>
+          <button
+            type="button"
+            onClick={() => setSuccessMsg(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-emerald-600 hover:text-emerald-900 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
@@ -1122,10 +1167,10 @@ export const DriversModule: React.FC = () => {
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2.5 rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <div>
                       <label className="block text-[11px] text-slate-500 mb-1">
-                        نقطة الانطلاق / التجمع
+                        نقطة بداية الرحلة
                       </label>
                       <input
-                        placeholder="اكتب نقطة الانطلاق"
+                        placeholder="اكتب نقطة بداية الرحلة"
                         value={formState.routePickupArea}
                         onChange={(e) =>
                           setFormState({ ...formState, routePickupArea: e.target.value })
@@ -1134,25 +1179,29 @@ export const DriversModule: React.FC = () => {
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] text-slate-500 mb-1">وقت الذهاب</label>
+                      <label className="block text-[11px] text-slate-500 mb-1">
+                        وقت بداية الرحلة
+                      </label>
                       <input
                         type="time"
                         value={formState.routePickupTime}
                         onChange={(e) =>
                           setFormState({ ...formState, routePickupTime: e.target.value })
                         }
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono tabular-nums"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] text-slate-500 mb-1">وقت العودة</label>
+                      <label className="block text-[11px] text-slate-500 mb-1">
+                        وقت نهاية الرحلة
+                      </label>
                       <input
                         type="time"
                         value={formState.routeDropoffTime}
                         onChange={(e) =>
                           setFormState({ ...formState, routeDropoffTime: e.target.value })
                         }
-                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-mono tabular-nums"
                       />
                     </div>
                   </div>

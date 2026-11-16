@@ -12,10 +12,13 @@ import {
   ZoomIn,
 } from 'lucide-react';
 import { DriverAvatar } from './DriverAvatar';
+import { useEscapeKey } from '../lib/useEscapeKey';
 
 interface DriverPhotoUploaderProps {
   photoUrl: string;
   driverName?: string;
+  title?: string;
+  subtitle?: string;
   onChange: (nextPhotoUrl: string) => void;
 }
 
@@ -41,6 +44,8 @@ function readFileAsDataUrl(file: File): Promise<string> {
 export const DriverPhotoUploader: React.FC<DriverPhotoUploaderProps> = ({
   photoUrl,
   driverName,
+  title = 'صورة السائق الشخصية',
+  subtitle = 'ارفع صورة من الجهاز أو التقطها بالكاميرا مع إمكانية القص والتكبير والتدوير وضبط الإضاءة.',
   onChange,
 }) => {
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
@@ -58,6 +63,8 @@ export const DriverPhotoUploader: React.FC<DriverPhotoUploaderProps> = ({
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(
     null
   );
+
+  useEscapeKey(Boolean(editorSrc), () => setEditorSrc(null));
 
   useEffect(() => {
     if (!editorSrc) {
@@ -200,7 +207,7 @@ export const DriverPhotoUploader: React.FC<DriverPhotoUploaderProps> = ({
         <div className="flex items-center gap-3">
           <DriverAvatar name={driverName} photoUrl={photoUrl} size="xl" />
           <div className="sm:hidden">
-            <p className="text-xs font-bold text-[#0B1F3A]">صورة السائق الشخصية</p>
+            <p className="text-xs font-bold text-[#0B1F3A]">{title}</p>
             <p className="text-[11px] text-slate-500 mt-0.5">
               يمكنك قص وتعديل الصورة قبل الحفظ
             </p>
@@ -209,10 +216,8 @@ export const DriverPhotoUploader: React.FC<DriverPhotoUploaderProps> = ({
 
         <div className="flex-1 space-y-2">
           <div className="hidden sm:block">
-            <p className="text-xs font-bold text-[#0B1F3A]">صورة السائق الشخصية</p>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              ارفع صورة من الجهاز أو التقطها بالكاميرا مع إمكانية القص والتكبير والتدوير وضبط الإضاءة.
-            </p>
+            <p className="text-xs font-bold text-[#0B1F3A]">{title}</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">{subtitle}</p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">

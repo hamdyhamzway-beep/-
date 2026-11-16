@@ -11,10 +11,19 @@ function wrapPoolWithRls(pool: Pool): Pool {
   const origQuery = pool.query.bind(pool) as (...args: unknown[]) => Promise<unknown>;
   const origConnect = pool.connect.bind(pool) as () => Promise<PoolClient>;
 
-  const applyRlsToClient = async (client: PoolClient, role: string, driverId: number | null) => {
+  const applyRlsToClient = async (
+    client: PoolClient,
+    role: string,
+    driverId: number | null,
+    supervisorId?: number | null
+  ) => {
     await client.query(
-      "SELECT set_config('app.user_role', $1, true), set_config('app.driver_id', $2, true)",
-      [role, driverId !== null ? String(driverId) : '']
+      "SELECT set_config('app.user_role', $1, true), set_config('app.driver_id', $2, true), set_config('app.supervisor_id', $3, true)",
+      [
+        role,
+        driverId !== null ? String(driverId) : '',
+        supervisorId !== null && supervisorId !== undefined ? String(supervisorId) : '',
+      ]
     );
   };
 
@@ -30,7 +39,7 @@ function wrapPoolWithRls(pool: Pool): Pool {
     const client = await origConnect();
     try {
       await client.query('BEGIN');
-      await applyRlsToClient(client, ctx.role, ctx.driverId);
+      await applyRlsToClient(client, ctx.role, ctx.driverId, ctx.supervisorId);
       const res = await (client.query as (...qArgs: unknown[]) => Promise<unknown>)(...args);
       await client.query('COMMIT');
       return res;
@@ -66,8 +75,14 @@ function wrapPoolWithRls(pool: Pool): Pool {
           : '';
       if (/^\s*begin\b/i.test(sqlText)) {
         await origClientQuery(
-          "SELECT set_config('app.user_role', $1, true), set_config('app.driver_id', $2, true)",
-          [ctx.role, ctx.driverId !== null ? String(ctx.driverId) : '']
+          "SELECT set_config('app.user_role', $1, true), set_config('app.driver_id', $2, true), set_config('app.supervisor_id', $3, true)",
+          [
+            ctx.role,
+            ctx.driverId !== null ? String(ctx.driverId) : '',
+            ctx.supervisorId !== null && ctx.supervisorId !== undefined
+              ? String(ctx.supervisorId)
+              : '',
+          ]
         );
       }
       return res;

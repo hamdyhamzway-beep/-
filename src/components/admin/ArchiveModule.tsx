@@ -12,7 +12,8 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { apiFetch, formatEGP } from '../../lib/api';
+import { apiFetch, formatEGP, normalizeLookupText } from '../../lib/api';
+import { useEscapeKey } from '../../lib/useEscapeKey';
 import { DriverAvatar } from '../DriverAvatar';
 import type {
   EmployeeRecord,
@@ -52,6 +53,12 @@ export const ArchiveModule: React.FC = () => {
   const [deleteDriverTarget, setDeleteDriverTarget] = useState<EnrichedDriver | null>(null);
   const [deleteEmployeeTarget, setDeleteEmployeeTarget] = useState<EmployeeRecord | null>(null);
   const [statementPreview, setStatementPreview] = useState<ArchivedDriverStatement | null>(null);
+
+  useEscapeKey(Boolean(deleteEmployeeTarget || deleteDriverTarget || statementPreview), () => {
+    if (deleteEmployeeTarget) setDeleteEmployeeTarget(null);
+    else if (deleteDriverTarget) setDeleteDriverTarget(null);
+    else if (statementPreview) setStatementPreview(null);
+  });
 
   const loadArchive = useCallback(async () => {
     setLoading(true);
@@ -176,20 +183,22 @@ export const ArchiveModule: React.FC = () => {
     }
   };
 
-  const q = search.trim().toLowerCase();
+  const q = normalizeLookupText(search);
+  const digitsOnly = q.replace(/\D/g, '');
   const filteredDrivers = data.drivers.filter(
     (d) =>
       !q ||
-      d.fullName.toLowerCase().includes(q) ||
-      d.driverCode.toLowerCase().includes(q) ||
-      d.phone.toLowerCase().includes(q)
+      normalizeLookupText(d.fullName).includes(q) ||
+      normalizeLookupText(d.driverCode).includes(q) ||
+      normalizeLookupText(d.phone).includes(q) ||
+      (digitsOnly.length >= 2 && normalizeLookupText(d.phone).replace(/\D/g, '').includes(digitsOnly))
   );
   const filteredEmployees = data.employees.filter(
     (e) =>
       !q ||
-      e.fullName.toLowerCase().includes(q) ||
-      (e.employeeCode || '').toLowerCase().includes(q) ||
-      (e.jobTitle || '').toLowerCase().includes(q)
+      normalizeLookupText(e.fullName).includes(q) ||
+      normalizeLookupText(e.employeeCode).includes(q) ||
+      normalizeLookupText(e.jobTitle).includes(q)
   );
 
   return (
@@ -238,14 +247,24 @@ export const ArchiveModule: React.FC = () => {
         </div>
 
         <div className="relative flex-1 max-w-sm">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="بحث في الأرشيف بالاسم أو الكود أو الهاتف..."
-            className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-3 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
+            className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-8 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
           />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              aria-label="مسح البحث"
+              className="absolute left-2.5 top-2 text-slate-400 hover:text-slate-700 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 

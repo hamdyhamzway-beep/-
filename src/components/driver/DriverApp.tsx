@@ -6,6 +6,7 @@ import {
   Check,
   Clock,
   Compass,
+  Gauge,
   Home,
   LogOut,
   MapPin,
@@ -17,9 +18,35 @@ import {
   ShieldAlert,
   UserCheck,
   Wallet,
+  Wifi,
+  WifiOff,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
-import { apiFetch, formatEGP, formatRelativeArabicTime } from '../../lib/api';
+import {
+  ApiHttpError,
+  apiFetch,
+  formatArabicTripTime,
+  formatEGP,
+  formatRelativeArabicTime,
+} from '../../lib/api';
+import {
+  flushQueuedGpsPoints,
+  getDailyScheduleStatus,
+  HIGH_ACCURACY_GPS_OPTIONS,
+  HighPrecisionSpeedEstimator,
+  requestBackgroundSyncRegistration,
+  transmitOrQueueGpsFix,
+  type ScheduleWindowStatus,
+} from '../../lib/gps-tracker';
+import {
+  getCachedDriverProfile,
+  getPendingLicenseSyncs,
+  getQueuedGpsPoints,
+  queuePendingLicenseSync,
+  removePendingLicenseSync,
+  saveCachedDriverProfile,
+} from '../../lib/local-store';
 import { AppLogoBackdrop } from '../AppLogoBackdrop';
 import { DriverAvatar } from '../DriverAvatar';
 import { DriverLicensesSection } from '../DriverLicensesSection';
@@ -30,6 +57,7 @@ import travelBackdropImg from '../../assets/images/alwaleed_travel_backdrop_1794
 import type {
   AdvanceRecord,
   CoverageRecord,
+  DriverLicensePhoto,
   EnrichedDriver,
   FinancialTransaction,
   NotificationItem,
@@ -76,10 +104,14 @@ const ARABIC_MONTHS = [
   'ديسمبر',
 ];
 
-export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
+export const DriverApp: React.FC<{
+  allowDriverSelector?: boolean;
+  hasPreviewBar?: boolean;
+}> = ({
   allowDriverSelector = false,
+  hasPreviewBar = false,
 }) => {
-  const { dbUser, logout } = useAuth();
+  const { dbUser, driverRecord, logout } = useAuth();
   const now = new Date();
   const [activeTab, setActiveTab] = useState<DriverTab>('home');
   const [month, setMonth] = useState<number>(now.getMonth() + 1);
@@ -92,7 +124,14 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Live GPS transmission state (auto-enabled once permission is granted or PWA is installed)
+  // Connectivity & Offline Queues
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine !== false : true
+  );
+  const [queuedGpsCount, setQueuedGpsCount] = useState<number>(0);
+  const [pendingLicensesCount, setPendingLicensesCount] = useState<number>(0);
+
+  // Live GPS transmission + High-precision speed + Daily schedule (06:00 AM - 04:00 PM)
   const [gpsConsent, setGpsConsent] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('alwaleed_gps_consent');
@@ -111,17 +150,63 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
   const [geoPermState, setGeoPermState] = useState<'granted' | 'prompt' | 'denied' | 'unknown'>(
     'unknown'
   );
+  const [scheduleStatus, setScheduleStatus] = useState<ScheduleWindowStatus>(() =>
+    getDailyScheduleStatus()
+  );
   const [isStreamingGps, setIsStreamingGps] = useState(false);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [gpsSending, setGpsSending] = useState(false);
   const [lastLocalPingAt, setLastLocalPingAt] = useState<string | null>(null);
+  const [liveSpeedKmh, setLiveSpeedKmh] = useState<number>(0);
+  const [liveAccuracyM, setLiveAccuracyM] = useState<number | null>(null);
+  const [speedSource, setSpeedSource] = useState<'doppler' | 'haversine' | 'stationary'>(
+    'stationary'
+  );
+
   const watchIdRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const lastSentMsRef = useRef<number>(0);
   const initialPeriodSyncedRef = useRef(false);
+  const speedEstimatorRef = useRef<HighPrecisionSpeedEstimator>(new HighPrecisionSpeedEstimator());
+  const hasDataRef = useRef(false);
+  hasDataRef.current = Boolean(data);
 
-  // Load driver selector list if super_admin is previewing (active first, archived fallback so preview always works)
+  const refreshQueueCounts = useCallback(async () => {
+    const [pts, lics] = await Promise.all([getQueuedGpsPoints(), getPendingLicenseSyncs()]);
+    setQueuedGpsCount(pts.length);
+    setPendingLicensesCount(lics.length);
+  }, []);
+
+  // Keep daily 06:00 - 16:00 schedule updated accurately with exact transition timers
+  useEffect(() => {
+    let timerId: number | null = null;
+    const scheduleTick = () => {
+      const nextStatus = getDailyScheduleStatus();
+      setScheduleStatus(nextStatus);
+      timerId = window.setTimeout(scheduleTick, Math.min(nextStatus.msUntilNextTransition, 60_000));
+    };
+    scheduleTick();
+    return () => {
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+  }, []);
+
+  // Instant IndexedDB profile hydration so personal details & license images never vanish offline
+  useEffect(() => {
+    if (allowDriverSelector || !driverRecord?.id) return;
+    let active = true;
+    getCachedDriverProfile<DriverAppResponse>(driverRecord.id).then((cached) => {
+      if (!active || !cached) return;
+      setData((prev) => prev || cached);
+      setLoading(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [allowDriverSelector, driverRecord?.id]);
+
+  // Load driver selector list if super_admin is previewing
   useEffect(() => {
     if (!allowDriverSelector) {
       setDriversLoaded(true);
@@ -159,41 +244,105 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     };
   }, [allowDriverSelector]);
 
-  const loadDriverData = useCallback(async () => {
-    if (allowDriverSelector && (!driversLoaded || !selectedDriverId)) {
-      if (driversLoaded && !selectedDriverId) {
+  const loadDriverData = useCallback(
+    async (silent = false) => {
+      if (allowDriverSelector && (!driversLoaded || !selectedDriverId)) {
+        if (driversLoaded && !selectedDriverId) {
+          setLoading(false);
+        }
+        return;
+      }
+      if (!silent && !hasDataRef.current) {
+        setLoading(true);
+      }
+      setError(null);
+      try {
+        const params = new URLSearchParams();
+        if (initialPeriodSyncedRef.current) {
+          params.set('month', String(month));
+          params.set('year', String(year));
+        }
+        if (allowDriverSelector && selectedDriverId) {
+          params.set('asDriverId', selectedDriverId);
+        }
+        const res = await apiFetch<DriverAppResponse>(`/api/driver-app/me?${params.toString()}`);
+        if (!initialPeriodSyncedRef.current && res.period) {
+          initialPeriodSyncedRef.current = true;
+          setMonth(res.period.month);
+          setYear(res.period.year);
+        }
+        setData(res);
+        if (!allowDriverSelector && res.driver?.id) {
+          await saveCachedDriverProfile(res.driver.id, res);
+        }
+      } catch (err: unknown) {
+        const fallbackId = allowDriverSelector ? Number(selectedDriverId) : driverRecord?.id;
+        if (fallbackId) {
+          const cached = await getCachedDriverProfile<DriverAppResponse>(fallbackId);
+          if (cached) {
+            setData((prev) => prev || cached);
+            setError(null);
+            return;
+          }
+        }
+        setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات السائق');
+      } finally {
         setLoading(false);
       }
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (initialPeriodSyncedRef.current) {
-        params.set('month', String(month));
-        params.set('year', String(year));
-      }
-      if (allowDriverSelector && selectedDriverId) {
-        params.set('asDriverId', selectedDriverId);
-      }
-      const res = await apiFetch<DriverAppResponse>(`/api/driver-app/me?${params.toString()}`);
-      if (!initialPeriodSyncedRef.current && res.period) {
-        initialPeriodSyncedRef.current = true;
-        setMonth(res.period.month);
-        setYear(res.period.year);
-      }
-      setData(res);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات السائق');
-    } finally {
-      setLoading(false);
-    }
-  }, [month, year, allowDriverSelector, driversLoaded, selectedDriverId]);
+    },
+    [month, year, allowDriverSelector, driversLoaded, selectedDriverId, driverRecord?.id]
+  );
 
   useEffect(() => {
     loadDriverData();
-  }, [loadDriverData]);
+    refreshQueueCounts();
+  }, [month, year, allowDriverSelector, driversLoaded, selectedDriverId]);
+
+  const syncPendingItems = useCallback(async () => {
+    if (allowDriverSelector || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+      return;
+    }
+    const gpsResult = await flushQueuedGpsPoints();
+    const pendingLicenses = await getPendingLicenseSyncs();
+    for (const item of pendingLicenses) {
+      try {
+        await apiFetch('/api/driver-app/licenses', {
+          method: 'PUT',
+          body: JSON.stringify({
+            licensePhotos: item.licensePhotos,
+            driverId: item.driverId,
+          }),
+        });
+        await removePendingLicenseSync(item.id);
+      } catch {
+        // Retry on next reconnect
+      }
+    }
+    await refreshQueueCounts();
+    if (gpsResult.flushed > 0 || pendingLicenses.length > 0) {
+      await loadDriverData(true);
+    }
+  }, [allowDriverSelector, loadDriverData, refreshQueueCounts]);
+
+  // Monitor network connectivity and automatically flush buffered GPS + offline license edits
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      syncPendingItems();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    if (navigator.onLine !== false) {
+      syncPendingItems();
+    }
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [syncPendingItems]);
 
   const stopGpsWatch = useCallback(() => {
     if (watchIdRef.current !== null && typeof navigator !== 'undefined' && navigator.geolocation) {
@@ -211,35 +360,63 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     setIsStreamingGps(false);
   }, []);
 
-  const sendGpsCoordinates = useCallback(
-    async (lat: number, lng: number, speedKmh: number, accuracyMeters: number) => {
+  const processAndSendPosition = useCallback(
+    async (
+      pos: GeolocationPosition,
+      options: { forceSend?: boolean; source?: 'live' | 'manual' } = {}
+    ) => {
       if (!data?.driver?.vehicleId) return;
-      setGpsSending(true);
+      const estimate = speedEstimatorRef.current.compute(pos.coords, pos.timestamp || Date.now());
+      setLiveSpeedKmh(estimate.speedKmh);
+      setLiveAccuracyM(estimate.accuracyMeters);
+      setSpeedSource(estimate.source);
+
+      const nowMs = Date.now();
+      if (!options.forceSend && nowMs - lastSentMsRef.current < 5000) {
+        return;
+      }
+
+      if (options.forceSend) setGpsSending(true);
       try {
-        await apiFetch('/api/gps/update', {
-          method: 'POST',
-          body: JSON.stringify({
-            vehicleId: data.driver.vehicleId,
-            lat,
-            lng,
-            speedKmh: Math.max(0, Math.round(speedKmh)),
-            accuracyMeters: Math.round(accuracyMeters),
-          }),
+        const result = await transmitOrQueueGpsFix({
+          vehicleId: data.driver.vehicleId,
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          speedKmh: estimate.speedKmh,
+          heading: estimate.heading,
+          accuracyMeters: estimate.accuracyMeters,
+          recordedAt: new Date(pos.timestamp || nowMs).toISOString(),
+          source: options.source || 'live',
         });
-        lastSentMsRef.current = Date.now();
+
+        lastSentMsRef.current = nowMs;
         setLastLocalPingAt(new Date().toISOString());
         setGpsError(null);
-        await loadDriverData();
+
+        if (result.queued) {
+          await refreshQueueCounts();
+          await requestBackgroundSyncRegistration();
+        } else {
+          // Periodically flush any older backlog when live transmission succeeds
+          const pts = await getQueuedGpsPoints();
+          if (pts.length > 0) {
+            await flushQueuedGpsPoints();
+          }
+          await refreshQueueCounts();
+          if (options.forceSend) {
+            await loadDriverData(true);
+          }
+        }
       } catch (err: unknown) {
-        setGpsError(err instanceof Error ? err.message : 'تعذر إرسال الإحداثيات إلى الخادم');
+        setGpsError(err instanceof Error ? err.message : 'تعذر معالجة إحداثيات الموقع');
       } finally {
-        setGpsSending(false);
+        if (options.forceSend) setGpsSending(false);
       }
     },
-    [data?.driver?.vehicleId, loadDriverData]
+    [data?.driver?.vehicleId, loadDriverData, refreshQueueCounts]
   );
 
-  // Sync with browser Permissions API so once granted (or upon PWA install), it stays enabled across every login without re-asking
+  // Sync with browser Permissions API so once granted (or upon PWA install), it stays enabled across restarts
   useEffect(() => {
     if (allowDriverSelector || typeof navigator === 'undefined') return;
     let cancelled = false;
@@ -297,12 +474,18 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     };
   }, [allowDriverSelector]);
 
-  // Manage persistent navigator.geolocation.watchPosition + foreground heartbeat when enabled
+  // Persistent High-Accuracy GPS Watch strictly scheduled daily 06:00 AM - 04:00 PM year-round
   useEffect(() => {
     const isPaused = data?.gps?.vehicleGpsStatus === 'paused';
     const hasVehicle = Boolean(data?.linked && data?.driver?.vehicleId);
+    const shouldAutoRun =
+      gpsConsent &&
+      !isPaused &&
+      hasVehicle &&
+      !allowDriverSelector &&
+      scheduleStatus.isWithinWindow;
 
-    if (!gpsConsent || isPaused || !hasVehicle || allowDriverSelector) {
+    if (!shouldAutoRun) {
       stopGpsWatch();
       return;
     }
@@ -315,7 +498,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     setGpsError(null);
     setIsStreamingGps(true);
 
-    const requestAndSendNow = () => {
+    const requestImmediateHighAccuracyFix = () => {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           setGeoPermState('granted');
@@ -324,76 +507,64 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
           } catch {
             // ignore
           }
-          const speedKmh = pos.coords.speed ? pos.coords.speed * 3.6 : 0;
-          sendGpsCoordinates(
-            pos.coords.latitude,
-            pos.coords.longitude,
-            speedKmh,
-            pos.coords.accuracy || 10
-          );
+          processAndSendPosition(pos, { forceSend: true, source: 'live' });
         },
         (geoErr) => {
           if (geoErr.code === geoErr.PERMISSION_DENIED) {
             setGeoPermState('denied');
             setIsStreamingGps(false);
-            setGpsError('تم رفض إذن الوصول للموقع. يرجى السماح بالموقع مرة واحدة من إعدادات التطبيق/المتصفح.');
+            setGpsError(
+              'تم رفض إذن الوصول للموقع. يرجى السماح بالموقع مرة واحدة من إعدادات التطبيق/المتصفح.'
+            );
           }
         },
-        { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 }
+        HIGH_ACCURACY_GPS_OPTIONS
       );
     };
 
-    // Send initial position immediately on login/app launch
-    if (Date.now() - lastSentMsRef.current > 10000) {
-      requestAndSendNow();
+    if (Date.now() - lastSentMsRef.current > 8000) {
+      requestImmediateHighAccuracyFix();
     }
 
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         setGeoPermState('granted');
-        const nowMs = Date.now();
-        if (nowMs - lastSentMsRef.current < 10000) return;
-        const speedKmh = pos.coords.speed ? pos.coords.speed * 3.6 : 0;
-        sendGpsCoordinates(
-          pos.coords.latitude,
-          pos.coords.longitude,
-          speedKmh,
-          pos.coords.accuracy || 10
-        );
+        processAndSendPosition(pos, { source: 'live' });
       },
       (geoErr) => {
-        setIsStreamingGps(false);
         if (geoErr.code === geoErr.PERMISSION_DENIED) {
+          setIsStreamingGps(false);
           setGeoPermState('denied');
-          setGpsError('تم رفض إذن الوصول للموقع من المتصفح. يرجى تفعيل الموقع من إعدادات المتصفح.');
+          setGpsError(
+            'تم رفض إذن الوصول للموقع من المتصفح. يرجى تفعيل الموقع من إعدادات المتصفح.'
+          );
         } else if (geoErr.code === geoErr.POSITION_UNAVAILABLE) {
-          setGpsError('تعذر تحديد الموقع الحالي، تأكد من تشغيل GPS في الجهاز.');
+          setGpsError('تعذر تحديد الموقع الحالي بدقة، تأكد من تشغيل GPS في الجهاز.');
         } else {
-          setGpsError('انتهت مهلة تحديد الموقع. حاول التحقق من الإشارة.');
+          setGpsError('جاري إعادة التقاط إشارة GPS عالية الدقة...');
         }
       },
-      {
-        enableHighAccuracy: true,
-        maximumAge: 10000,
-        timeout: 15000,
-      }
+      HIGH_ACCURACY_GPS_OPTIONS
     );
 
-    // Periodic heartbeat every 30s & immediate sync when app returns to foreground
+    // 25s foreground heartbeat & visibility resume sync
     heartbeatTimerRef.current = window.setInterval(() => {
       if (document.visibilityState === 'visible' && Date.now() - lastSentMsRef.current >= 25000) {
-        requestAndSendNow();
+        requestImmediateHighAccuracyFix();
       }
-    }, 30000);
+    }, 25000);
 
     const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastSentMsRef.current >= 10000) {
-        requestAndSendNow();
+      if (document.visibilityState === 'visible') {
+        syncPendingItems();
+        if (Date.now() - lastSentMsRef.current >= 8000) {
+          requestImmediateHighAccuracyFix();
+        }
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Best-effort screen wake lock while driver tracking is active
+    let effectActive = true;
     const navWithWakeLock = navigator as unknown as {
       wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
     };
@@ -401,23 +572,30 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
       navWithWakeLock.wakeLock
         .request('screen')
         .then((lock) => {
+          if (!effectActive) {
+            lock.release().catch(() => undefined);
+            return;
+          }
           wakeLockRef.current = lock;
         })
         .catch(() => undefined);
     }
 
     return () => {
+      effectActive = false;
       document.removeEventListener('visibilitychange', handleVisibility);
       stopGpsWatch();
     };
   }, [
     gpsConsent,
+    scheduleStatus.isWithinWindow,
     data?.gps?.vehicleGpsStatus,
     data?.linked,
     data?.driver?.vehicleId,
     allowDriverSelector,
-    sendGpsCoordinates,
+    processAndSendPosition,
     stopGpsWatch,
+    syncPendingItems,
   ]);
 
   const handleToggleConsent = async () => {
@@ -430,8 +608,20 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     }
     if (!next) {
       stopGpsWatch();
-    } else if (data?.gps?.vehicleGpsStatus === 'paused') {
-      await handleTogglePause(false);
+    } else {
+      if (data?.gps?.vehicleGpsStatus === 'paused') {
+        await handleTogglePause(false);
+      }
+      if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            setGeoPermState('granted');
+            processAndSendPosition(pos, { forceSend: true, source: 'manual' });
+          },
+          () => undefined,
+          HIGH_ACCURACY_GPS_OPTIONS
+        );
+      }
     }
   };
 
@@ -444,13 +634,8 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
     setGpsError(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        const speedKmh = pos.coords.speed ? pos.coords.speed * 3.6 : 0;
-        sendGpsCoordinates(
-          pos.coords.latitude,
-          pos.coords.longitude,
-          speedKmh,
-          pos.coords.accuracy || 10
-        );
+        setGeoPermState('granted');
+        processAndSendPosition(pos, { forceSend: true, source: 'manual' });
       },
       (err) => {
         setGpsSending(false);
@@ -460,7 +645,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
             : 'تعذر قراءة الموقع الجغرافي الحالي.'
         );
       },
-      { enableHighAccuracy: true, timeout: 12000 }
+      HIGH_ACCURACY_GPS_OPTIONS
     );
   };
 
@@ -476,16 +661,54 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
         }),
       });
       if (paused) stopGpsWatch();
-      await loadDriverData();
+      await loadDriverData(true);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تحديث حالة الموقع');
+    }
+  };
+
+  const handleSaveDriverLicenses = async (nextPhotos: DriverLicensePhoto[]) => {
+    if (!data?.driver) return;
+    const optimisticRes: DriverAppResponse = {
+      ...data,
+      driver: {
+        ...data.driver,
+        licensePhotos: nextPhotos,
+      },
+    };
+    setData(optimisticRes);
+    if (!allowDriverSelector) {
+      await saveCachedDriverProfile(data.driver.id, optimisticRes);
+    }
+
+    try {
+      await apiFetch('/api/driver-app/licenses', {
+        method: 'PUT',
+        body: JSON.stringify({
+          licensePhotos: nextPhotos,
+          driverId: allowDriverSelector ? data.driver.id : undefined,
+        }),
+      });
+      await loadDriverData(true);
+    } catch (err: unknown) {
+      const status = err instanceof ApiHttpError ? err.status : 0;
+      if (!allowDriverSelector && (status === 0 || !navigator.onLine)) {
+        await queuePendingLicenseSync({
+          type: 'licenses',
+          driverId: data.driver.id,
+          licensePhotos: nextPhotos,
+        });
+        await refreshQueueCounts();
+        return;
+      }
+      throw err;
     }
   };
 
   const handleMarkNotificationRead = async (id: number) => {
     try {
       await apiFetch(`/api/notifications/${id}/read`, { method: 'PATCH' });
-      await loadDriverData();
+      await loadDriverData(true);
     } catch {
       // ignore
     }
@@ -496,13 +719,24 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
   const salary = data?.salary;
   const latestGps = data?.gps?.latestGps;
   const vehicleGpsStatus = data?.gps?.vehicleGpsStatus || 'offline';
-  const isLiveSharing = vehicleGpsStatus !== 'paused' && Boolean(latestGps?.isLive);
+  const isLiveSharing =
+    vehicleGpsStatus !== 'paused' && (isStreamingGps || Boolean(latestGps?.isLive));
+  const displayedSpeed = isStreamingGps
+    ? liveSpeedKmh
+    : latestGps?.isLive
+    ? latestGps.speedKmh
+    : 0;
 
   return (
     <div className="min-h-screen bg-[#eef2f7] relative flex flex-col">
       <AppLogoBackdrop />
-      {/* Sticky Top Header (h-14, compact mobile thumb-friendly shell) */}
-      <header className="sticky top-0 z-30 h-14 bg-[#0B1F3A] text-white border-b border-slate-800 px-4">
+
+      {/* Sticky Top Header */}
+      <header
+        className={`sticky ${
+          hasPreviewBar ? 'top-12' : 'top-0'
+        } z-30 h-14 bg-[#0B1F3A] text-white border-b border-slate-800 px-4`}
+      >
         <div className="max-w-3xl mx-auto h-full flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
             {driver ? (
@@ -522,8 +756,8 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                 {driver ? driver.fullName : 'تطبيق السائق · الوليد ترافيل'}
               </div>
               {driver && (
-                <div className="text-[11px] text-slate-300 font-mono truncate">
-                  كود: {driver.driverCode} · باص {driver.busNumber}
+                <div className="text-[11px] text-slate-300 font-mono tabular-nums truncate">
+                  كود {driver.driverCode} · باص {driver.busNumber}
                 </div>
               )}
             </div>
@@ -560,7 +794,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
         </div>
       </header>
 
-      {/* Main Scrollable Content */}
+      {/* Main Content */}
       <main className="app-glass-cards relative z-10 flex-1 w-full max-w-3xl mx-auto px-4 pt-4 pb-24 space-y-4">
         {allowDriverSelector && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 flex items-center justify-between gap-3">
@@ -569,10 +803,32 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
           </div>
         )}
 
+        {!isOnline && !allowDriverSelector && (
+          <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 flex items-center justify-between gap-3">
+            <span className="flex items-center gap-2 font-semibold">
+              <WifiOff className="w-4 h-4 text-amber-700 shrink-0" />
+              وضع عدم الاتصال: بياناتك محفوظة محلياً ويتم تخزين نقاط GPS للرفع فور عودة الشبكة
+            </span>
+            {queuedGpsCount > 0 && (
+              <span className="font-mono font-bold tabular-nums">{queuedGpsCount} نقطة</span>
+            )}
+          </div>
+        )}
+
         {error && (
-          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{error}</span>
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              aria-label="إغلاق التنبيه"
+              className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 
@@ -606,17 +862,13 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
               الحساب غير مرتبط بملف سائق بعد
             </h2>
             <p className="text-sm text-slate-600 leading-relaxed max-w-md mx-auto">
-              تم تسجيل دخولك بنجاح بالبريد{' '}
-              <span className="font-mono font-semibold text-[#0B1F3A]">{dbUser?.email}</span>،
-              ولكن لم يتم ربط هذا البريد بملف سائق في قاعدة البيانات حتى الآن.
-            </p>
-            <p className="text-xs text-slate-500 leading-relaxed max-w-md mx-auto">
-              يرجى التواصل مع إدارة الوليد ترافيل لإضافة بريدك الإلكتروني في خانة «البريد الإلكتروني
-              المرتبط بحساب السائق» داخل صفحة السائقين.
+              تم تسجيل دخولك بالبريد{' '}
+              <span className="font-mono font-semibold text-[#0B1F3A]">{dbUser?.email}</span>، ولكن
+              لم يتم ربط هذا البريد بملف سائق حتى الآن.
             </p>
             <div className="pt-2 flex items-center justify-center gap-3">
               <button
-                onClick={loadDriverData}
+                onClick={() => loadDriverData()}
                 className="min-h-[44px] inline-flex items-center gap-2 rounded-xl bg-[#0B1F3A] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#13325c] cursor-pointer"
               >
                 <RefreshCw className="w-4 h-4" />
@@ -637,7 +889,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
             {/* TAB 1: HOME */}
             {activeTab === 'home' && (
               <div className="space-y-4">
-                {/* Identity & Salary Summary Card */}
+                {/* Identity & Salary Hero */}
                 <section className="relative overflow-hidden rounded-2xl bg-[#0B1F3A] text-white p-5">
                   <img
                     src={travelBackdropImg}
@@ -647,9 +899,9 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                   />
                   <div
                     aria-hidden="true"
-                    className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none select-none"
+                    className="hidden sm:block absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none select-none"
                   >
-                    <div className="w-36 h-36 sm:w-44 sm:h-44 rounded-full overflow-hidden opacity-55 ring-1 ring-[#C89B3C]/40 shadow-2xl">
+                    <div className="w-40 h-40 rounded-full overflow-hidden opacity-45 ring-1 ring-[#C89B3C]/40 shadow-2xl">
                       <img
                         src={splashScreenImg}
                         alt=""
@@ -658,7 +910,8 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                       />
                     </div>
                   </div>
-                  <div className="absolute inset-0 bg-gradient-to-l from-[#0B1F3A]/85 via-[#0B1F3A]/45 to-transparent pointer-events-none" />
+                  <div className="absolute inset-0 bg-gradient-to-l from-[#0B1F3A]/90 via-[#0B1F3A]/60 to-transparent pointer-events-none" />
+
                   <div className="relative z-10 space-y-5">
                     <div className="flex items-start justify-between gap-4">
                       <div className="flex items-center gap-3.5 min-w-0">
@@ -669,12 +922,15 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                           variant="dark"
                         />
                         <div className="min-w-0">
-                          <p className="text-xs text-slate-300">ملف السائق الشخصي</p>
+                          <p className="text-[11px] text-[#ebd089] font-semibold">
+                            ملف السائق · الوليد ترافيل
+                          </p>
                           <h1 className="font-display text-xl font-bold mt-0.5 truncate">
                             {driver.fullName}
                           </h1>
-                          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300">
-                            <span className="font-mono">الكود: {driver.driverCode}</span>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-200 tabular-nums">
+                            <span className="font-mono">كود {driver.driverCode}</span>
+                            <span className="text-white/30">·</span>
                             <span className="flex items-center gap-1 font-mono" dir="ltr">
                               <Phone className="w-3.5 h-3.5 text-[#C89B3C]" />
                               {driver.phone}
@@ -682,14 +938,16 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                           </div>
                         </div>
                       </div>
-                      {driver.accountStatus === 'active' && (
-                        <span className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-semibold text-[#C89B3C] shrink-0">
-                          حساب نشط
-                        </span>
-                      )}
+                      <span
+                        className={`text-xs font-bold shrink-0 ${
+                          driver.accountStatus === 'active' ? 'text-[#C89B3C]' : 'text-amber-300'
+                        }`}
+                      >
+                        {driver.accountStatus === 'active' ? 'حساب نشط' : 'مؤرشف'}
+                      </span>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3 pt-4 border-t border-white/10">
+                    <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/15">
                       <div>
                         <p className="text-xs text-slate-300">الراتب المتفق عليه</p>
                         <p className="text-lg sm:text-xl font-bold tabular-nums mt-0.5">
@@ -708,68 +966,56 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                   </div>
                 </section>
 
-                {/* Assignment & Route Details */}
-                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
-                  <div className="flex items-center justify-between">
+                {/* Clean Operational Details (Hairline structured list - zero nested subcards) */}
+                <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
                     <h2 className="font-display text-base font-bold text-[#0B1F3A]">
                       بيانات المدرسة والمركبة وخط السير
                     </h2>
-                    <Bus className="w-5 h-5 text-[#C89B3C]" />
+                    <Bus className="w-4 h-4 text-[#C89B3C]" />
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                    <div className="rounded-xl bg-slate-50 p-3.5">
-                      <p className="text-xs text-slate-500">المدرسة المعينة</p>
-                      <p className="font-semibold text-[#0B1F3A] mt-1">{driver.schoolName}</p>
+                  <dl className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 divide-slate-100 text-sm">
+                    <div className="px-5 py-3.5 sm:border-b sm:border-l border-slate-100">
+                      <dt className="text-xs text-slate-500">المدرسة المعينة</dt>
+                      <dd className="font-bold text-[#0B1F3A] mt-1">{driver.schoolName}</dd>
                     </div>
-                    <div className="rounded-xl bg-slate-50 p-3.5">
-                      <p className="text-xs text-slate-500">رقم الباص واللوحة</p>
-                      <p className="font-semibold text-[#0B1F3A] mt-1">
+                    <div className="px-5 py-3.5 sm:border-b border-slate-100">
+                      <dt className="text-xs text-slate-500">رقم الباص واللوحة</dt>
+                      <dd className="font-bold text-[#0B1F3A] mt-1 tabular-nums">
                         {driver.busNumber} ·{' '}
                         <span className="font-mono text-xs text-slate-600">
                           {driver.registrationNumber}
                         </span>
-                      </p>
+                      </dd>
                     </div>
-                    <div className="rounded-xl bg-slate-50 p-3.5 sm:col-span-2">
-                      <p className="text-xs text-slate-500">خط السير والمواعيد</p>
-                      <p className="font-semibold text-[#0B1F3A] mt-1">{driver.routeName}</p>
-                      {(driver.pickupArea || driver.dropoffArea) && (
-                        <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-slate-600">
+                    <div className="px-5 py-3.5 sm:col-span-2">
+                      <dt className="text-xs text-slate-500">خط السير والمواعيد</dt>
+                      <dd className="font-bold text-[#0B1F3A] mt-1">{driver.routeName}</dd>
+                      {(driver.pickupArea ||
+                        driver.dropoffArea ||
+                        driver.pickupTime ||
+                        driver.dropoffTime) && (
+                        <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-slate-600 tabular-nums">
                           <span className="flex items-center gap-1">
                             <Clock className="w-3.5 h-3.5 text-[#C89B3C]" />
-                            التحرك: {driver.pickupArea || '—'} ({driver.pickupTime || '—'})
+                            بداية الرحلة: {driver.pickupArea ? `${driver.pickupArea} · ` : ''}
+                            {formatArabicTripTime(driver.pickupTime)}
                           </span>
                           <span>
-                            الوصول: {driver.dropoffArea || '—'} ({driver.dropoffTime || '—'})
+                            نهاية الرحلة: {driver.dropoffArea ? `${driver.dropoffArea} · ` : ''}
+                            {formatArabicTripTime(driver.dropoffTime)}
                           </span>
                         </div>
                       )}
                     </div>
-                  </div>
+                  </dl>
                 </section>
 
-                {/* Driver License Photos Upload & View Section */}
-                <DriverLicensesSection
-                  photos={driver.licensePhotos || []}
-                  viewerRole={allowDriverSelector ? 'admin' : 'driver'}
-                  compact
-                  onSavePhotos={async (nextPhotos) => {
-                    await apiFetch('/api/driver-app/licenses', {
-                      method: 'PUT',
-                      body: JSON.stringify({
-                        licensePhotos: nextPhotos,
-                        driverId: allowDriverSelector ? driver.id : undefined,
-                      }),
-                    });
-                    await loadDriverData();
-                  }}
-                />
-
-                {/* Location Status Quick Card */}
-                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
+                {/* Live Telemetry & Speed Strip (06:00 AM - 04:00 PM Daily Window) */}
+                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
                       <div
                         className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
                           isLiveSharing
@@ -781,24 +1027,23 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                       >
                         <Compass className="w-5 h-5" />
                       </div>
-                      <div>
-                        <p className="text-sm font-bold text-[#0B1F3A]">
-                          حالة مشاركة الموقع:{' '}
-                          {isLiveSharing
-                            ? 'بث مباشر نشط'
-                            : vehicleGpsStatus === 'paused'
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-[#0B1F3A] truncate">
+                          التتبع التلقائي:{' '}
+                          {vehicleGpsStatus === 'paused'
                             ? 'متوقف مؤقتاً'
-                            : 'غير متصل'}
+                            : !scheduleStatus.isWithinWindow
+                            ? 'خارج ساعات العمل المجدولة'
+                            : isLiveSharing
+                            ? 'بث مباشر عالي الدقة نشط'
+                            : 'بانتظار إشارة GPS'}
                         </p>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          {geoPermState === 'granted' && gpsConsent
-                            ? 'إذن الموقع محفوظ ويعمل تلقائياً عند كل فتح للتطبيق'
-                            : latestGps?.recordedAt
-                            ? `آخر تحديث: ${formatRelativeArabicTime(latestGps.recordedAt)}`
-                            : 'لم يتم إرسال موقع بعد'}
+                        <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
+                          الجدول اليومي: {scheduleStatus.windowLabelAr}
                         </p>
                       </div>
                     </div>
+
                     {!allowDriverSelector && (!gpsConsent || geoPermState !== 'granted') ? (
                       <button
                         onClick={handleToggleConsent}
@@ -811,15 +1056,61 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                         onClick={() => setActiveTab('location')}
                         className="min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 px-3.5 py-2 text-xs font-semibold text-[#0B1F3A] shrink-0 cursor-pointer"
                       >
-                        إدارة الموقع
+                        تفاصيل التتبع
                       </button>
                     )}
                   </div>
+
+                  <div className="grid grid-cols-3 divide-x divide-x-reverse divide-slate-100 border-t border-slate-100 pt-3 text-center">
+                    <div className="px-2">
+                      <p className="text-[11px] text-slate-500">السرعة الحالية</p>
+                      <p className="text-lg font-bold text-[#0B1F3A] tabular-nums mt-0.5">
+                        {Math.round(displayedSpeed)}{' '}
+                        <span className="text-xs font-normal text-slate-500">كم/س</span>
+                      </p>
+                    </div>
+                    <div className="px-2">
+                      <p className="text-[11px] text-slate-500">دقة الإشارة</p>
+                      <p className="text-sm font-bold text-slate-800 tabular-nums mt-1">
+                        {liveAccuracyM !== null
+                          ? `±${liveAccuracyM} م`
+                          : latestGps?.accuracyMeters
+                          ? `±${Math.round(latestGps.accuracyMeters)} م`
+                          : '—'}
+                      </p>
+                    </div>
+                    <div className="px-2">
+                      <p className="text-[11px] text-slate-500">آخر تحديث</p>
+                      <p className="text-xs font-semibold text-slate-700 mt-1.5 truncate">
+                        {lastLocalPingAt || latestGps?.recordedAt
+                          ? formatRelativeArabicTime(lastLocalPingAt || latestGps!.recordedAt)
+                          : 'لا يوجد'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {(queuedGpsCount > 0 || pendingLicensesCount > 0) && (
+                    <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-amber-800">
+                      <span>بيانات بانتظار المزامنة عند استقرار الإنترنت</span>
+                      <span className="font-mono font-bold tabular-nums">
+                        {queuedGpsCount} نقطة موقع
+                        {pendingLicensesCount > 0 ? ` · ${pendingLicensesCount} رخص` : ''}
+                      </span>
+                    </div>
+                  )}
                 </section>
 
+                {/* Driver License Photos Upload & View Section (Offline-Resilient) */}
+                <DriverLicensesSection
+                  photos={driver.licensePhotos || []}
+                  viewerRole={allowDriverSelector ? 'admin' : 'driver'}
+                  compact
+                  onSavePhotos={handleSaveDriverLicenses}
+                />
+
                 {/* Recent Notifications Preview */}
-                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
-                  <div className="flex items-center justify-between">
+                <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
                     <h2 className="font-display text-base font-bold text-[#0B1F3A]">
                       أحدث التنبيهات ({unreadCount} غير مقروء)
                     </h2>
@@ -831,18 +1122,18 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                     </button>
                   </div>
                   {(data.notifications || []).slice(0, 2).length === 0 ? (
-                    <p className="text-xs text-slate-500">لا توجد إشعارات جديدة حالياً.</p>
+                    <p className="px-5 py-4 text-xs text-slate-500">لا توجد إشعارات جديدة حالياً.</p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="divide-y divide-slate-100">
                       {(data.notifications || []).slice(0, 2).map((n) => (
                         <div
                           key={n.id}
-                          className={`rounded-xl p-3 text-xs ${
-                            n.isRead ? 'bg-slate-50 text-slate-600' : 'bg-amber-50 text-amber-950'
+                          className={`px-5 py-3.5 text-xs ${
+                            n.isRead ? 'text-slate-600' : 'bg-amber-50/40 text-amber-950'
                           }`}
                         >
-                          <p className="font-bold">{n.title}</p>
-                          <p className="mt-0.5 leading-relaxed">{n.body}</p>
+                          <p className="font-bold text-[#0B1F3A]">{n.title}</p>
+                          <p className="mt-1 leading-relaxed">{n.body}</p>
                         </div>
                       ))}
                     </div>
@@ -854,8 +1145,8 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
             {/* TAB 2: FINANCE (STRICTLY READ-ONLY) */}
             {activeTab === 'finance' && (
               <div className="space-y-4">
-                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                  <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <div>
                       <h1 className="font-display text-lg font-bold text-[#0B1F3A]">
                         كشف الحساب المالي الشهري
@@ -890,39 +1181,39 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                     </div>
                   </div>
 
-                  {/* Salary Formula Breakdown */}
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                    <div className="rounded-xl bg-slate-50 p-3.5">
+                  {/* Clean Ledger Summary Grid with Hairline Dividers */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 divide-y divide-x divide-x-reverse divide-slate-100">
+                    <div className="p-4">
                       <p className="text-xs text-slate-500">الراتب الأساسي</p>
                       <p className="text-base font-bold text-[#0B1F3A] tabular-nums mt-1">
                         {formatEGP(salary?.baseSalary || 0)}
                       </p>
                     </div>
-                    <div className="rounded-xl bg-red-50/70 p-3.5">
+                    <div className="p-4">
                       <p className="text-xs text-red-700">إجمالي السلف (-)</p>
                       <p className="text-base font-bold text-red-700 tabular-nums mt-1">
                         {formatEGP(salary?.totalAdvances || 0)}
                       </p>
                     </div>
-                    <div className="rounded-xl bg-red-50/70 p-3.5">
+                    <div className="p-4">
                       <p className="text-xs text-red-700">خصم تغطية الغياب (-)</p>
                       <p className="text-base font-bold text-red-700 tabular-nums mt-1">
                         {formatEGP(salary?.totalCoverageDeductions || 0)}
                       </p>
                     </div>
-                    <div className="rounded-xl bg-slate-50 p-3.5">
+                    <div className="p-4">
                       <p className="text-xs text-slate-500">خصومات أخرى (-)</p>
                       <p className="text-base font-bold text-slate-800 tabular-nums mt-1">
                         {formatEGP(salary?.otherDeductions || 0)}
                       </p>
                     </div>
-                    <div className="rounded-xl bg-emerald-50/80 p-3.5">
+                    <div className="p-4">
                       <p className="text-xs text-emerald-800">المكافآت (+)</p>
                       <p className="text-base font-bold text-emerald-700 tabular-nums mt-1">
                         {formatEGP(salary?.bonuses || 0)}
                       </p>
                     </div>
-                    <div className="rounded-xl bg-[#0B1F3A] text-white p-3.5">
+                    <div className="p-4 bg-[#0B1F3A] text-white">
                       <p className="text-xs text-slate-300">صافي الراتب المستحق</p>
                       <p className="text-base font-bold text-[#C89B3C] tabular-nums mt-1">
                         {formatEGP(salary?.netSalary || 0)}
@@ -997,7 +1288,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                   )}
                 </section>
 
-                {/* Immutable Transaction History */}
+                {/* Transaction History */}
                 <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
                   <h2 className="font-display text-base font-bold text-[#0B1F3A]">
                     سجل الحركات المالية ({(data.transactions || []).length})
@@ -1032,34 +1323,79 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
               </div>
             )}
 
-            {/* TAB 3: LOCATION & PRIVACY */}
+            {/* TAB 3: LOCATION, HIGH-PRECISION SPEED & SCHEDULE */}
             {activeTab === 'location' && (
               <div className="space-y-4">
-                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
+                <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-5">
                   <div className="flex items-start justify-between gap-4">
                     <div>
                       <h1 className="font-display text-lg font-bold text-[#0B1F3A]">
-                        مشاركة الموقع الجغرافي (GPS)
+                        التتبع المباشر والسرعة (GPS)
                       </h1>
                       <p className="text-xs text-slate-500 mt-1">
                         الباص رقم {driver.busNumber} · {driver.schoolName}
                       </p>
                     </div>
                     <span
-                      className={`rounded-lg px-2.5 py-1 text-xs font-bold shrink-0 ${
+                      className={`text-xs font-bold shrink-0 ${
                         isLiveSharing
-                          ? 'bg-emerald-50 text-emerald-700'
+                          ? 'text-emerald-700'
                           : vehicleGpsStatus === 'paused'
-                          ? 'bg-amber-50 text-amber-800'
-                          : 'bg-slate-100 text-slate-600'
+                          ? 'text-amber-700'
+                          : 'text-slate-500'
                       }`}
                     >
                       {isLiveSharing
                         ? 'بث مباشر نشط'
                         : vehicleGpsStatus === 'paused'
                         ? 'متوقف مؤقتاً'
-                        : 'غير متصل (مخزن)'}
+                        : scheduleStatus.isWithinWindow
+                        ? 'غير متصل (مخزن)'
+                        : 'خارج ساعات العمل'}
                     </span>
+                  </div>
+
+                  {/* High-Precision Speedometer & Accuracy Readout */}
+                  <div className="rounded-2xl bg-[#0B1F3A] text-white p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-white/10 text-[#C89B3C] flex items-center justify-center shrink-0">
+                        <Gauge className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-300">السرعة اللحظية عالية الدقة</p>
+                        <div className="flex items-baseline gap-2 mt-0.5">
+                          <span className="text-3xl font-bold font-mono text-[#C89B3C] tabular-nums">
+                            {Math.round(displayedSpeed)}
+                          </span>
+                          <span className="text-xs text-slate-300">كم / ساعة</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-xs space-y-1 border-t sm:border-t-0 sm:border-r border-white/15 pt-3 sm:pt-0 sm:pr-4 tabular-nums">
+                      <div className="flex items-center gap-2 text-slate-200">
+                        {isOnline ? (
+                          <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <WifiOff className="w-3.5 h-3.5 text-amber-400" />
+                        )}
+                        <span>{isOnline ? 'إنترنت نشط (بث فوري)' : 'تخزين محلي لحين عودة الشبكة'}</span>
+                      </div>
+                      <div className="text-slate-300">
+                        دقة GPS:{' '}
+                        {liveAccuracyM !== null
+                          ? `±${liveAccuracyM} متر`
+                          : latestGps?.accuracyMeters
+                          ? `±${Math.round(latestGps.accuracyMeters)} متر`
+                          : 'قيد المعايرة'}
+                        {speedSource === 'doppler'
+                          ? ' · حساس السرعة المباشر'
+                          : speedSource === 'haversine'
+                          ? ' · حساب المسافة/الزمن'
+                          : ''}
+                      </div>
+                      <div className="text-[#ebd089]">{scheduleStatus.statusLabelAr}</div>
+                    </div>
                   </div>
 
                   {gpsError && (
@@ -1075,7 +1411,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                       <button
                         onClick={handleToggleConsent}
                         className={`min-h-[48px] flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold transition-colors cursor-pointer ${
-                          gpsConsent && isStreamingGps
+                          gpsConsent
                             ? 'bg-emerald-600 text-white hover:bg-emerald-700'
                             : 'bg-[#0B1F3A] text-white hover:bg-[#13325c]'
                         }`}
@@ -1083,7 +1419,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                         <Navigation className="w-4 h-4" />
                         {gpsConsent
                           ? 'إيقاف البث التلقائي من هذا الجهاز'
-                          : 'الموافقة وتفعيل البث المباشر'}
+                          : 'الموافقة وتفعيل التتبع الدائم'}
                       </button>
                     )}
 
@@ -1120,33 +1456,33 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                     )}
                   </div>
 
-                  {/* Last Known Telemetry */}
-                  <div className="rounded-xl bg-slate-50 p-4 space-y-2 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="text-slate-500">حالة البيانات المعروضة للإدارة:</span>
+                  {/* Telemetry Details (Hairline rows instead of nested grey box) */}
+                  <div className="border-t border-slate-100 divide-y divide-slate-100 text-xs">
+                    <div className="py-2.5 flex items-center justify-between gap-3">
+                      <span className="text-slate-500">ساعات العمل المجدولة يومياً:</span>
+                      <span className="font-bold text-[#0B1F3A] tabular-nums">
+                        {scheduleStatus.windowLabelAr}
+                      </span>
+                    </div>
+                    <div className="py-2.5 flex items-center justify-between gap-3">
+                      <span className="text-slate-500">حالة البيانات المعروضة للإدارة والمشرفة:</span>
                       <span className="font-bold text-[#0B1F3A]">
                         {isLiveSharing
                           ? 'موقع حي ومباشر'
                           : vehicleGpsStatus === 'paused'
                           ? 'متوقف بناءً على طلب السائق'
-                          : 'آخر موقع مسجل (بيانات مخزنة وليست حية)'}
+                          : 'آخر موقع مسجل'}
                       </span>
                     </div>
                     {latestGps && (
                       <>
-                        <div className="flex items-center justify-between">
+                        <div className="py-2.5 flex items-center justify-between gap-3">
                           <span className="text-slate-500">الإحداثيات:</span>
                           <span className="font-mono text-slate-800" dir="ltr">
                             {latestGps.lat.toFixed(5)}, {latestGps.lng.toFixed(5)}
                           </span>
                         </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-500">السرعة المسجلة:</span>
-                          <span className="font-bold tabular-nums text-slate-800">
-                            {isLiveSharing ? Math.round(latestGps.speedKmh) : 0} كم/س
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between">
+                        <div className="py-2.5 flex items-center justify-between gap-3">
                           <span className="text-slate-500">توقيت آخر تسجيل:</span>
                           <span className="text-slate-800">
                             {formatRelativeArabicTime(lastLocalPingAt || latestGps.recordedAt)}
@@ -1154,20 +1490,26 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                         </div>
                       </>
                     )}
+                    {queuedGpsCount > 0 && (
+                      <div className="py-2.5 flex items-center justify-between gap-3 text-amber-800">
+                        <span>نقاط مخزنة محلياً للمزامنة:</span>
+                        <span className="font-mono font-bold tabular-nums">{queuedGpsCount} نقطة</span>
+                      </div>
+                    )}
                   </div>
                 </section>
 
-                {/* Explicit Privacy Notice */}
+                {/* Privacy Notice */}
                 <section className="rounded-2xl border border-slate-200 bg-white p-5 space-y-2">
                   <div className="flex items-center gap-2 font-display text-sm font-bold text-[#0B1F3A]">
                     <ShieldAlert className="w-4 h-4 text-[#C89B3C]" />
-                    <span>إشعار الخصوصية لمشاركة الموقع</span>
+                    <span>إشعار الخصوصية وجدولة التتبع</span>
                   </div>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    يتم جمع موقع الباص الجغرافي والسرعة فقط أثناء فترة العمل وبموافقتك الصريحة
-                    لضمان سلامة رحلات المدرسة ومتابعة خطوط السير في إدارة الوليد ترافيل. يمكنك
-                    إيقاف مشاركة الموقع مؤقتاً أو إلغاء البث في أي وقت عبر الأزرار أعلاه، وعند
-                    الإيقاف يظهر للإدارة فوراً أن البث متوقف مؤقتاً ولا يتم إرسال إحداثيات جديدة.
+                    يعمل التتبع التلقائي يومياً خلال ساعات الرحلات المدرسية من 06:00 صباحاً حتى 04:00
+                    عصراً طوال العام عند تفعيل الإنترنت وبيانات الهاتف، مع حفظ النقاط مؤقتاً عند
+                    ضعف الشبكة وإرسالها تلقائياً فور عودة الاتصال. يمكنك إيقاف المشاركة مؤقتاً في أي
+                    وقت عبر الزر أعلاه.
                   </p>
                 </section>
               </div>
@@ -1181,7 +1523,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
                     الإشعارات والتنبيهات ({(data.notifications || []).length})
                   </h1>
                   <button
-                    onClick={loadDriverData}
+                    onClick={() => loadDriverData()}
                     className="min-h-[40px] flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
@@ -1228,7 +1570,7 @@ export const DriverApp: React.FC<{ allowDriverSelector?: boolean }> = ({
         )}
       </main>
 
-      {/* Bottom Fixed Thumb-Zone Navigation Bar (h-16) */}
+      {/* Bottom Thumb-Zone Navigation Bar */}
       <nav className="fixed bottom-0 inset-x-0 z-30 h-16 bg-white border-t border-slate-200">
         <div className="max-w-3xl mx-auto h-full grid grid-cols-4">
           <button

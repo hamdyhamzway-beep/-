@@ -1,10 +1,11 @@
 import { auth } from './firebase';
+import { saveSessionTokenMeta } from './local-store';
 
-const DRIVER_TOKEN_KEY = 'alwaleed_driver_token';
+const CODE_TOKEN_KEY = 'alwaleed_driver_token'; // Holds drv_... or sup_... persistent tokens
 
 export function getDriverSessionToken(): string | null {
   try {
-    return localStorage.getItem(DRIVER_TOKEN_KEY);
+    return localStorage.getItem(CODE_TOKEN_KEY);
   } catch {
     return null;
   }
@@ -13,12 +14,23 @@ export function getDriverSessionToken(): string | null {
 export function setDriverSessionToken(token: string | null): void {
   try {
     if (token) {
-      localStorage.setItem(DRIVER_TOKEN_KEY, token);
+      localStorage.setItem(CODE_TOKEN_KEY, token);
     } else {
-      localStorage.removeItem(DRIVER_TOKEN_KEY);
+      localStorage.removeItem(CODE_TOKEN_KEY);
     }
   } catch {
     // ignore storage failures
+  }
+  saveSessionTokenMeta(token).catch(() => undefined);
+}
+
+export class ApiHttpError extends Error {
+  status: number;
+  details?: string;
+  constructor(message: string, status: number, details?: string) {
+    super(message);
+    this.status = status;
+    this.details = details;
   }
 }
 
@@ -27,11 +39,11 @@ export async function apiFetch<T = unknown>(
   options: RequestInit = {}
 ): Promise<T> {
   const user = auth.currentUser;
-  const driverToken = user ? null : getDriverSessionToken();
-  const token = user ? await user.getIdToken() : driverToken;
+  const codeToken = user ? null : getDriverSessionToken();
+  const token = user ? await user.getIdToken() : codeToken;
 
   if (!token) {
-    throw new Error('يجب تسجيل الدخول أولاً');
+    throw new ApiHttpError('يجب تسجيل الدخول أولاً', 401);
   }
 
   const headers = new Headers(options.headers || {});
@@ -48,17 +60,27 @@ export async function apiFetch<T = unknown>(
     });
   } catch (networkErr: unknown) {
     if (networkErr instanceof DOMException && networkErr.name === 'AbortError') {
-      throw new Error('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى');
+      throw new ApiHttpError('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى', 0);
     }
-    throw new Error('تعذر الاتصال بالخادم حالياً، يرجى التحقق من الشبكة والمحاولة مرة أخرى');
+    throw new ApiHttpError('تعذر الاتصال بالخادم حالياً، يرجى التحقق من الشبكة والمحاولة مرة أخرى', 0);
+  }
+
+  // Sliding persistent token refresh if server issued a fresh token header
+  const refreshedToken = res.headers.get('X-Refreshed-Session-Token');
+  if (refreshedToken && codeToken) {
+    setDriverSessionToken(refreshedToken);
   }
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401 && driverToken) {
+    if (res.status === 401 && codeToken) {
       setDriverSessionToken(null);
     }
-    throw new Error(data.error || `خطأ في الخادم (${res.status})`);
+    throw new ApiHttpError(
+      data.error || `خطأ في الخادم (${res.status})`,
+      res.status,
+      typeof data.details === 'string' ? data.details : undefined
+    );
   }
   return data as T;
 }
@@ -100,4 +122,109 @@ export function exportRowsToExcel(filename: string, headers: string[], rows: (st
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Formats "HH:MM" (24h) or legacy Arabic time strings cleanly as Arabic 12h (e.g. "06:45 ص" / "02:30 م").
+ */
+export function formatArabicTripTime(value?: string | null): string {
+  const raw = (value || '').trim();
+  if (!raw) return '—';
+  const match24 = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match24) return raw;
+  const h = Number(match24[1]);
+  const m = match24[2];
+  if (!Number.isFinite(h) || h < 0 || h > 23) return raw;
+  const period = h >= 12 ? 'م' : 'ص';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(h12).padStart(2, '0')}:${m} ${period}`;
+}
+
+/**
+ * Normalizes Arabic-Indic (٠-٩) and Persian (۰-۹) digits to ASCII 0-9.
+ */
+export function normalizeArabicDigits(value: string): string {
+  return value
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+}
+
+/**
+ * Normalizes user search queries across Arabic digits, whitespace, and casing.
+ */
+export function normalizeLookupText(value?: string | null): string {
+  return normalizeArabicDigits(String(value || ''))
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Returns today's YYYY-MM-DD date string in Africa/Cairo timezone (avoiding UTC midnight drift).
+ */
+export function getLocalTodayDateString(): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+  } catch {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+}
+
+/**
+ * Normalizes "HH:MM" or Arabic "02:30 م" to "HH:MM" so <input type="time"> always populates cleanly.
+ */
+export function normalizeTimeInputValue(value?: string | null): string {
+  const raw = normalizeArabicDigits(value || '').trim();
+  if (!raw) return '';
+  const match24 = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (match24) {
+    return `${match24[1].padStart(2, '0')}:${match24[2]}`;
+  }
+  const matchAr = raw.match(/^(\d{1,2}):(\d{2})\s*(ص|م|AM|PM|am|pm)$/);
+  if (matchAr) {
+    let h = Number(matchAr[1]);
+    const m = matchAr[2];
+    const p = matchAr[3].toLowerCase();
+    if ((p === 'م' || p === 'pm') && h < 12) h += 12;
+    if ((p === 'ص' || p === 'am') && h === 12) h = 0;
+    return `${String(h).padStart(2, '0')}:${m}`;
+  }
+  return '';
+}
+
+/**
+ * Formats an ISO timestamp into Arabic 12-hour Cairo time (e.g. "06:45 ص" / "02:30 م").
+ */
+export function formatArabicTimestampTime(iso?: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Africa/Cairo',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(d);
+    const hRaw = Number(parts.find((p) => p.type === 'hour')?.value ?? d.getHours());
+    const mStr = parts.find((p) => p.type === 'minute')?.value ?? String(d.getMinutes()).padStart(2, '0');
+    const h = hRaw % 24;
+    const period = h >= 12 ? 'م' : 'ص';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${String(h12).padStart(2, '0')}:${mStr} ${period}`;
+  } catch {
+    const h = d.getHours();
+    const mStr = String(d.getMinutes()).padStart(2, '0');
+    const period = h >= 12 ? 'م' : 'ص';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${String(h12).padStart(2, '0')}:${mStr} ${period}`;
+  }
 }

@@ -2,10 +2,16 @@ import type { NextFunction, Request, Response } from 'express';
 import { eq, sql } from 'drizzle-orm';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../lib/firebase-admin.ts';
-import { verifyDriverSessionToken } from '../lib/driver-session.ts';
+import {
+  issueDriverSessionToken,
+  issueSupervisorSessionToken,
+  shouldRefreshSessionToken,
+  verifyDriverSessionToken,
+  verifySupervisorSessionToken,
+} from '../lib/driver-session.ts';
 import { db } from '../db/index.ts';
 import { runWithRlsContext } from '../db/rls-context.ts';
-import { drivers, userRoles, users } from '../db/schema.ts';
+import { drivers, supervisors, userRoles, users } from '../db/schema.ts';
 
 export interface DbUserContext {
   id: number;
@@ -24,6 +30,8 @@ export interface AuthRequest extends Request {
   firebaseUser?: DecodedIdToken;
   dbUser?: DbUserContext;
   driverRecord?: typeof drivers.$inferSelect | null;
+  supervisorRecord?: typeof supervisors.$inferSelect | null;
+  refreshedSessionToken?: string;
 }
 
 const DEFAULT_ROLES = [
@@ -38,6 +46,12 @@ const DEFAULT_ROLES = [
     nameAr: 'سائق',
     description: 'عرض الملف الشخصي والمركبة والراتب وكشف الحساب ومشاركة الموقع فقط',
     permissions: ['driver:self_read', 'driver:gps_write', 'driver:notifications'],
+  },
+  {
+    slug: 'supervisor',
+    nameAr: 'المشرفة',
+    description: 'عرض بيانات المشرفة وخط السير والتتبع المباشر للباص فقط بدون أي بيانات مالية',
+    permissions: ['supervisor:self_read', 'supervisor:gps_read'],
   },
   {
     slug: 'movement_manager',
@@ -86,6 +100,7 @@ export async function ensureRolesExist() {
 async function resolveUserContext(decoded: DecodedIdToken): Promise<{
   dbUser: DbUserContext;
   driverRecord: typeof drivers.$inferSelect | null;
+  supervisorRecord: typeof supervisors.$inferSelect | null;
 }> {
   await ensureRolesExist();
 
@@ -117,24 +132,29 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
         .returning();
       userRow = updated[0];
     } else {
-      // Determine default role:
-      // 1. If linked to a driver record by email -> driver role
-      // 2. If primary owner email or no super_admin exists yet -> super_admin role
-      // 3. Otherwise -> driver role (safe least-privilege default; admin can promote later)
       const matchedDriver = await db
         .select()
         .from(drivers)
         .where(eq(drivers.linkedEmail, email))
         .limit(1);
 
+      const matchedSupervisor = await db
+        .select()
+        .from(supervisors)
+        .where(eq(supervisors.linkedEmail, email))
+        .limit(1);
+
       const allRoles = await db.select().from(userRoles);
       const superAdminRole = allRoles.find((r) => r.slug === 'super_admin')!;
       const driverRole = allRoles.find((r) => r.slug === 'driver')!;
+      const supervisorRole = allRoles.find((r) => r.slug === 'supervisor') || driverRole;
 
       let assignedRoleId = driverRole.id;
 
       if (matchedDriver[0]) {
         assignedRoleId = driverRole.id;
+      } else if (matchedSupervisor[0]) {
+        assignedRoleId = supervisorRole.id;
       } else if (email === 'hamdyhamzway@gmail.com') {
         assignedRoleId = superAdminRole.id;
       } else {
@@ -169,6 +189,13 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
           .update(drivers)
           .set({ userId: userRow.id })
           .where(eq(drivers.id, matchedDriver[0].id));
+      }
+
+      if (matchedSupervisor[0] && !matchedSupervisor[0].userId) {
+        await db
+          .update(supervisors)
+          .set({ userId: userRow.id })
+          .where(eq(supervisors.id, matchedSupervisor[0].id));
       }
     }
   }
@@ -210,6 +237,30 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
     }
   }
 
+  // Find linked supervisor record if any
+  let supervisorRec: typeof supervisors.$inferSelect | null = null;
+  const supByUser = await db
+    .select()
+    .from(supervisors)
+    .where(eq(supervisors.userId, userRow.id))
+    .limit(1);
+  if (supByUser[0]) {
+    supervisorRec = supByUser[0];
+  } else {
+    const supByEmail = await db
+      .select()
+      .from(supervisors)
+      .where(eq(supervisors.linkedEmail, email))
+      .limit(1);
+    if (supByEmail[0]) {
+      supervisorRec = supByEmail[0];
+      await db
+        .update(supervisors)
+        .set({ userId: userRow.id })
+        .where(eq(supervisors.id, supByEmail[0].id));
+    }
+  }
+
   return {
     dbUser: {
       id: userRow.id,
@@ -224,6 +275,7 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
       isActive: userRow.isActive,
     },
     driverRecord: driverRec,
+    supervisorRecord: supervisorRec,
   };
 }
 
@@ -280,6 +332,7 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
 
   const token = authHeader.split('Bearer ')[1];
 
+  // 1. Persistent Driver Token
   if (token.startsWith('drv_')) {
     const payload = verifyDriverSessionToken(token);
     if (!payload) {
@@ -341,10 +394,21 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
       req.dbUser = dbUser;
       req.driverRecord = resolved.driverRec;
 
+      if (shouldRefreshSessionToken(payload.exp)) {
+        const freshToken = issueDriverSessionToken({
+          userId: resolved.userRow.id,
+          driverId: resolved.driverRec.id,
+          driverCode: resolved.driverRec.driverCode,
+        });
+        req.refreshedSessionToken = freshToken;
+        res.setHeader('X-Refreshed-Session-Token', freshToken);
+      }
+
       return runWithRlsContext(
         {
           role: dbUser.roleSlug,
           driverId: resolved.driverRec.id,
+          supervisorId: null,
         },
         () => next()
       );
@@ -354,6 +418,87 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     }
   }
 
+  // 2. Persistent Supervisor Token (المشرفة)
+  if (token.startsWith('sup_')) {
+    const payload = verifySupervisorSessionToken(token);
+    if (!payload) {
+      return res.status(401).json({ error: 'انتهت صلاحية جلسة المشرفة، يرجى تسجيل الدخول مرة أخرى' });
+    }
+
+    try {
+      const resolved = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        await ensureRolesExist();
+        const [userRow] = await db
+          .select()
+          .from(users)
+          .where(eq(users.id, payload.userId))
+          .limit(1);
+        const [supRec] = await db
+          .select()
+          .from(supervisors)
+          .where(eq(supervisors.id, payload.supervisorId))
+          .limit(1);
+
+        if (!userRow || !supRec) return null;
+
+        const [role] = await db
+          .select()
+          .from(userRoles)
+          .where(eq(userRoles.id, userRow.roleId))
+          .limit(1);
+
+        return { userRow, supRec, role };
+      });
+
+      if (!resolved) {
+        return res.status(401).json({ error: 'بيانات حساب المشرفة غير متوفرة، يرجى إعادة الدخول' });
+      }
+
+      if (!resolved.userRow.isActive || resolved.supRec.accountStatus !== 'active') {
+        return res.status(403).json({ error: 'تم إيقاف هذا الحساب من قبل الإدارة' });
+      }
+
+      const dbUser: DbUserContext = {
+        id: resolved.userRow.id,
+        uid: resolved.userRow.uid,
+        email: resolved.userRow.email,
+        fullName: resolved.supRec.fullName || resolved.userRow.fullName,
+        phone: resolved.supRec.phone || resolved.userRow.phone,
+        roleId: resolved.userRow.roleId,
+        roleSlug: 'supervisor',
+        roleNameAr: resolved.role?.nameAr || 'المشرفة',
+        permissions: ['supervisor:self_read', 'supervisor:gps_read'],
+        isActive: resolved.userRow.isActive,
+      };
+
+      req.dbUser = dbUser;
+      req.supervisorRecord = resolved.supRec;
+
+      if (shouldRefreshSessionToken(payload.exp)) {
+        const freshToken = issueSupervisorSessionToken({
+          userId: resolved.userRow.id,
+          supervisorId: resolved.supRec.id,
+          supervisorCode: resolved.supRec.supervisorCode,
+        });
+        req.refreshedSessionToken = freshToken;
+        res.setHeader('X-Refreshed-Session-Token', freshToken);
+      }
+
+      return runWithRlsContext(
+        {
+          role: 'supervisor',
+          driverId: null,
+          supervisorId: resolved.supRec.id,
+        },
+        () => next()
+      );
+    } catch (error) {
+      console.error('Supervisor session verification error:', error);
+      return res.status(500).json({ error: 'تعذر التحقق من جلسة المشرفة' });
+    }
+  }
+
+  // 3. Firebase ID Token
   let decodedToken: DecodedIdToken;
   try {
     decodedToken = await adminAuth.verifyIdToken(token);
@@ -364,7 +509,7 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
   }
 
   try {
-    const { dbUser, driverRecord } = await runWithRlsContext(
+    const { dbUser, driverRecord, supervisorRecord } = await runWithRlsContext(
       { role: 'system', driverId: null },
       () => resolveUserContext(decodedToken)
     );
@@ -373,11 +518,13 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     }
     req.dbUser = dbUser;
     req.driverRecord = driverRecord;
+    req.supervisorRecord = supervisorRecord;
 
     return runWithRlsContext(
       {
         role: dbUser.roleSlug,
         driverId: driverRecord?.id ?? null,
+        supervisorId: supervisorRecord?.id ?? null,
       },
       () => next()
     );
@@ -416,7 +563,7 @@ export const requireAnyPermission = (permissions: string[]) => {
 };
 
 export const requireAdminOrStaff = (req: AuthRequest, res: Response, next: NextFunction) => {
-  if (!req.dbUser || req.dbUser.roleSlug === 'driver') {
+  if (!req.dbUser || req.dbUser.roleSlug === 'driver' || req.dbUser.roleSlug === 'supervisor') {
     return res.status(403).json({
       error: 'هذا القسم مخصص لإدارة الوليد ترافيل فقط',
     });

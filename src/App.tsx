@@ -33,11 +33,15 @@ import { VoiceAssistantModule } from './components/admin/VoiceAssistantModule';
 import { ReportsModule } from './components/admin/ReportsModule';
 import { SettingsUsersModule } from './components/admin/SettingsUsersModule';
 import { ArchiveModule } from './components/admin/ArchiveModule';
+import { SupervisorsModule } from './components/admin/SupervisorsModule';
 import { DriverApp } from './components/driver/DriverApp';
+import { SupervisorApp } from './components/supervisor/SupervisorApp';
+import { ArrowRight, UserCheck } from 'lucide-react';
 
 type AdminTabId =
   | 'overview'
   | 'drivers'
+  | 'supervisors'
   | 'employees'
   | 'schools'
   | 'finance'
@@ -58,7 +62,10 @@ const AppShell: React.FC = () => {
   const { isAuthenticated, dbUser, loading, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<AdminTabId>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [adminMode, setAdminMode] = useState<'admin' | 'driver_preview'>('admin');
+  const [adminMode, setAdminMode] = useState<'admin' | 'driver_preview' | 'supervisor_preview'>(
+    'admin'
+  );
+  const [previewSupervisorId, setPreviewSupervisorId] = useState<string>('');
   const [splashElapsed, setSplashElapsed] = useState(false);
 
   useEffect(() => {
@@ -78,6 +85,12 @@ const AppShell: React.FC = () => {
         label: 'إدارة السائقين',
         icon: Users,
         visible: isSuperAdmin || can('drivers:read'),
+      },
+      {
+        id: 'supervisors',
+        label: 'إدارة المشرفات',
+        icon: UserCheck,
+        visible: isSuperAdmin || can('drivers:read') || can('gps:read'),
       },
       {
         id: 'employees',
@@ -152,20 +165,77 @@ const AppShell: React.FC = () => {
     return <DriverApp allowDriverSelector={false} />;
   }
 
-  // Admin previewing Driver App
+  // Strict Data & UI Isolation: Supervisor accounts ONLY see non-financial Supervisor App
+  if (dbUser.roleSlug === 'supervisor') {
+    return <SupervisorApp allowSupervisorSelector={false} />;
+  }
+
+  // Admin previewing Driver App (fixed always-visible return bar)
   if (isSuperAdmin && adminMode === 'driver_preview') {
     return (
-      <div className="relative">
-        <div className="relative z-30 bg-[#0B1F3A] border-b border-slate-700 px-4 py-2 text-xs text-white flex items-center justify-between">
-          <span className="font-semibold text-[#C89B3C]">وضع معاينة تطبيق السائق</span>
-          <button
-            onClick={() => setAdminMode('admin')}
-            className="rounded-lg bg-white/10 hover:bg-white/20 px-3 py-1.5 font-semibold text-white cursor-pointer"
-          >
-            العودة إلى لوحة الإدارة
-          </button>
+      <div className="relative pt-12">
+        <div className="fixed top-0 inset-x-0 z-50 h-12 bg-[#081528] border-b border-[#C89B3C]/40 px-3 sm:px-5 text-xs text-white flex items-center justify-between gap-2 shadow-md">
+          <div className="flex items-center gap-2 min-w-0">
+            <Smartphone className="w-4 h-4 text-[#C89B3C] shrink-0" />
+            <span className="font-semibold text-[#ebd089] truncate">وضع معاينة تطبيق السائق</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setAdminMode('supervisor_preview')}
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 hover:bg-white/20 px-3 py-1.5 font-semibold text-white whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <MapPin className="w-3.5 h-3.5 text-[#C89B3C]" />
+              معاينة المشرفة
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdminMode('admin')}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-1.5 font-bold text-[#0B1F3A] whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <ArrowRight className="w-3.5 h-3.5" />
+              العودة لوحة التحكم
+            </button>
+          </div>
         </div>
-        <DriverApp allowDriverSelector={true} />
+        <DriverApp allowDriverSelector={true} hasPreviewBar={true} />
+      </div>
+    );
+  }
+
+  // Admin previewing Supervisor App (fixed always-visible return bar)
+  if (isSuperAdmin && adminMode === 'supervisor_preview') {
+    return (
+      <div className="relative pt-12">
+        <div className="fixed top-0 inset-x-0 z-50 h-12 bg-[#081528] border-b border-[#C89B3C]/40 px-3 sm:px-5 text-xs text-white flex items-center justify-between gap-2 shadow-md">
+          <div className="flex items-center gap-2 min-w-0">
+            <UserCheck className="w-4 h-4 text-[#C89B3C] shrink-0" />
+            <span className="font-semibold text-[#ebd089] truncate">وضع معاينة نسخة المشرفة</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setAdminMode('driver_preview')}
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 hover:bg-white/20 px-3 py-1.5 font-semibold text-white whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-[#C89B3C]" />
+              معاينة السائق
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdminMode('admin')}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-1.5 font-bold text-[#0B1F3A] whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <ArrowRight className="w-3.5 h-3.5" />
+              العودة لوحة التحكم
+            </button>
+          </div>
+        </div>
+        <SupervisorApp
+          allowSupervisorSelector={true}
+          initialSupervisorId={previewSupervisorId}
+          hasPreviewBar={true}
+        />
       </div>
     );
   }
@@ -229,13 +299,22 @@ const AppShell: React.FC = () => {
 
         <div className="relative z-10 p-4 border-t border-white/10 space-y-3">
           {isSuperAdmin && (
-            <button
-              onClick={() => setAdminMode('driver_preview')}
-              className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 hover:bg-white/10 px-3 py-2 text-xs font-semibold text-white cursor-pointer"
-            >
-              <Smartphone className="w-4 h-4 text-[#C89B3C]" />
-              معاينة تطبيق السائق
-            </button>
+            <div className="space-y-2">
+              <button
+                onClick={() => setAdminMode('driver_preview')}
+                className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 hover:bg-white/10 px-3 py-2 text-xs font-semibold text-white cursor-pointer"
+              >
+                <Smartphone className="w-4 h-4 text-[#C89B3C]" />
+                معاينة تطبيق السائق
+              </button>
+              <button
+                onClick={() => setAdminMode('supervisor_preview')}
+                className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 hover:bg-white/10 px-3 py-2 text-xs font-semibold text-white cursor-pointer"
+              >
+                <MapPin className="w-4 h-4 text-[#C89B3C]" />
+                معاينة نسخة المشرفة
+              </button>
+            </div>
           )}
           <div className="flex items-center justify-between gap-2 text-xs">
             <div className="min-w-0">
@@ -307,16 +386,28 @@ const AppShell: React.FC = () => {
             </nav>
             <div className="relative z-10 p-4 border-t border-white/10 space-y-2.5">
               {isSuperAdmin && (
-                <button
-                  onClick={() => {
-                    setMobileMenuOpen(false);
-                    setAdminMode('driver_preview');
-                  }}
-                  className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2.5 text-xs font-semibold text-white"
-                >
-                  <Smartphone className="w-4 h-4 text-[#C89B3C]" />
-                  معاينة تطبيق السائق
-                </button>
+                <div className="space-y-2">
+                  <button
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      setAdminMode('driver_preview');
+                    }}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2.5 text-xs font-semibold text-white"
+                  >
+                    <Smartphone className="w-4 h-4 text-[#C89B3C]" />
+                    معاينة تطبيق السائق
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      setAdminMode('supervisor_preview');
+                    }}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2.5 text-xs font-semibold text-white"
+                  >
+                    <MapPin className="w-4 h-4 text-[#C89B3C]" />
+                    معاينة نسخة المشرفة
+                  </button>
+                </div>
               )}
               <button
                 onClick={logout}
@@ -362,6 +453,14 @@ const AppShell: React.FC = () => {
         <main className="app-glass-cards flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto">
           {activeTab === 'overview' && <AdminOverview onNavigate={handleNavigate} />}
           {activeTab === 'drivers' && <DriversModule />}
+          {activeTab === 'supervisors' && (
+            <SupervisorsModule
+              onPreviewSupervisor={(supId) => {
+                setPreviewSupervisorId(String(supId));
+                setAdminMode('supervisor_preview');
+              }}
+            />
+          )}
           {activeTab === 'employees' && <EmployeesModule />}
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
           {activeTab === 'finance' && <FinanceModule />}
@@ -369,7 +468,9 @@ const AppShell: React.FC = () => {
           {activeTab === 'voice' && <VoiceAssistantModule />}
           {activeTab === 'reports' && <ReportsModule />}
           {activeTab === 'archive' && <ArchiveModule />}
-          {activeTab === 'settings' && <SettingsUsersModule />}
+          {activeTab === 'settings' && (
+            <SettingsUsersModule onOpenSupervisors={() => handleNavigate('supervisors')} />
+          )}
         </main>
       </div>
     </div>

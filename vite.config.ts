@@ -48,6 +48,7 @@ export default defineConfig(() => {
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//],
+          importScripts: ['/sw-gps-sync.js'],
         },
         devOptions: {
           enabled: true,

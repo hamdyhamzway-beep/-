@@ -46,6 +46,7 @@ export const ReportsModule: React.FC = () => {
   const [reportType, setReportType] = useState<ReportKind>('salaries');
   const [data, setData] = useState<ReportsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const reportCaptureRef = useRef<HTMLDivElement | null>(null);
   const [sharingWhatsApp, setSharingWhatsApp] = useState(false);
   const [whatsappPreview, setWhatsappPreview] = useState<{
@@ -66,6 +67,7 @@ export const ReportsModule: React.FC = () => {
 
   const loadReports = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const url = initialPeriodSyncedRef.current
         ? `/api/reports/summary?month=${month}&year=${year}`
@@ -77,6 +79,8 @@ export const ReportsModule: React.FC = () => {
         setYear(res.period.year);
       }
       setData(res);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات التقارير');
     } finally {
       setLoading(false);
     }
@@ -194,6 +198,7 @@ export const ReportsModule: React.FC = () => {
   const handleSendReportToWhatsApp = async () => {
     if (!reportCaptureRef.current || !data) return;
     setSharingWhatsApp(true);
+    setError(null);
     try {
       const blob = await captureElementAsPngBlob(reportCaptureRef.current);
       const label = reportTabs.find((r) => r.id === reportType)?.label || 'تقرير';
@@ -230,6 +235,8 @@ export const ReportsModule: React.FC = () => {
           : 'تم تجهيز صورة التقرير وتحميلها — اضغط فتح واتساب وأرفق الصورة المحمّلة.',
         whatsappUrl,
       });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر تجهيز صورة التقرير للواتساب');
     } finally {
       setSharingWhatsApp(false);
     }
@@ -292,6 +299,20 @@ export const ReportsModule: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2 no-print">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-wrap gap-1.5 p-1.5 bg-slate-200/70 rounded-xl no-print">
         {reportTabs.map((t) => (

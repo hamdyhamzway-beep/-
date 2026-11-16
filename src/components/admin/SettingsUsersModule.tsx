@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Bell, Shield, Users } from 'lucide-react';
+import { Bell, Shield, UserCheck, Users } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 
 interface UserItem {
@@ -28,10 +28,14 @@ interface AuditItem {
   createdAt: string;
 }
 
-export const SettingsUsersModule: React.FC = () => {
+export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> = ({
+  onOpenSupervisors,
+}) => {
   const [usersList, setUsersList] = useState<UserItem[]>([]);
   const [rolesList, setRolesList] = useState<RoleItem[]>([]);
   const [auditList, setAuditList] = useState<AuditItem[]>([]);
+  const [supervisorsCount, setSupervisorsCount] = useState<number>(0);
+
   const [announceTitle, setAnnounceTitle] = useState('');
   const [announceBody, setAnnounceBody] = useState('');
   const [targetDriverQuery, setTargetDriverQuery] = useState('');
@@ -39,13 +43,15 @@ export const SettingsUsersModule: React.FC = () => {
   const [announceError, setAnnounceError] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
-    const [uRes, aRes] = await Promise.all([
+    const [uRes, aRes, sRes] = await Promise.all([
       apiFetch<{ users: UserItem[]; roles: RoleItem[] }>('/api/users'),
       apiFetch<{ logs: AuditItem[] }>('/api/audit-logs'),
+      apiFetch<{ supervisors: Array<{ id: number }> }>('/api/supervisors'),
     ]);
     setUsersList(uRes.users);
     setRolesList(uRes.roles);
     setAuditList(aRes.logs);
+    setSupervisorsCount((sRes.supervisors || []).length);
   }, []);
 
   useEffect(() => {
@@ -86,15 +92,16 @@ export const SettingsUsersModule: React.FC = () => {
     <div className="space-y-6">
       <div>
         <h1 className="font-display text-2xl font-bold text-[#0B1F3A]">
-          الصلاحيات والمستخدمون والإشعارات
+          الصلاحيات والمشرفات والإشعارات
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          إدارة مستويات الوصول (المدير العام، السائقين، مشرف الحركة، المحاسب) وإرسال التنبيهات وسجل التدقيق
+          إدارة مستويات الوصول، حسابات المشرفات المعزولة (نسخة المشرفة)، إرسال التنبيهات وسجل
+          التدقيق
         </p>
       </div>
 
       {/* Role Architecture Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         {rolesList.map((r) => (
           <div key={r.id} className="bg-white border border-slate-200 rounded-xl p-4">
             <div className="flex items-center gap-2 font-bold text-sm text-[#0B1F3A]">
@@ -106,6 +113,32 @@ export const SettingsUsersModule: React.FC = () => {
           </div>
         ))}
       </div>
+
+      {/* Shortcut to Dedicated Supervisors Tab */}
+      {onOpenSupervisors && (
+        <div className="bg-white border border-slate-200 rounded-xl px-5 py-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-[#0B1F3A] text-[#C89B3C] flex items-center justify-center shrink-0">
+              <UserCheck className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="font-bold text-sm text-[#0B1F3A]">
+                حسابات المشرفات ({supervisorsCount})
+              </div>
+              <p className="text-xs text-slate-500">
+                تم تخصيص قسم مستقل «إدارة المشرفات» في القائمة الجانبية لإضافة وتعديل وحذف المشرفات.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenSupervisors}
+            className="rounded-xl bg-[#0B1F3A] hover:bg-[#13325c] px-4 py-2 text-xs font-bold text-white whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            فتح إدارة المشرفات
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Users Table */}
@@ -234,6 +267,7 @@ export const SettingsUsersModule: React.FC = () => {
           </table>
         </div>
       </div>
+
     </div>
   );
 };

@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 export interface RlsContext {
   role: string;
   driverId: number | null;
+  supervisorId?: number | null;
 }
 
 const rlsStorage = new AsyncLocalStorage<RlsContext>();

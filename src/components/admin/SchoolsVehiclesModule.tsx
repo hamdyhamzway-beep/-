@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Building2, Bus, Edit3, Plus, Route, Trash2, User, X } from 'lucide-react';
-import { apiFetch, formatEGP } from '../../lib/api';
+import { apiFetch, formatArabicTripTime, formatEGP, normalizeTimeInputValue } from '../../lib/api';
+import { useEscapeKey } from '../../lib/useEscapeKey';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import type { FleetVehicle, RouteItem, SchoolItem, VehicleOwner } from '../../types';
 
@@ -23,6 +24,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [savingModal, setSavingModal] = useState(false);
+
+  useEscapeKey(
+    Boolean(showRouteModal || showOwnerModal || showVehicleModal || showSchoolModal),
+    () => {
+      if (showRouteModal) setShowRouteModal(false);
+      else if (showOwnerModal) setShowOwnerModal(false);
+      else if (showVehicleModal) setShowVehicleModal(false);
+      else if (showSchoolModal) setShowSchoolModal(false);
+    }
+  );
 
   const [schoolForm, setSchoolForm] = useState({
     name: '',
@@ -313,8 +324,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
       schoolName: linkedSchool?.name || '',
       pickupArea: r.pickupArea || '',
       dropoffArea: r.dropoffArea || '',
-      pickupTime: r.pickupTime || '',
-      dropoffTime: r.dropoffTime || '',
+      pickupTime: normalizeTimeInputValue(r.pickupTime),
+      dropoffTime: normalizeTimeInputValue(r.dropoffTime),
       estimatedDistanceKm: r.estimatedDistanceKm ? String(r.estimatedDistanceKm) : '',
     });
     setShowRouteModal(true);
@@ -570,8 +581,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 <tr>
                   <th className="py-3 px-4 font-semibold">اسم الخط</th>
                   <th className="py-3 px-4 font-semibold">المدرسة</th>
-                  <th className="py-3 px-4 font-semibold">نقطة التجمع / الانطلاق</th>
-                  <th className="py-3 px-4 font-semibold">مواعيد الذهاب والعودة</th>
+                  <th className="py-3 px-4 font-semibold">نقطة بداية الرحلة</th>
+                  <th className="py-3 px-4 font-semibold">بداية ونهاية الرحلة بالوقت</th>
                   <th className="py-3 px-4 font-semibold">المسافة التقديرية</th>
                   <th className="py-3 px-4 font-semibold">الإجراءات</th>
                 </tr>
@@ -583,9 +594,19 @@ export const SchoolsVehiclesModule: React.FC = () => {
                     <tr key={r.id} className="hover:bg-slate-50/70">
                       <td className="py-3 px-4 font-semibold text-[#0B1F3A]">{r.name}</td>
                       <td className="py-3 px-4 text-slate-700">{school?.name || '—'}</td>
-                      <td className="py-3 px-4 text-slate-600">{r.pickupArea || '—'}</td>
+                      <td className="py-3 px-4 text-slate-600">
+                        <div>{r.pickupArea || '—'}</div>
+                        {r.dropoffArea && (
+                          <div className="text-[11px] text-slate-400 mt-0.5">
+                            نهاية: {r.dropoffArea}
+                          </div>
+                        )}
+                      </td>
                       <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
-                        {r.pickupTime} — {r.dropoffTime}
+                        <div>بداية: {formatArabicTripTime(r.pickupTime)}</div>
+                        <div className="text-slate-500 mt-0.5">
+                          نهاية: {formatArabicTripTime(r.dropoffTime)}
+                        </div>
                       </td>
                       <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
                         {r.estimatedDistanceKm} كم
@@ -869,20 +890,20 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
               <input
-                placeholder="منطقة الانطلاق / التجمع"
+                placeholder="نقطة بداية الرحلة (التجمع / الانطلاق)"
                 value={routeForm.pickupArea}
                 onChange={(e) => setRouteForm({ ...routeForm, pickupArea: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
               <input
-                placeholder="نقطة الوصول"
+                placeholder="نقطة نهاية الرحلة (الوصول)"
                 value={routeForm.dropoffArea}
                 onChange={(e) => setRouteForm({ ...routeForm, dropoffArea: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">وقت الذهاب</label>
+                  <label className="block text-[11px] text-slate-500 mb-1">وقت بداية الرحلة</label>
                   <input
                     type="time"
                     value={routeForm.pickupTime}
@@ -891,7 +912,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">وقت العودة</label>
+                  <label className="block text-[11px] text-slate-500 mb-1">وقت نهاية الرحلة</label>
                   <input
                     type="time"
                     value={routeForm.dropoffTime}

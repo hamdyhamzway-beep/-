@@ -22,7 +22,15 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { apiFetch, formatEGP } from '../../lib/api';
+import {
+  apiFetch,
+  formatArabicTripTime,
+  formatEGP,
+  getLocalTodayDateString,
+  normalizeLookupText,
+  normalizeTimeInputValue,
+} from '../../lib/api';
+import { useEscapeKey } from '../../lib/useEscapeKey';
 import {
   buildWhatsAppUrl,
   captureElementAsPngBlob,
@@ -90,19 +98,11 @@ interface DriverStatementResponse {
   transactions: FinancialTransaction[];
 }
 
-function normalizeLookupText(val: string): string {
-  return val
-    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
-    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
-    .trim()
-    .toLowerCase();
-}
-
 export const AdminOverview: React.FC<{
   onNavigate: (tab: string) => void;
 }> = ({ onNavigate }) => {
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
+  const today = getLocalTodayDateString();
 
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [year, setYear] = useState(now.getFullYear());
@@ -211,6 +211,29 @@ export const AdminOverview: React.FC<{
     routeDropoffTime: '',
   });
 
+  useEscapeKey(
+    Boolean(
+      showCloseMonthModal ||
+        deletingAdjustment ||
+        editingAdjustment ||
+        deletingCoverage ||
+        editingCoverage ||
+        deletingAdvance ||
+        editingAdvance ||
+        showEditDriverModal
+    ),
+    () => {
+      if (showCloseMonthModal) setShowCloseMonthModal(false);
+      else if (deletingAdjustment) setDeletingAdjustment(null);
+      else if (editingAdjustment) setEditingAdjustment(null);
+      else if (deletingCoverage) setDeletingCoverage(null);
+      else if (editingCoverage) setEditingCoverage(null);
+      else if (deletingAdvance) setDeletingAdvance(null);
+      else if (editingAdvance) setEditingAdvance(null);
+      else if (showEditDriverModal) setShowEditDriverModal(false);
+    }
+  );
+
   const loadDashboard = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -260,7 +283,7 @@ export const AdminOverview: React.FC<{
     const curNow = new Date();
     const targetDate =
       month === curNow.getMonth() + 1 && year === curNow.getFullYear()
-        ? curNow.toISOString().slice(0, 10)
+        ? getLocalTodayDateString()
         : `${year}-${String(month).padStart(2, '0')}-01`;
     setAdvForm((f) => (f.date.startsWith(`${year}-${String(month).padStart(2, '0')}`) ? f : { ...f, date: targetDate }));
     setCovForm((f) => (f.date.startsWith(`${year}-${String(month).padStart(2, '0')}`) ? f : { ...f, date: targetDate }));
@@ -318,7 +341,12 @@ export const AdminOverview: React.FC<{
     if (target) {
       setActionMsg(null);
       setWhatsappHref(null);
-      loadDriverPage(target.id);
+      if (target.id === selectedDriverId) {
+        loadDriverPage(target.id, month, year);
+      } else {
+        setStatement(null);
+        setSelectedDriverId(target.id);
+      }
     } else {
       setError(`لم يتم العثور على سائق مطابق لـ "${driverLookup.trim()}"`);
     }
@@ -329,7 +357,12 @@ export const AdminOverview: React.FC<{
     setActionErr(null);
     setWhatsappHref(null);
     setQuickSwitchLookup('');
-    loadDriverPage(d.id);
+    if (d.id === selectedDriverId) {
+      loadDriverPage(d.id, month, year);
+    } else {
+      setStatement(null);
+      setSelectedDriverId(d.id);
+    }
   };
 
   const refreshAllForDriver = async (driverId: number) => {
@@ -640,8 +673,8 @@ export const AdminOverview: React.FC<{
           ? activeDriver.routeName
           : '',
       routePickupArea: activeDriver.pickupArea || '',
-      routePickupTime: activeDriver.pickupTime || '',
-      routeDropoffTime: activeDriver.dropoffTime || '',
+      routePickupTime: normalizeTimeInputValue(activeDriver.pickupTime),
+      routeDropoffTime: normalizeTimeInputValue(activeDriver.dropoffTime),
     });
     setShowEditDriverModal(true);
   };
@@ -883,8 +916,18 @@ export const AdminOverview: React.FC<{
                   value={driverLookup}
                   onChange={(e) => setDriverLookup(e.target.value)}
                   placeholder="ابحث باسم السائق، أو الكود، أو رقم الموبايل لفتح صفحته وتعديل كل بياناته..."
-                  className="w-full rounded-xl border border-white/20 bg-white text-slate-900 pr-10 pl-4 py-3 text-sm placeholder:text-slate-400 focus:border-[#C89B3C] focus:outline-none"
+                  className="w-full rounded-xl border border-white/20 bg-white text-slate-900 pr-10 pl-9 py-3 text-sm placeholder:text-slate-400 focus:border-[#C89B3C] focus:outline-none"
                 />
+                {driverLookup && (
+                  <button
+                    type="button"
+                    onClick={() => setDriverLookup('')}
+                    aria-label="مسح البحث"
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
               <button
                 type="submit"
@@ -899,9 +942,19 @@ export const AdminOverview: React.FC<{
       </section>
 
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>{error}</span>
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{error}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 
@@ -949,8 +1002,18 @@ export const AdminOverview: React.FC<{
                 value={quickSwitchLookup}
                 onChange={(e) => setQuickSwitchLookup(e.target.value)}
                 placeholder="انتقال سريع لسائق آخر بالاسم أو الكود أو الموبايل..."
-                className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-3 py-2 text-xs text-slate-900 focus:border-[#0B1F3A] focus:outline-none"
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-8 py-2 text-xs text-slate-900 focus:border-[#0B1F3A] focus:outline-none"
               />
+              {quickSwitchLookup && (
+                <button
+                  type="button"
+                  onClick={() => setQuickSwitchLookup('')}
+                  aria-label="مسح البحث"
+                  className="absolute left-2.5 top-2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
               {quickSwitchMatches.length > 0 && (
                 <div className="absolute left-0 right-0 top-full mt-1 z-30 bg-white border border-slate-200 rounded-xl shadow-lg divide-y divide-slate-100 overflow-hidden">
                   {quickSwitchMatches.map((d) => (
@@ -1039,11 +1102,13 @@ export const AdminOverview: React.FC<{
                         {activeDriver.routeName && activeDriver.routeName !== '—' && (
                           <>
                             <span className="text-slate-300">·</span>
-                            <span>
+                            <span className="tabular-nums">
                               خط: {activeDriver.routeName}
-                              {activeDriver.pickupTime ? ` (${activeDriver.pickupTime}` : ''}
+                              {activeDriver.pickupTime
+                                ? ` (${formatArabicTripTime(activeDriver.pickupTime)}`
+                                : ''}
                               {activeDriver.dropoffTime
-                                ? ` - ${activeDriver.dropoffTime})`
+                                ? `${activeDriver.pickupTime ? ' - ' : ' ('}${formatArabicTripTime(activeDriver.dropoffTime)})`
                                 : activeDriver.pickupTime
                                 ? ')'
                                 : ''}
@@ -2200,25 +2265,25 @@ export const AdminOverview: React.FC<{
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">وقت الذهاب</label>
+                  <label className="block font-semibold text-slate-700 mb-1">وقت بداية الرحلة</label>
                   <input
+                    type="time"
                     value={editDriverForm.routePickupTime}
                     onChange={(e) =>
                       setEditDriverForm({ ...editDriverForm, routePickupTime: e.target.value })
                     }
-                    placeholder="07:00"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono tabular-nums"
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">وقت العودة</label>
+                  <label className="block font-semibold text-slate-700 mb-1">وقت نهاية الرحلة</label>
                   <input
+                    type="time"
                     value={editDriverForm.routeDropoffTime}
                     onChange={(e) =>
                       setEditDriverForm({ ...editDriverForm, routeDropoffTime: e.target.value })
                     }
-                    placeholder="14:30"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono tabular-nums"
                   />
                 </div>
               </div>

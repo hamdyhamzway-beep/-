@@ -5,7 +5,7 @@ export interface DbUser {
   fullName: string;
   phone: string | null;
   roleId: number;
-  roleSlug: 'super_admin' | 'driver' | 'movement_manager' | 'accountant' | string;
+  roleSlug: 'super_admin' | 'driver' | 'supervisor' | 'movement_manager' | 'accountant' | string;
   roleNameAr: string;
   permissions: string[];
   isActive: boolean;
@@ -217,4 +217,117 @@ export interface EmployeeRecord {
   notes: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SupervisorLiveLocation {
+  lat: number;
+  lng: number;
+  speedKmh: number;
+  accuracyMeters: number | null;
+  recordedAt: string;
+  isLive: boolean;
+}
+
+export interface SupervisorTripRecord {
+  tripDate: string;
+  morningStartedAt: string | null;
+  morningLat: number | null;
+  morningLng: number | null;
+  eveningEndedAt: string | null;
+  eveningLat: number | null;
+  eveningLng: number | null;
+}
+
+export interface SupervisorRecord {
+  id: number;
+  userId?: number | null;
+  linkedEmail?: string;
+  supervisorCode: string;
+  fullName: string;
+  phone: string;
+  photoUrl?: string | null;
+  schoolId: number | null;
+  schoolName: string;
+  schoolAddress?: string;
+  schoolLat?: number | null;
+  schoolLng?: number | null;
+  vehicleId: number | null;
+  busNumber: string;
+  registrationNumber: string;
+  routeId: number | null;
+  routeName: string;
+  pickupArea: string;
+  dropoffArea: string;
+  pickupTime: string;
+  dropoffTime: string;
+  estimatedDistanceKm?: number | null;
+  assignedDriverName?: string;
+  assignedDriverPhone?: string;
+  accountStatus: 'active' | 'inactive' | string;
+  notes?: string | null;
+  liveLocation?: SupervisorLiveLocation | null;
+  todayTrip?: SupervisorTripRecord | null;
+}
+
+export interface SupervisorTrackedVehicle {
+  vehicleId: number;
+  busNumber: string;
+  registrationNumber: string;
+  vehicleType: string;
+  gpsStatus: string;
+  routeName: string;
+  driverName: string;
+  driverPhone: string;
+  isOnline: boolean;
+  gps: {
+    lat: number;
+    lng: number;
+    speedKmh: number;
+    heading: number | null;
+    accuracyMeters: number | null;
+    recordedAt: string;
+    isLive: boolean;
+    statusLabel: string;
+  } | null;
+  trail: Array<{
+    id: number;
+    lat: number;
+    lng: number;
+    speedKmh: number;
+    recordedAt: string;
+  }>;
+}
+
+export interface SupervisorAppResponse {
+  linked: boolean;
+  supervisor: {
+    id: number;
+    supervisorCode: string;
+    fullName: string;
+    phone: string;
+    photoUrl?: string | null;
+    accountStatus: string;
+    notes: string;
+    liveLocation?: SupervisorLiveLocation | null;
+  } | null;
+  todayTrip?: SupervisorTripRecord | null;
+  school: {
+    id: number;
+    name: string;
+    address: string;
+    lat: number;
+    lng: number;
+    contactName: string;
+    contactPhone: string;
+  } | null;
+  route: {
+    id: number;
+    name: string;
+    pickupArea: string;
+    dropoffArea: string;
+    pickupTime: string;
+    dropoffTime: string;
+    estimatedDistanceKm: number | null;
+  } | null;
+  trackedVehicles: SupervisorTrackedVehicle[];
 }

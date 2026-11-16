@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Archive, Briefcase, Edit3, Plus, Search, Trash2, X } from 'lucide-react';
-import { apiFetch, formatEGP } from '../../lib/api';
+import { apiFetch, formatEGP, normalizeLookupText } from '../../lib/api';
+import { useEscapeKey } from '../../lib/useEscapeKey';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import type { EmployeeRecord } from '../../types';
 
@@ -30,6 +31,11 @@ export const EmployeesModule: React.FC = () => {
 
   const [deleteTarget, setDeleteTarget] = useState<EmployeeRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  useEscapeKey(Boolean(deleteTarget || showModal), () => {
+    if (deleteTarget) setDeleteTarget(null);
+    else if (showModal) setShowModal(false);
+  });
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -142,13 +148,15 @@ export const EmployeesModule: React.FC = () => {
   };
 
   const filtered = employeesList.filter((e) => {
-    if (!search.trim()) return true;
-    const q = search.trim().toLowerCase();
+    const q = normalizeLookupText(search);
+    if (!q) return true;
+    const digitsOnly = q.replace(/\D/g, '');
     return (
-      e.fullName.toLowerCase().includes(q) ||
-      (e.employeeCode || '').toLowerCase().includes(q) ||
-      (e.jobTitle || '').toLowerCase().includes(q) ||
-      (e.phone || '').toLowerCase().includes(q)
+      normalizeLookupText(e.fullName).includes(q) ||
+      normalizeLookupText(e.employeeCode).includes(q) ||
+      normalizeLookupText(e.jobTitle).includes(q) ||
+      normalizeLookupText(e.phone).includes(q) ||
+      (digitsOnly.length >= 2 && normalizeLookupText(e.phone).replace(/\D/g, '').includes(digitsOnly))
     );
   });
 
@@ -200,20 +208,38 @@ export const EmployeesModule: React.FC = () => {
       {/* Search */}
       <div className="bg-white border border-slate-200 rounded-xl p-4">
         <div className="relative max-w-md">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
+          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="بحث بالاسم، الكود، الوظيفة، أو الهاتف..."
-            className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-3 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
+            className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-8 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
           />
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              aria-label="مسح البحث"
+              className="absolute left-2.5 top-2 text-slate-400 hover:text-slate-700 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800">
-          {error}
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 

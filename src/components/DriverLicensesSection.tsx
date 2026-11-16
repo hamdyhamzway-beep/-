@@ -11,6 +11,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { useEscapeKey } from '../lib/useEscapeKey';
 import type { DriverLicensePhoto } from '../types';
 
 interface DriverLicensesSectionProps {
@@ -105,6 +106,8 @@ export const DriverLicensesSection: React.FC<DriverLicensesSectionProps> = ({
   const [previewPhoto, setPreviewPhoto] = useState<DriverLicensePhoto | null>(null);
   const [showAddExtra, setShowAddExtra] = useState(false);
   const [extraLabel, setExtraLabel] = useState(EXTRA_LABEL_PRESETS[0]);
+
+  useEscapeKey(Boolean(previewPhoto), () => setPreviewPhoto(null));
 
   const applyNextPhotos = async (nextPhotos: DriverLicensePhoto[], msg: string) => {
     setErrorMsg(null);
