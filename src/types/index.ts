@@ -50,6 +50,23 @@ export interface EnrichedDriver {
   currentSalary?: SalaryRecord | null;
 }
 
+export interface SchoolDriverSalarySummary {
+  id: number;
+  driverCode: string;
+  fullName: string;
+  phone: string;
+  busNumber: string;
+  routeName: string;
+  monthlyAgreedSalary: number;
+  baseSalary: number;
+  totalAdvances: number;
+  totalCoverageDeductions: number;
+  otherDeductions: number;
+  bonuses: number;
+  netSalary: number;
+  salaryStatus: string;
+}
+
 export interface SchoolItem {
   id: number;
   name: string;
@@ -66,8 +83,12 @@ export interface SchoolItem {
   vehicleCount?: number;
   driverCount?: number;
   ownerCost?: number;
+  totalDriverSalaries?: number;
+  totalNetDriverSalaries?: number;
   estimatedProfit?: number;
   routes?: RouteItem[];
+  vehicles?: FleetVehicle[];
+  drivers?: SchoolDriverSalarySummary[];
 }
 
 export interface VehicleOwner {
@@ -135,8 +156,30 @@ export interface SalaryRecord {
   status: 'open' | 'approved' | 'paid' | string;
   driverName?: string;
   driverCode?: string;
+  schoolId?: number | null;
   schoolName?: string;
   busNumber?: string;
+  routeName?: string;
+}
+
+export interface SchoolFinanceContract {
+  schoolId: number | null;
+  schoolName: string;
+  isActive: boolean;
+  monthlyContractValue: number;
+  contactPerson?: string;
+  contactPhone?: string;
+  driversCount: number;
+  totalBaseSalaries: number;
+  totalAdvances: number;
+  totalCoverageDeductions: number;
+  totalOtherDeductions: number;
+  totalBonuses: number;
+  totalNetSalaries: number;
+  profit: number;
+  netPayoutProfit: number;
+  profitMarginPct: number;
+  drivers: SalaryRecord[];
 }
 
 export interface AdvanceRecord {
@@ -150,6 +193,7 @@ export interface AdvanceRecord {
   isReversed: boolean;
   driverName?: string;
   driverCode?: string;
+  schoolId?: number | null;
   schoolName?: string;
   createdAt: string;
 }
@@ -188,6 +232,8 @@ export interface FinancialTransaction {
   description: string;
   driverName?: string;
   driverCode?: string;
+  schoolId?: number | null;
+  schoolName?: string;
   createdAt: string;
 }
 
@@ -354,7 +400,7 @@ export interface ChatMessage {
 export interface ChatChannel {
   id: number;
   roomKey: string;
-  channelType: 'broadcast' | 'route' | 'direct';
+  channelType: 'broadcast' | 'drivers_broadcast' | 'route' | 'direct';
   title: string;
   routeId?: number | null;
   routeName?: string;
@@ -382,3 +428,30 @@ export interface ChatSyncPayload {
   };
 }
 
+export interface FinanceGrandTotals {
+  schoolsCount: number;
+  driversCount: number;
+  employeesCount: number;
+  vehiclesCount: number;
+  totalSchoolContracts: number;
+  totalDriverBaseSalaries: number;
+  totalDriverAdvances: number;
+  totalCoverageReplacementCost: number;
+  totalCoverageDriverDeductions: number;
+  totalOtherDeductions: number;
+  totalBonuses: number;
+  totalDriverNetSalaries: number;
+  totalPaidSalaries: number;
+  totalUnpaidSalaries: number;
+  totalEmployeeBaseSalaries: number;
+  totalEmployeeBonuses: number;
+  totalEmployeeDeductions: number;
+  totalEmployeeNetSalaries: number;
+  totalVehicleOwnerCosts: number;
+  totalCombinedPayroll: number;
+  totalLedgerCredits: number;
+  totalLedgerDebits: number;
+  netLedgerBalance: number;
+  contractsProfitAfterDrivers: number;
+  overallNetBalance: number;
+}

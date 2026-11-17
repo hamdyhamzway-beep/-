@@ -503,9 +503,30 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
   try {
     decodedToken = await adminAuth.verifyIdToken(token);
     req.firebaseUser = decodedToken;
-  } catch (error) {
+  } catch (error: unknown) {
     console.error('Firebase ID token verification error:', error);
-    return res.status(401).json({ error: 'انتهت صلاحية الجلسة أو رمز التحقق غير صالح' });
+    const errObj = error as { code?: string; message?: string } | null;
+    const errCode = String(errObj?.code || '');
+    const errMsg = String(errObj?.message || '').toLowerCase();
+    const isTransientCertFetch =
+      errCode === 'auth/internal-error' ||
+      errMsg.includes('fetching public keys') ||
+      errMsg.includes('etimedout') ||
+      errMsg.includes('econnreset') ||
+      errMsg.includes('enotfound') ||
+      errMsg.includes('network');
+
+    if (isTransientCertFetch) {
+      return res.status(503).json({
+        error: 'تعذر التحقق من الخادم مؤقتاً، يرجى إعادة المحاولة',
+        code: 'AUTH_TEMPORARY_UNAVAILABLE',
+      });
+    }
+
+    return res.status(401).json({
+      error: 'انتهت صلاحية الجلسة أو رمز التحقق غير صالح',
+      code: errCode || 'TOKEN_EXPIRED',
+    });
   }
 
   try {

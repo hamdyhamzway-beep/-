@@ -105,3 +105,48 @@ async function flushOfflineGpsQueue() {
     // Will retry automatically on next sync event or when app regains connectivity
   }
 }
+
+self.addEventListener('message', function (event) {
+  var data = event.data;
+  if (!data || typeof data !== 'object') return;
+  if (data.type === 'SHOW_BG_NOTIFICATION' && data.payload && self.registration) {
+    var p = data.payload;
+    var title = p.title || 'إشعار جديد · الوليد ترافيل';
+    var options = {
+      body: p.body || '',
+      icon: '/pwa-192x192.png',
+      badge: '/pwa-192x192.png',
+      dir: 'rtl',
+      lang: 'ar',
+      tag: p.tag || 'alwaleed-driver-notif-' + (p.id || Date.now()),
+      renotify: true,
+      vibrate: [200, 100, 200],
+      data: {
+        url: p.url || '/',
+        notificationId: p.id || null,
+      },
+    };
+    event.waitUntil(self.registration.showNotification(title, options));
+  }
+});
+
+self.addEventListener('notificationclick', function (event) {
+  event.notification.close();
+  var targetUrl = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (clientList) {
+      for (var i = 0; i < clientList.length; i++) {
+        var client = clientList[i];
+        if ('focus' in client) {
+          client.focus();
+          client.postMessage({ type: 'OPEN_DRIVER_NOTIFICATIONS' });
+          return;
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+    })
+  );
+});
+

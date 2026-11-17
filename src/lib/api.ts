@@ -1,5 +1,5 @@
 import { auth } from './firebase';
-import { saveSessionTokenMeta } from './local-store';
+import { getSessionTokenMeta, saveSessionTokenMeta } from './local-store';
 
 const CODE_TOKEN_KEY = 'alwaleed_driver_token'; // Holds drv_... or sup_... persistent tokens
 
@@ -9,6 +9,25 @@ export function getDriverSessionToken(): string | null {
   } catch {
     return null;
   }
+}
+
+export async function restoreDriverSessionToken(): Promise<string | null> {
+  const existing = getDriverSessionToken();
+  if (existing) return existing;
+  try {
+    const idbToken = await getSessionTokenMeta();
+    if (idbToken) {
+      try {
+        localStorage.setItem(CODE_TOKEN_KEY, idbToken);
+      } catch {
+        // ignore storage errors
+      }
+      return idbToken;
+    }
+  } catch {
+    // ignore IndexedDB errors
+  }
+  return null;
 }
 
 export function setDriverSessionToken(token: string | null): void {
@@ -38,31 +57,68 @@ export async function apiFetch<T = unknown>(
   url: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const user = auth.currentUser;
-  const codeToken = user ? null : getDriverSessionToken();
-  const token = user ? await user.getIdToken() : codeToken;
+  if (!auth.currentUser && !getDriverSessionToken()) {
+    try {
+      await auth.authStateReady();
+    } catch {
+      // ignore authStateReady errors
+    }
+  }
+
+  let user = auth.currentUser;
+  let codeToken = user ? null : getDriverSessionToken();
+  if (!user && !codeToken) {
+    codeToken = await restoreDriverSessionToken();
+  }
+
+  let token: string | null = null;
+  if (user) {
+    try {
+      token = await user.getIdToken();
+    } catch {
+      token = await user.getIdToken(true).catch(() => null);
+    }
+  } else {
+    token = codeToken;
+  }
 
   if (!token) {
     throw new ApiHttpError('يجب تسجيل الدخول أولاً', 401);
   }
 
-  const headers = new Headers(options.headers || {});
-  headers.set('Authorization', `Bearer ${token}`);
-  if (options.body && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      ...options,
-      headers,
-    });
-  } catch (networkErr: unknown) {
-    if (networkErr instanceof DOMException && networkErr.name === 'AbortError') {
-      throw new ApiHttpError('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى', 0);
+  const executeRequest = async (bearerToken: string): Promise<Response> => {
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', `Bearer ${bearerToken}`);
+    if (options.body && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
     }
-    throw new ApiHttpError('تعذر الاتصال بالخادم حالياً، يرجى التحقق من الشبكة والمحاولة مرة أخرى', 0);
+
+    try {
+      return await fetch(url, {
+        ...options,
+        headers,
+      });
+    } catch (networkErr: unknown) {
+      if (networkErr instanceof DOMException && networkErr.name === 'AbortError') {
+        throw new ApiHttpError('انتهت مهلة الاتصال بالخادم، يرجى المحاولة مرة أخرى', 0);
+      }
+      throw new ApiHttpError('تعذر الاتصال بالخادم حالياً، يرجى التحقق من الشبكة والمحاولة مرة أخرى', 0);
+    }
+  };
+
+  let res = await executeRequest(token);
+
+  // If Firebase ID token expired (e.g. after 60m or mobile tab sleep), force-refresh and retry once
+  if (res.status === 401 && user) {
+    try {
+      const freshIdToken = await user.getIdToken(true);
+      if (freshIdToken && freshIdToken !== token) {
+        token = freshIdToken;
+        res = await executeRequest(freshIdToken);
+      }
+    } catch {
+      // Let standard 401 handler below report the error without clearing persistent session
+    }
   }
 
   // Sliding persistent token refresh if server issued a fresh token header
@@ -73,9 +129,8 @@ export async function apiFetch<T = unknown>(
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401 && codeToken) {
-      setDriverSessionToken(null);
-    }
+    // Never wipe persistent driver/supervisor session token on arbitrary endpoint 401s.
+    // Session revocation is handled explicitly by AuthContext /api/me verification or user logout.
     throw new ApiHttpError(
       data.error || `خطأ في الخادم (${res.status})`,
       res.status,

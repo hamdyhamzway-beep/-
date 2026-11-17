@@ -140,12 +140,18 @@ export async function clearCachedSession() {
 }
 
 // Mirror token into IndexedDB so Service Worker can flush GPS queue in background
+// and recover session if browser evicts localStorage under memory pressure
 export async function saveSessionTokenMeta(token: string | null) {
   if (token) {
     await idbPut(STORE_AUTH_META, { key: 'session_token', token, updatedAt: Date.now() });
   } else {
     await idbDelete(STORE_AUTH_META, 'session_token');
   }
+}
+
+export async function getSessionTokenMeta(): Promise<string | null> {
+  const row = await idbGet<{ key: string; token?: string }>(STORE_AUTH_META, 'session_token');
+  return typeof row?.token === 'string' && row.token ? row.token : null;
 }
 
 // 2. Robust Driver Profile + Avatar + License Photos Cache

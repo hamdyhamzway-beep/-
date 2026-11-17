@@ -1,14 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Building2,
+  Calculator,
   CalendarCheck,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Edit3,
   Eye,
   Plus,
   RotateCcw,
   Sparkles,
   Trash2,
+  TrendingUp,
+  Users,
   Wallet,
   X,
 } from 'lucide-react';
@@ -17,8 +23,10 @@ import { useEscapeKey } from '../../lib/useEscapeKey';
 import type {
   AdvanceRecord,
   CoverageRecord,
+  FinanceGrandTotals,
   FinancialTransaction,
   SalaryRecord,
+  SchoolFinanceContract,
 } from '../../types';
 
 interface ClosingSnapshotDriver {
@@ -73,6 +81,15 @@ interface FinanceOverview {
   activePeriod?: { month: number; year: number };
   currentClosing?: MonthlyClosingRecord | null;
   closingsHistory?: MonthlyClosingRecord[];
+  schoolContracts?: SchoolFinanceContract[];
+  contractsSummary?: {
+    schoolsCount: number;
+    totalContractsValue: number;
+    totalAllBaseSalaries: number;
+    totalAllNetSalaries: number;
+    totalAllProfit: number;
+  };
+  grandTotals?: FinanceGrandTotals;
   salaries: SalaryRecord[];
   advances: AdvanceRecord[];
   coverages: CoverageRecord[];
@@ -83,7 +100,11 @@ export const FinanceModule: React.FC = () => {
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [year, setYear] = useState(new Date().getFullYear());
   const initialSyncedRef = useRef(false);
-  const [tab, setTab] = useState<'salaries' | 'advances' | 'coverage' | 'ledger' | 'closing'>('salaries');
+  const [tab, setTab] = useState<
+    'schools' | 'salaries' | 'advances' | 'coverage' | 'ledger' | 'closing'
+  >('schools');
+  const [selectedSchoolKey, setSelectedSchoolKey] = useState<string>('all');
+  const [showGrandTotalsBox, setShowGrandTotalsBox] = useState<boolean>(true);
   const [data, setData] = useState<FinanceOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -496,6 +517,22 @@ export const FinanceModule: React.FC = () => {
 
   const nextMonthPreview = month === 12 ? 1 : month + 1;
   const nextYearPreview = month === 12 ? year + 1 : year;
+  const schoolContracts = data?.schoolContracts || [];
+  const getSchoolKey = (id: number | null | undefined) =>
+    id === null || id === undefined ? 'unassigned' : String(id);
+  const selectedSchoolContract =
+    selectedSchoolKey === 'all'
+      ? null
+      : schoolContracts.find((sc) => getSchoolKey(sc.schoolId) === selectedSchoolKey) || null;
+
+  const matchesSchoolFilter = (sId?: number | null) =>
+    selectedSchoolKey === 'all' || getSchoolKey(sId) === selectedSchoolKey;
+
+  const filteredSalaries = (data?.salaries || []).filter((s) => matchesSchoolFilter(s.schoolId));
+  const filteredAdvances = (data?.advances || []).filter((a) => matchesSchoolFilter(a.schoolId));
+  const filteredCoverages = (data?.coverages || []).filter((c) => matchesSchoolFilter(c.schoolId));
+  const filteredLedger = (data?.ledger || []).filter((t) => matchesSchoolFilter(t.schoolId));
+
   const monthTotalBase = data?.salaries.reduce((s, r) => s + Number(r.baseSalary || 0), 0) || 0;
   const monthTotalAdvances = data?.salaries.reduce((s, r) => s + Number(r.totalAdvances || 0), 0) || 0;
   const monthTotalCoverages =
@@ -505,15 +542,73 @@ export const FinanceModule: React.FC = () => {
     data?.salaries.reduce((s, r) => s + Number(r.otherDeductions || 0), 0) || 0;
   const monthTotalNet = data?.salaries.reduce((s, r) => s + Number(r.netSalary || 0), 0) || 0;
 
+  const totalContractsValue =
+    data?.contractsSummary?.totalContractsValue ??
+    schoolContracts
+      .filter((c) => c.schoolId !== null && c.isActive)
+      .reduce((s, c) => s + c.monthlyContractValue, 0);
+  const totalContractsProfit =
+    data?.contractsSummary?.totalAllProfit ?? totalContractsValue - monthTotalBase;
+
+  // Grand Totals for ALL financial data (unfiltered full-month + filtered active view sums)
+  const gt = data?.grandTotals;
+  const filteredTotalBase = filteredSalaries.reduce((s, r) => s + Number(r.baseSalary || 0), 0);
+  const filteredTotalAdvances = filteredSalaries.reduce(
+    (s, r) => s + Number(r.totalAdvances || 0),
+    0
+  );
+  const filteredTotalCovDed = filteredSalaries.reduce(
+    (s, r) => s + Number(r.totalCoverageDeductions || 0),
+    0
+  );
+  const filteredTotalOtherDed = filteredSalaries.reduce(
+    (s, r) => s + Number(r.otherDeductions || 0),
+    0
+  );
+  const filteredTotalBonuses = filteredSalaries.reduce((s, r) => s + Number(r.bonuses || 0), 0);
+  const filteredTotalNet = filteredSalaries.reduce((s, r) => s + Number(r.netSalary || 0), 0);
+
+  const activeAdvancesSum = filteredAdvances
+    .filter((a) => !a.isReversed)
+    .reduce((s, a) => s + Number(a.amount || 0), 0);
+  const activeCovCostSum = filteredCoverages
+    .filter((c) => !c.isReversed)
+    .reduce((s, c) => s + Number(c.actualReplacementCost || 0), 0);
+  const activeCovDedSum = filteredCoverages
+    .filter((c) => !c.isReversed)
+    .reduce((s, c) => s + Number(c.absentDriverDeduction || 0), 0);
+  const ledgerCreditSum = filteredLedger
+    .filter((t) => t.direction === 'credit')
+    .reduce((s, t) => s + Number(t.amount || 0), 0);
+  const ledgerDebitSum = filteredLedger
+    .filter((t) => t.direction === 'debit')
+    .reduce((s, t) => s + Number(t.amount || 0), 0);
+
+  const displayedSchoolsList = selectedSchoolContract
+    ? [selectedSchoolContract]
+    : schoolContracts;
+  const displayedSchoolsContractsSum = displayedSchoolsList
+    .filter((c) => c.schoolId !== null && c.isActive)
+    .reduce((s, c) => s + c.monthlyContractValue, 0);
+  const displayedSchoolsSalariesSum = displayedSchoolsList.reduce(
+    (s, c) => s + c.totalBaseSalaries,
+    0
+  );
+  const displayedSchoolsNetSum = displayedSchoolsList.reduce(
+    (s, c) => s + c.totalNetSalaries,
+    0
+  );
+  const displayedSchoolsProfitSum = displayedSchoolsList.reduce((s, c) => s + c.profit, 0);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl font-bold text-[#0B1F3A]">
-            الإدارة المالية والمرتبات
+            الإدارة المالية والمرتبات وعقود المدارس
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            المعادلة المعتمدة: صافي الراتب = الأساسي − السلف − خصم التغطية − الخصومات الأخرى + المكافآت
+            تقسيم العقود حسب كل مدرسة (ربح المدرسة = قيمة العقد الشهري − مجموع رواتب السائقين) · وصافي الراتب = الأساسي − السلف − التغطية − الخصومات + المكافآت
           </p>
         </div>
 
@@ -563,9 +658,212 @@ export const FinanceModule: React.FC = () => {
         </div>
       </div>
 
+      {/* Overall School Contracts Financial Strip */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-[#0B1F3A] text-white rounded-xl p-4">
+          <div className="text-[11px] text-slate-300">إجمالي عقود المدارس الشهرية</div>
+          <div className="font-mono text-lg font-bold text-[#C89B3C] mt-1 tabular-nums">
+            {formatEGP(totalContractsValue)}
+          </div>
+          <div className="text-[11px] text-slate-300 mt-1">
+            {data?.contractsSummary?.schoolsCount ??
+              schoolContracts.filter((c) => c.schoolId !== null && c.isActive).length}{' '}
+            مدرسة متعاقدة
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <div className="text-[11px] text-slate-500">مجموع رواتب السائقين</div>
+          <div className="font-mono text-lg font-bold text-[#0B1F3A] mt-1 tabular-nums">
+            {formatEGP(monthTotalBase)}
+          </div>
+          <div className="text-[11px] text-slate-500 mt-1">
+            صافي الصرف: <span className="font-mono font-semibold">{formatEGP(monthTotalNet)}</span>
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <div className="text-[11px] text-slate-500">صافي ربح العقود (العقود − الرواتب)</div>
+          <div
+            className={`font-mono text-lg font-bold mt-1 tabular-nums ${
+              totalContractsProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
+            }`}
+          >
+            {formatEGP(totalContractsProfit)}
+          </div>
+          <div className="text-[11px] text-slate-500 mt-1">
+            هامش{' '}
+            {totalContractsValue > 0
+              ? `${Math.round((totalContractsProfit / totalContractsValue) * 1000) / 10}%`
+              : '0%'}
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <div className="text-[11px] text-slate-500">تصفية المدرسة الحالية</div>
+          <select
+            value={selectedSchoolKey}
+            onChange={(e) => setSelectedSchoolKey(e.target.value)}
+            aria-label="تصفية حسب المدرسة"
+            className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C]"
+          >
+            <option value="all">جميع المدارس ({schoolContracts.length})</option>
+            {schoolContracts.map((sc) => (
+              <option key={getSchoolKey(sc.schoolId)} value={getSchoolKey(sc.schoolId)}>
+                {sc.schoolName} ({sc.driversCount} سائق)
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* خانة الجمع الإجمالي الشامل لكل البيانات المالية */}
+      <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+        <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-[#0B1F3A] text-[#C89B3C] flex items-center justify-center shrink-0">
+              <Calculator className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="font-display text-sm font-bold text-[#0B1F3A]">
+                خانة الجمع الإجمالي لكل البيانات المالية — شهر {month} / {year}
+              </h2>
+              <p className="text-[11px] text-slate-500">
+                تجميع شامل لجميع الإيرادات والرواتب والسلف والتغطيات والموظفين وملاك السيارات ودفتر الأستاذ
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowGrandTotalsBox((v) => !v)}
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 px-3 py-1.5 text-xs font-semibold text-[#0B1F3A] cursor-pointer"
+          >
+            <span>{showGrandTotalsBox ? 'طي الخانة' : 'عرض الجمع الإجمالي'}</span>
+            {showGrandTotalsBox ? (
+              <ChevronUp className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5" />
+            )}
+          </button>
+        </div>
+
+        {showGrandTotalsBox && (
+          <div className="divide-y divide-slate-200">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-y sm:divide-y-0 divide-x divide-x-reverse divide-slate-100 text-xs">
+              <div className="p-3.5">
+                <div className="text-slate-500">1. إجمالي عقود المدارس</div>
+                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                  {formatEGP(gt?.totalSchoolContracts ?? totalContractsValue)}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  {gt?.schoolsCount ?? 0} مدرسة نشطة
+                </div>
+              </div>
+
+              <div className="p-3.5">
+                <div className="text-slate-500">2. رواتب السائقين (الأساسي)</div>
+                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                  {formatEGP(gt?.totalDriverBaseSalaries ?? monthTotalBase)}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                  الصافي المستحق: {formatEGP(gt?.totalDriverNetSalaries ?? monthTotalNet)}
+                </div>
+              </div>
+
+              <div className="p-3.5">
+                <div className="text-slate-500">3. إجمالي السلف</div>
+                <div className="font-mono text-sm font-bold text-red-700 mt-1 tabular-nums">
+                  {formatEGP(gt?.totalDriverAdvances ?? monthTotalAdvances)}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5 tabular-nums">
+                  مخصومة من رواتب {gt?.driversCount ?? 0} سائق
+                </div>
+              </div>
+
+              <div className="p-3.5">
+                <div className="text-slate-500">4. التغطيات (بديل / خصم)</div>
+                <div className="font-mono text-sm font-bold text-red-700 mt-1 tabular-nums">
+                  {formatEGP(gt?.totalCoverageDriverDeductions ?? monthTotalCoverages)}
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                  تكلفة البديل الفعلية: {formatEGP(gt?.totalCoverageReplacementCost ?? 0)}
+                </div>
+              </div>
+
+              <div className="p-3.5">
+                <div className="text-slate-500">5. المكافآت والخصومات</div>
+                <div className="font-mono text-sm font-bold text-emerald-700 mt-1 tabular-nums">
+                  +{formatEGP(gt?.totalBonuses ?? monthTotalBonuses)}
+                </div>
+                <div className="text-[11px] text-red-700 mt-0.5 font-mono tabular-nums">
+                  خصومات أخرى: −{formatEGP(gt?.totalOtherDeductions ?? monthTotalOtherDed)}
+                </div>
+              </div>
+
+              <div className="p-3.5 border-t border-slate-100">
+                <div className="text-slate-500">6. الموظفون (غير السائقين)</div>
+                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                  {formatEGP(gt?.totalEmployeeNetSalaries ?? 0)}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  {gt?.employeesCount ?? 0} موظف نشط
+                </div>
+              </div>
+
+              <div className="p-3.5 border-t border-slate-100">
+                <div className="text-slate-500">7. مستحقات ملاك السيارات</div>
+                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                  {formatEGP(gt?.totalVehicleOwnerCosts ?? 0)}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  {gt?.vehiclesCount ?? 0} مركبة بالأسطول
+                </div>
+              </div>
+
+              <div className="p-3.5 border-t border-slate-100">
+                <div className="text-slate-500">8. المنصرف vs المتبقي (سائقين)</div>
+                <div className="font-mono text-sm font-bold text-emerald-700 mt-1 tabular-nums">
+                  صُرف: {formatEGP(gt?.totalPaidSalaries ?? 0)}
+                </div>
+                <div className="text-[11px] text-amber-700 font-mono mt-0.5 tabular-nums">
+                  متبقي: {formatEGP(gt?.totalUnpaidSalaries ?? 0)}
+                </div>
+              </div>
+
+              <div className="p-3.5 border-t border-slate-100">
+                <div className="text-slate-500">9. قيود دفتر الأستاذ</div>
+                <div className="font-mono text-xs font-bold text-emerald-700 mt-1 tabular-nums">
+                  دائن: +{formatEGP(gt?.totalLedgerCredits ?? 0)}
+                </div>
+                <div className="font-mono text-[11px] font-semibold text-red-700 mt-0.5 tabular-nums">
+                  مدين: −{formatEGP(gt?.totalLedgerDebits ?? 0)}
+                </div>
+              </div>
+
+              <div className="p-3.5 border-t border-slate-100 bg-[#0B1F3A] text-white">
+                <div className="text-[11px] text-[#ebd089] font-semibold">
+                  10. الجمع الإجمالي (صافي الفائض العام)
+                </div>
+                <div
+                  className={`font-mono text-base font-bold mt-1 tabular-nums ${
+                    (gt?.overallNetBalance ?? totalContractsProfit) >= 0
+                      ? 'text-[#C89B3C]'
+                      : 'text-red-300'
+                  }`}
+                >
+                  {formatEGP(gt?.overallNetBalance ?? totalContractsProfit)}
+                </div>
+                <div className="text-[11px] text-slate-300 mt-0.5 tabular-nums">
+                  إجمالي الرواتب الكلي: {formatEGP(gt?.totalCombinedPayroll ?? monthTotalNet)}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* Tabs */}
       <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-200/70 rounded-xl w-fit">
         {[
+          { id: 'schools', label: 'المدارس والعقود والأرباح' },
           { id: 'salaries', label: 'رواتب الشهر والتسويات' },
           { id: 'advances', label: 'تسجيل وإدارة السلف' },
           { id: 'coverage', label: 'تغطية الغياب' },
@@ -642,6 +940,422 @@ export const FinanceModule: React.FC = () => {
         </div>
       )}
 
+      {tab === 'schools' && (
+        <div className="space-y-6">
+          {/* School Quick Selector Cards */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-[#C89B3C]" />
+                <h2 className="font-display text-sm font-bold text-[#0B1F3A]">
+                  اختر المدرسة لعرض عقودها وسائقيها وأرباحها بشكل مستقل
+                </h2>
+              </div>
+              {selectedSchoolKey !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedSchoolKey('all')}
+                  className="rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-semibold text-[#0B1F3A] cursor-pointer"
+                >
+                  عرض جميع المدارس ({schoolContracts.length})
+                </button>
+              )}
+            </div>
+
+            {loading && !data ? (
+              <div className="py-8 text-center text-xs text-slate-400">
+                جاري تحميل عقود المدارس وأرباحها...
+              </div>
+            ) : schoolContracts.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-400">
+                لا توجد مدارس مسجلة حالياً. يمكنك إضافة المدارس من قسم «المدارس والمركبات».
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {schoolContracts.map((sc) => {
+                  const key = getSchoolKey(sc.schoolId);
+                  const isSelected = selectedSchoolKey === key;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setSelectedSchoolKey(isSelected ? 'all' : key)}
+                      className={`text-right rounded-xl border p-4 transition-all cursor-pointer ${
+                        isSelected
+                          ? 'border-[#C89B3C] bg-[#0B1F3A] text-white shadow-md'
+                          : 'border-slate-200 bg-slate-50/70 hover:bg-white hover:border-slate-300 text-[#0B1F3A]'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-display text-sm font-bold truncate">
+                            {sc.schoolName}
+                          </div>
+                          <div
+                            className={`text-[11px] mt-0.5 flex items-center gap-1.5 ${
+                              isSelected ? 'text-slate-300' : 'text-slate-500'
+                            }`}
+                          >
+                            <Users className="w-3 h-3 text-[#C89B3C]" />
+                            <span>{sc.driversCount} سائق مرتبط</span>
+                          </div>
+                        </div>
+                        <span
+                          className={`rounded-md px-2 py-0.5 text-[10px] font-bold shrink-0 ${
+                            sc.profit >= 0
+                              ? isSelected
+                                ? 'bg-emerald-500/20 text-emerald-200'
+                                : 'bg-emerald-50 text-emerald-700'
+                              : isSelected
+                              ? 'bg-red-500/20 text-red-200'
+                              : 'bg-red-50 text-red-700'
+                          }`}
+                        >
+                          {sc.profit >= 0 ? 'ربح' : 'عجز'}{' '}
+                          {sc.monthlyContractValue > 0 ? `${sc.profitMarginPct}%` : ''}
+                        </span>
+                      </div>
+
+                      <div
+                        className={`mt-3 pt-3 border-t grid grid-cols-3 gap-2 text-[11px] ${
+                          isSelected ? 'border-white/15' : 'border-slate-200'
+                        }`}
+                      >
+                        <div>
+                          <div className={isSelected ? 'text-slate-300' : 'text-slate-500'}>
+                            قيمة العقد
+                          </div>
+                          <div className="font-mono font-bold tabular-nums mt-0.5">
+                            {formatEGP(sc.monthlyContractValue)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className={isSelected ? 'text-slate-300' : 'text-slate-500'}>
+                            مجموع الرواتب
+                          </div>
+                          <div className="font-mono font-bold tabular-nums mt-0.5">
+                            {formatEGP(sc.totalBaseSalaries)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className={isSelected ? 'text-slate-300' : 'text-slate-500'}>
+                            الربح المستقل
+                          </div>
+                          <div
+                            className={`font-mono font-bold tabular-nums mt-0.5 ${
+                              sc.profit >= 0
+                                ? isSelected
+                                  ? 'text-[#ebd089]'
+                                  : 'text-emerald-700'
+                                : 'text-red-500'
+                            }`}
+                          >
+                            {formatEGP(sc.profit)}
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Independent School Contracts Detail Panels */}
+          {(selectedSchoolContract ? [selectedSchoolContract] : schoolContracts).map((sc) => {
+            const key = getSchoolKey(sc.schoolId);
+            return (
+              <section
+                key={key}
+                className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs"
+              >
+                {/* School Contract Header */}
+                <div className="px-5 py-4 bg-[#0B1F3A] text-white flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-[#C89B3C]/20 text-[#C89B3C] flex items-center justify-center shrink-0">
+                      <Building2 className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-display text-base font-bold truncate">
+                          {sc.schoolName}
+                        </h3>
+                        {!sc.isActive && (
+                          <span className="rounded bg-red-500/20 px-2 py-0.5 text-[10px] text-red-200">
+                            غير نشطة
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-300 mt-0.5">
+                        شهر {month}/{year} · {sc.driversCount} سائق مرتبط
+                        {sc.contactPerson ? ` · المسؤول: ${sc.contactPerson}` : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <div className="rounded-lg bg-white/10 px-3 py-1.5">
+                      <span className="text-slate-300">قيمة العقد: </span>
+                      <span className="font-mono font-bold text-[#C89B3C]">
+                        {formatEGP(sc.monthlyContractValue)}
+                      </span>
+                    </div>
+                    <div className="rounded-lg bg-white/10 px-3 py-1.5">
+                      <span className="text-slate-300">الرواتب: </span>
+                      <span className="font-mono font-bold text-white">
+                        {formatEGP(sc.totalBaseSalaries)}
+                      </span>
+                    </div>
+                    <div
+                      className={`rounded-lg px-3 py-1.5 font-bold ${
+                        sc.profit >= 0
+                          ? 'bg-emerald-500/20 text-emerald-200'
+                          : 'bg-red-500/25 text-red-200'
+                      }`}
+                    >
+                      <span>الربح: </span>
+                      <span className="font-mono">{formatEGP(sc.profit)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* School Contract KPI Row */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 divide-x divide-x-reverse divide-slate-100 border-b border-slate-200 bg-slate-50/60 text-xs">
+                  <div className="p-4">
+                    <div className="text-slate-500">قيمة العقد الشهرية للمدرسة</div>
+                    <div className="font-mono text-base font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                      {formatEGP(sc.monthlyContractValue)}
+                    </div>
+                  </div>
+                  <div className="p-4">
+                    <div className="text-slate-500">مجموع الرواتب الأساسية ({sc.driversCount})</div>
+                    <div className="font-mono text-base font-bold text-slate-900 mt-1 tabular-nums">
+                      {formatEGP(sc.totalBaseSalaries)}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      صافي الصرف: {formatEGP(sc.totalNetSalaries)}
+                    </div>
+                  </div>
+                  <div className="p-4">
+                    <div className="text-slate-500 flex items-center gap-1">
+                      <TrendingUp className="w-3.5 h-3.5 text-[#C89B3C]" />
+                      <span>أرباح المدرسة (العقد − الرواتب)</span>
+                    </div>
+                    <div
+                      className={`font-mono text-base font-bold mt-1 tabular-nums ${
+                        sc.profit >= 0 ? 'text-emerald-700' : 'text-red-700'
+                      }`}
+                    >
+                      {formatEGP(sc.profit)}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      نسبة الربح:{' '}
+                      <span className="font-mono font-semibold">
+                        {sc.monthlyContractValue > 0 ? `${sc.profitMarginPct}%` : '—'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="p-4">
+                    <div className="text-slate-500">السلف والتغطيات والتسويات</div>
+                    <div className="font-mono text-xs font-semibold text-red-700 mt-1 tabular-nums">
+                      سلف: {formatEGP(sc.totalAdvances)} · تغطيات:{' '}
+                      {formatEGP(sc.totalCoverageDeductions)}
+                    </div>
+                    <div className="font-mono text-[11px] text-emerald-700 mt-0.5 tabular-nums">
+                      مكافآت: +{formatEGP(sc.totalBonuses)} · خصومات: −
+                      {formatEGP(sc.totalOtherDeductions)}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Drivers linked strictly to this school */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-right text-xs">
+                    <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-4 font-semibold">الكود</th>
+                        <th className="py-3 px-4 font-semibold">السائق والباص والخط</th>
+                        <th className="py-3 px-4 font-semibold">الراتب الأساسي</th>
+                        <th className="py-3 px-4 font-semibold">السلف</th>
+                        <th className="py-3 px-4 font-semibold">التغطيات</th>
+                        <th className="py-3 px-4 font-semibold">خصومات أخرى</th>
+                        <th className="py-3 px-4 font-semibold">المكافآت</th>
+                        <th className="py-3 px-4 font-semibold">صافي المستحق</th>
+                        <th className="py-3 px-4 font-semibold">الصرف وإجراءات</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {sc.drivers.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="py-6 text-center text-slate-400">
+                            لا يوجد سائقون معينون لهذه المدرسة حالياً في شهر {month}/{year}.
+                          </td>
+                        </tr>
+                      ) : (
+                        sc.drivers.map((d) => (
+                          <tr key={d.id} className="hover:bg-slate-50/70">
+                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A]">
+                              {d.driverCode}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-900">{d.driverName}</div>
+                              <div className="text-[11px] text-slate-500">
+                                باص {d.busNumber}
+                                {d.routeName && d.routeName !== '—' ? ` · ${d.routeName}` : ''}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 font-mono font-semibold tabular-nums">
+                              {formatEGP(d.baseSalary)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                              {formatEGP(d.totalAdvances)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                              {formatEGP(d.totalCoverageDeductions)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                              {formatEGP(d.otherDeductions)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-emerald-700 tabular-nums">
+                              {formatEGP(d.bonuses)}
+                            </td>
+                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                              {formatEGP(d.netSalary)}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <div className="inline-flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
+                                  {[
+                                    { value: 'open' as const, label: 'قيد التشغيل' },
+                                    { value: 'approved' as const, label: 'معتمد' },
+                                    { value: 'paid' as const, label: 'تم الصرف' },
+                                  ].map((st) => (
+                                    <button
+                                      key={st.value}
+                                      type="button"
+                                      onClick={() => handleSalaryStatus(d.id, st.value)}
+                                      className={`rounded-md px-2 py-1 text-[10px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                                        d.status === st.value
+                                          ? 'bg-[#0B1F3A] text-white'
+                                          : 'text-slate-600 hover:text-slate-900'
+                                      }`}
+                                    >
+                                      {st.label}
+                                    </button>
+                                  ))}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAdvForm((f) => ({
+                                      ...f,
+                                      driverQuery: d.driverCode || d.driverName || '',
+                                    }));
+                                    setTab('advances');
+                                  }}
+                                  className="rounded-md border border-slate-200 bg-white hover:bg-slate-100 px-2 py-1 text-[10px] font-semibold text-[#0B1F3A] cursor-pointer"
+                                >
+                                  + سلفة
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAdjForm((f) => ({
+                                      ...f,
+                                      driverQuery: d.driverCode || d.driverName || '',
+                                    }));
+                                    setTab('salaries');
+                                  }}
+                                  className="rounded-md border border-slate-200 bg-white hover:bg-slate-100 px-2 py-1 text-[10px] font-semibold text-[#0B1F3A] cursor-pointer"
+                                >
+                                  تسوية
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    {sc.drivers.length > 0 && (
+                      <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-bold text-[#0B1F3A]">
+                        <tr>
+                          <td colSpan={2} className="py-3 px-4">
+                            إجمالي مدرسة {sc.schoolName} ({sc.driversCount} سائق)
+                          </td>
+                          <td className="py-3 px-4 font-mono tabular-nums">
+                            {formatEGP(sc.totalBaseSalaries)}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                            {formatEGP(sc.totalAdvances)}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                            {formatEGP(sc.totalCoverageDeductions)}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                            {formatEGP(sc.totalOtherDeductions)}
+                          </td>
+                          <td className="py-3 px-4 font-mono text-emerald-700 tabular-nums">
+                            {formatEGP(sc.totalBonuses)}
+                          </td>
+                          <td className="py-3 px-4 font-mono tabular-nums">
+                            {formatEGP(sc.totalNetSalaries)}
+                          </td>
+                          <td className="py-3 px-4 font-mono tabular-nums">
+                            <span
+                              className={
+                                sc.profit >= 0 ? 'text-emerald-700' : 'text-red-700'
+                              }
+                            >
+                              الربح: {formatEGP(sc.profit)}
+                            </span>
+                          </td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </section>
+            );
+          })}
+
+          {displayedSchoolsList.length > 0 && (
+            <div className="rounded-2xl bg-[#0B1F3A] text-white p-5 grid grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+              <div>
+                <div className="text-slate-300">الجمع الإجمالي للمدارس المعروضة</div>
+                <div className="font-display text-base font-bold text-white mt-1">
+                  {displayedSchoolsList.length} مدرسة
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-300">إجمالي قيمة العقود</div>
+                <div className="font-mono text-base font-bold text-[#C89B3C] mt-1 tabular-nums">
+                  {formatEGP(displayedSchoolsContractsSum)}
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-300">إجمالي الرواتب (الأساسي / الصافي)</div>
+                <div className="font-mono text-base font-bold text-white mt-1 tabular-nums">
+                  {formatEGP(displayedSchoolsSalariesSum)}
+                </div>
+                <div className="text-[11px] text-slate-300 font-mono tabular-nums">
+                  صافي: {formatEGP(displayedSchoolsNetSum)}
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-300">الجمع الإجمالي للأرباح</div>
+                <div
+                  className={`font-mono text-base font-bold mt-1 tabular-nums ${
+                    displayedSchoolsProfitSum >= 0 ? 'text-emerald-300' : 'text-red-300'
+                  }`}
+                >
+                  {formatEGP(displayedSchoolsProfitSum)}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {tab === 'salaries' && (
         <div className="space-y-6">
           {/* Quick Bonus / Other Deduction Form */}
@@ -714,6 +1428,21 @@ export const FinanceModule: React.FC = () => {
 
           {/* Salaries Table */}
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-bold text-[#0B1F3A]">
+                كشف رواتب السائقين ({filteredSalaries.length})
+                {selectedSchoolContract ? ` — ${selectedSchoolContract.schoolName}` : ''}
+              </span>
+              {selectedSchoolKey !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedSchoolKey('all')}
+                  className="text-xs font-semibold text-[#C89B3C] hover:underline cursor-pointer"
+                >
+                  عرض جميع المدارس
+                </button>
+              )}
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-right text-xs">
                 <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
@@ -736,8 +1465,14 @@ export const FinanceModule: React.FC = () => {
                         جاري الحساب...
                       </td>
                     </tr>
+                  ) : filteredSalaries.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="py-8 text-center text-slate-400">
+                        لا توجد رواتب مطابقة للتصفية الحالية
+                      </td>
+                    </tr>
                   ) : (
-                    data?.salaries.map((s) => (
+                    filteredSalaries.map((s) => (
                       <tr key={s.id} className="hover:bg-slate-50/70">
                         <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A]">
                           {s.driverCode}
@@ -792,6 +1527,34 @@ export const FinanceModule: React.FC = () => {
                     ))
                   )}
                 </tbody>
+                {filteredSalaries.length > 0 && (
+                  <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-bold text-[#0B1F3A]">
+                    <tr>
+                      <td colSpan={2} className="py-3 px-4">
+                        الجمع الإجمالي ({filteredSalaries.length} سائق)
+                      </td>
+                      <td className="py-3 px-4 font-mono tabular-nums">
+                        {formatEGP(filteredTotalBase)}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                        {formatEGP(filteredTotalAdvances)}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                        {formatEGP(filteredTotalCovDed)}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                        {formatEGP(filteredTotalOtherDed)}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-emerald-700 tabular-nums">
+                        {formatEGP(filteredTotalBonuses)}
+                      </td>
+                      <td className="py-3 px-4 font-mono tabular-nums">
+                        {formatEGP(filteredTotalNet)}
+                      </td>
+                      <td className="py-3 px-4 text-[11px] text-slate-500">إجمالي الكشف</td>
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           </div>
@@ -881,8 +1644,11 @@ export const FinanceModule: React.FC = () => {
           </form>
 
           <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
-              سجل السلف للشهر المحدد ({data?.advances.length || 0})
+            <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A] flex items-center justify-between gap-2">
+              <span>
+                سجل السلف للشهر المحدد ({filteredAdvances.length})
+                {selectedSchoolContract ? ` — ${selectedSchoolContract.schoolName}` : ''}
+              </span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-right text-xs">
@@ -896,14 +1662,14 @@ export const FinanceModule: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {!data?.advances.length ? (
+                  {!filteredAdvances.length ? (
                     <tr>
                       <td colSpan={5} className="py-8 text-center text-slate-400">
                         لا توجد سلف مسجلة لهذا الشهر
                       </td>
                     </tr>
                   ) : (
-                    data.advances.map((a) => (
+                    filteredAdvances.map((a) => (
                       <tr key={a.id} className={a.isReversed ? 'opacity-60' : ''}>
                         <td className="py-3 px-4 font-mono tabular-nums">{a.date}</td>
                         <td className="py-3 px-4">
@@ -957,6 +1723,19 @@ export const FinanceModule: React.FC = () => {
                     ))
                   )}
                 </tbody>
+                {filteredAdvances.length > 0 && (
+                  <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-bold text-[#0B1F3A]">
+                    <tr>
+                      <td colSpan={3} className="py-3 px-4">
+                        الجمع الإجمالي للسلف المعتمدة ({filteredAdvances.filter((a) => !a.isReversed).length} سلفة)
+                      </td>
+                      <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                        {formatEGP(activeAdvancesSum)}
+                      </td>
+                      <td className="py-3 px-4 text-[11px] text-slate-500">—</td>
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           </div>
@@ -1056,7 +1835,8 @@ export const FinanceModule: React.FC = () => {
 
           <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
-              سجل التغطيات للشهر المحدد ({data?.coverages.length || 0})
+              سجل التغطيات للشهر المحدد ({filteredCoverages.length})
+              {selectedSchoolContract ? ` — ${selectedSchoolContract.schoolName}` : ''}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-right text-xs">
@@ -1071,14 +1851,14 @@ export const FinanceModule: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {!data?.coverages.length ? (
+                  {!filteredCoverages.length ? (
                     <tr>
                       <td colSpan={6} className="py-8 text-center text-slate-400">
                         لا توجد تغطيات مسجلة لهذا الشهر
                       </td>
                     </tr>
                   ) : (
-                    data.coverages.map((c) => (
+                    filteredCoverages.map((c) => (
                       <tr key={c.id} className={c.isReversed ? 'opacity-60' : ''}>
                         <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
                         <td className="py-3 px-4">
@@ -1138,6 +1918,22 @@ export const FinanceModule: React.FC = () => {
                     ))
                   )}
                 </tbody>
+                {filteredCoverages.length > 0 && (
+                  <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-bold text-[#0B1F3A]">
+                    <tr>
+                      <td colSpan={3} className="py-3 px-4">
+                        الجمع الإجمالي للتغطيات النشطة ({filteredCoverages.filter((c) => !c.isReversed).length})
+                      </td>
+                      <td className="py-3 px-4 font-mono text-slate-900 tabular-nums">
+                        {formatEGP(activeCovCostSum)}
+                      </td>
+                      <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                        {formatEGP(activeCovDedSum)}
+                      </td>
+                      <td className="py-3 px-4 text-[11px] text-slate-500">—</td>
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           </div>
@@ -1165,7 +1961,7 @@ export const FinanceModule: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {data?.ledger.map((t) => (
+                {filteredLedger.map((t) => (
                   <tr key={t.id}>
                     <td className="py-3 px-4 font-mono text-slate-400">{t.id}</td>
                     <td className="py-3 px-4 font-mono text-slate-500 tabular-nums">
@@ -1186,6 +1982,27 @@ export const FinanceModule: React.FC = () => {
                   </tr>
                 ))}
               </tbody>
+              {filteredLedger.length > 0 && (
+                <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-bold text-[#0B1F3A]">
+                  <tr>
+                    <td colSpan={4} className="py-3 px-4">
+                      الجمع الإجمالي لدفتر الأستاذ ({filteredLedger.length} قيد)
+                    </td>
+                    <td className="py-3 px-4 font-mono text-[11px] tabular-nums">
+                      دائن: +{formatEGP(ledgerCreditSum)} · مدين: −{formatEGP(ledgerDebitSum)}
+                    </td>
+                    <td
+                      className={`py-3 px-4 font-mono tabular-nums ${
+                        ledgerCreditSum - ledgerDebitSum >= 0
+                          ? 'text-emerald-700'
+                          : 'text-red-700'
+                      }`}
+                    >
+                      الصافي: {formatEGP(ledgerCreditSum - ledgerDebitSum)}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         </div>

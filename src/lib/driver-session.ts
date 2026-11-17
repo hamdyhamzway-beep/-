@@ -24,7 +24,19 @@ const SUPERVISOR_PREFIX = 'sup_';
 const DEFAULT_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 days persistent session for installed app
 const REFRESH_THRESHOLD_MS = 150 * 24 * 60 * 60 * 1000; // Sliding refresh if <150 days remain
 
-function getSigningSecret(): Buffer {
+function getPrimarySigningSecret(): Buffer {
+  const rawSecret = [
+    process.env.DRIVER_AUTH_SECRET ||
+      process.env.SESSION_SECRET ||
+      'alwaleed-persistent-session-secret-v1',
+    firebaseConfig.projectId,
+    firebaseConfig.appId,
+  ].join(':');
+
+  return crypto.createHash('sha256').update(rawSecret).digest();
+}
+
+function getLegacySigningSecret(): Buffer {
   const rawSecret = [
     process.env.DRIVER_AUTH_SECRET ||
       process.env.SESSION_SECRET ||
@@ -36,6 +48,12 @@ function getSigningSecret(): Buffer {
   ].join(':');
 
   return crypto.createHash('sha256').update(rawSecret).digest();
+}
+
+function getAllValidSecrets(): Buffer[] {
+  const primary = getPrimarySigningSecret();
+  const legacy = getLegacySigningSecret();
+  return Buffer.compare(primary, legacy) === 0 ? [primary] : [primary, legacy];
 }
 
 export function normalizeArabicDigits(input: string): string {
@@ -79,7 +97,7 @@ export function normalizeEgyptPhone(raw: unknown): string {
 function signPayload<T extends object>(prefix: string, payload: T): string {
   const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
   const signature = crypto
-    .createHmac('sha256', getSigningSecret())
+    .createHmac('sha256', getPrimarySigningSecret())
     .update(payloadB64)
     .digest('base64url');
 
@@ -96,11 +114,6 @@ function verifySignedPayload<T>(token: string, prefix: string): T | null {
   const sigB64 = body.slice(dotIndex + 1);
   if (!payloadB64 || !sigB64) return null;
 
-  const expectedSig = crypto
-    .createHmac('sha256', getSigningSecret())
-    .update(payloadB64)
-    .digest();
-
   let actualSig: Buffer;
   try {
     actualSig = Buffer.from(sigB64, 'base64url');
@@ -108,7 +121,18 @@ function verifySignedPayload<T>(token: string, prefix: string): T | null {
     return null;
   }
 
-  if (actualSig.length !== expectedSig.length || !crypto.timingSafeEqual(actualSig, expectedSig)) {
+  const matched = getAllValidSecrets().some((secret) => {
+    const expectedSig = crypto
+      .createHmac('sha256', secret)
+      .update(payloadB64)
+      .digest();
+    return (
+      actualSig.length === expectedSig.length &&
+      crypto.timingSafeEqual(actualSig, expectedSig)
+    );
+  });
+
+  if (!matched) {
     return null;
   }
 

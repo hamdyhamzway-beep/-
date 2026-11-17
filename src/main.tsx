@@ -18,7 +18,20 @@ console.error = (...args: unknown[]) => {
   }
 };
 
-registerSW({ immediate: true });
+if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker
+    .getRegistrations()
+    .then((regs) => {
+      regs.forEach((reg) => {
+        if (reg.active?.scriptURL?.includes('dev-sw')) {
+          reg.unregister().catch(() => undefined);
+        }
+      });
+    })
+    .catch(() => undefined);
+} else {
+  registerSW({ immediate: false });
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

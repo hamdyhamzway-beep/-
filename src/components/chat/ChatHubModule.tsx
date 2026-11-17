@@ -82,6 +82,13 @@ export const ChatHubModule: React.FC<ChatHubModuleProps> = ({
     driverRecord?.fullName || supervisorRecord?.fullName || dbUser?.fullName || 'أنا';
   const myRole = driverRecord ? 'driver' : supervisorRecord ? 'supervisor' : dbUser?.roleSlug || currentRole;
 
+  useEffect(() => {
+    if (initialRoomKey) {
+      if (myRole === 'supervisor' && initialRoomKey === 'drivers_broadcast') return;
+      setActiveRoomKey(initialRoomKey);
+    }
+  }, [initialRoomKey, myRole]);
+
   // 1. Establish WebSocket Connection with automatic reconnection
   useEffect(() => {
     let active = true;
@@ -185,14 +192,20 @@ export const ChatHubModule: React.FC<ChatHubModuleProps> = ({
     try {
       const res = await apiFetch<{ ok: boolean; channels: ChatChannel[] }>('/api/chat/channels');
       if (res.channels) {
-        setChannels(res.channels);
+        const filtered =
+          myRole === 'supervisor'
+            ? res.channels.filter(
+                (c) => c.roomKey !== 'drivers_broadcast' && c.channelType !== 'drivers_broadcast'
+              )
+            : res.channels;
+        setChannels(filtered);
       }
     } catch (err: unknown) {
       console.warn('Error fetching channels:', err);
     } finally {
       setLoadingChannels(false);
     }
-  }, []);
+  }, [myRole]);
 
   useEffect(() => {
     fetchChannels();
@@ -470,11 +483,13 @@ export const ChatHubModule: React.FC<ChatHubModuleProps> = ({
         <div className="flex items-center gap-2.5 min-w-0">
           {onClose && (
             <button
+              type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer shrink-0"
-              title="رجوع"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-semibold cursor-pointer shrink-0"
+              title="العودة للقائمة السابقة"
             >
-              <ChevronLeft className="w-4 h-4" />
+              <ChevronLeft className="w-4 h-4 rotate-180" />
+              <span>رجوع</span>
             </button>
           )}
           <div className="w-9 h-9 rounded-xl bg-white/10 text-[#C89B3C] flex items-center justify-center shrink-0 border border-white/15">
@@ -573,8 +588,12 @@ export const ChatHubModule: React.FC<ChatHubModuleProps> = ({
                     </div>
 
                     <div className="flex items-center justify-between text-[11px] text-slate-500">
-                      <p className="truncate max-w-[180px]">{chan.lastMessageText || 'لا توجد رسائل بعد'}</p>
-                      {chan.channelType === 'broadcast' ? (
+                      <p className="truncate max-w-[170px]">{chan.lastMessageText || 'لا توجد رسائل بعد'}</p>
+                      {chan.channelType === 'drivers_broadcast' ? (
+                        <span className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded font-bold shrink-0">
+                          للسائقين فقط
+                        </span>
+                      ) : chan.channelType === 'broadcast' ? (
                         <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded font-semibold shrink-0">
                           عام
                         </span>
@@ -593,6 +612,16 @@ export const ChatHubModule: React.FC<ChatHubModuleProps> = ({
 
         {/* Right: Active Conversation Pane */}
         <div className="flex-1 flex flex-col min-w-0 bg-[#f8fafc] relative">
+          {activeRoomKey === 'drivers_broadcast' && (
+            <div className="bg-[#0B1F3A]/5 border-b border-slate-200 px-4 py-2 text-[11px] text-[#0B1F3A] flex items-center justify-between gap-2 shrink-0">
+              <span className="font-semibold">
+                قناة الرسائل الجماعية للسائقين — تصل لجميع السائقين فقط وتُستثنى المشرفات
+              </span>
+              <span className="font-mono text-[10px] text-emerald-700 font-bold">
+                للسائقين فقط
+              </span>
+            </div>
+          )}
           {/* Active Call Floating Banner */}
           {callActive && (
             <div className="bg-gradient-to-r from-emerald-600 to-teal-700 text-white px-4 py-2.5 flex items-center justify-between gap-3 text-xs shadow-md shrink-0">

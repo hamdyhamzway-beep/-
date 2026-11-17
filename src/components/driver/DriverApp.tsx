@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ArrowRight,
   Bell,
+  BellRing,
   Bus,
   Check,
+  CheckCheck,
   Clock,
   Compass,
   Gauge,
@@ -15,9 +18,12 @@ import {
   PauseCircle,
   Phone,
   PlayCircle,
+  RadioTower,
   RefreshCw,
   ShieldAlert,
   UserCheck,
+  Volume2,
+  VolumeX,
   Wallet,
   Wifi,
   WifiOff,
@@ -48,11 +54,29 @@ import {
   removePendingLicenseSync,
   saveCachedDriverProfile,
 } from '../../lib/local-store';
+import {
+  ensureDriverNotificationSwRegistered,
+  getAnnouncedNotificationIds,
+  getBgNotifyEnabled,
+  getBgVoiceEnabled,
+  getNotificationPermission,
+  isSpeechSynthesisAvailable,
+  playNotificationChime,
+  requestDriverNotificationPermission,
+  saveAnnouncedNotificationIds,
+  setBgNotifyEnabledPref,
+  setBgVoiceEnabledPref,
+  showSystemNotification,
+  speakArabicText,
+  speakNotificationsQueue,
+  stopArabicSpeech,
+} from '../../lib/background-notifications';
 import { AppLogoBackdrop } from '../AppLogoBackdrop';
 import { ChatHubModule } from '../chat/ChatHubModule';
 import { CompanyLegalFooter } from '../CompanyLegalFooter';
 import { DriverAvatar } from '../DriverAvatar';
 import { DriverLicensesSection } from '../DriverLicensesSection';
+import { MorningSpiritualRibbon } from '../MorningSpiritualRibbon';
 import { PWAInstallButton } from '../PWAInstall';
 import { SplashScreen } from '../SplashScreen';
 import splashScreenImg from '../../assets/images/alwaleed_splash_screen_1794752422708.jpg';
@@ -117,8 +141,56 @@ export const DriverApp: React.FC<{
   const { dbUser, driverRecord, logout } = useAuth();
   const now = new Date();
   const [activeTab, setActiveTab] = useState<DriverTab>('home');
+  const [tabHistory, setTabHistory] = useState<DriverTab[]>([]);
+  const [chatInitialRoomKey, setChatInitialRoomKey] = useState<string | undefined>(undefined);
   const [month, setMonth] = useState<number>(now.getMonth() + 1);
   const [year, setYear] = useState<number>(now.getFullYear());
+
+  const tabHistoryRef = useRef<DriverTab[]>([]);
+  tabHistoryRef.current = tabHistory;
+  const activeTabRef = useRef<DriverTab>('home');
+  activeTabRef.current = activeTab;
+
+  const navigateTab = useCallback((nextTab: DriverTab, chatRoomKey?: string) => {
+    if (chatRoomKey !== undefined) {
+      setChatInitialRoomKey(chatRoomKey);
+    }
+    if (nextTab !== activeTabRef.current) {
+      setTabHistory((prev) => [...prev.slice(-19), activeTabRef.current]);
+      setActiveTab(nextTab);
+      try {
+        window.history.pushState({ alwaleedDriverTab: nextTab }, '');
+      } catch {
+        // ignore history errors
+      }
+    }
+  }, []);
+
+  const goBackTab = useCallback(() => {
+    if (tabHistoryRef.current.length > 0) {
+      const next = [...tabHistoryRef.current];
+      const prevTab = next.pop()!;
+      setTabHistory(next);
+      setActiveTab(prevTab);
+    } else if (activeTabRef.current !== 'home') {
+      setActiveTab('home');
+    }
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (tabHistoryRef.current.length > 0) {
+        const next = [...tabHistoryRef.current];
+        const prevTab = next.pop()!;
+        setTabHistory(next);
+        setActiveTab(prevTab);
+      } else if (activeTabRef.current !== 'home') {
+        setActiveTab('home');
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   const [allDrivers, setAllDrivers] = useState<EnrichedDriver[]>([]);
   const [driversLoaded, setDriversLoaded] = useState(!allowDriverSelector);
@@ -165,6 +237,16 @@ export const DriverApp: React.FC<{
   const [speedSource, setSpeedSource] = useState<'doppler' | 'haversine' | 'stationary'>(
     'stationary'
   );
+
+  // Background Notifications & Voice Readout state
+  const [bgNotifyEnabled, setBgNotifyEnabled] = useState<boolean>(() => getBgNotifyEnabled());
+  const [bgVoiceEnabled, setBgVoiceEnabled] = useState<boolean>(() => getBgVoiceEnabled());
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>(() =>
+    getNotificationPermission()
+  );
+  const [isSpeakingNotifs, setIsSpeakingNotifs] = useState(false);
+  const [speakingNotifId, setSpeakingNotifId] = useState<number | null>(null);
+  const initialNotifSyncDoneRef = useRef<boolean>(false);
 
   const watchIdRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
@@ -300,6 +382,104 @@ export const DriverApp: React.FC<{
     loadDriverData();
     refreshQueueCounts();
   }, [month, year, allowDriverSelector, driversLoaded, selectedDriverId]);
+
+  // Register Service Worker & handle notification click deep-links
+  useEffect(() => {
+    if (allowDriverSelector) return;
+    ensureDriverNotificationSwRegistered();
+    setNotifPermission(getNotificationPermission());
+
+    const openNotifs = () => navigateTab('notifications');
+    window.addEventListener('alwaleed-open-notifications', openNotifs);
+
+    const onSwMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'OPEN_DRIVER_NOTIFICATIONS') {
+        navigateTab('notifications');
+      }
+    };
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', onSwMessage);
+    }
+
+    return () => {
+      window.removeEventListener('alwaleed-open-notifications', openNotifs);
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', onSwMessage);
+      }
+      stopArabicSpeech();
+    };
+  }, [allowDriverSelector, navigateTab]);
+
+  // Background polling every 15s + visibility/focus refresh so new notifications arrive in background
+  useEffect(() => {
+    if (allowDriverSelector) return;
+    const poll = () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      loadDriverData(true);
+    };
+    const intervalId = window.setInterval(poll, 15000);
+    const onFocusOrVisible = () => {
+      if (document.visibilityState === 'visible') {
+        poll();
+      }
+    };
+    window.addEventListener('focus', onFocusOrVisible);
+    document.addEventListener('visibilitychange', onFocusOrVisible);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', onFocusOrVisible);
+      document.removeEventListener('visibilitychange', onFocusOrVisible);
+    };
+  }, [allowDriverSelector, loadDriverData]);
+
+  // Announce newly arrived unread notifications in background (System Notification + Chime + Voice Readout)
+  useEffect(() => {
+    if (allowDriverSelector || !data?.driver?.id) return;
+    const list = data.notifications || [];
+    if (!list.length) {
+      initialNotifSyncDoneRef.current = true;
+      return;
+    }
+
+    const driverId = data.driver.id;
+    const announced = getAnnouncedNotificationIds(driverId);
+
+    // On very first boot for a driver with no history yet, seed existing old IDs
+    // so only genuinely new incoming notifications get spoken/pushed automatically.
+    if (!initialNotifSyncDoneRef.current && announced.size === 0) {
+      initialNotifSyncDoneRef.current = true;
+      const seeded = new Set(list.map((n) => n.id));
+      saveAnnouncedNotificationIds(driverId, seeded);
+      return;
+    }
+    initialNotifSyncDoneRef.current = true;
+
+    const freshUnread = list.filter((n) => !n.isRead && !announced.has(n.id));
+    if (freshUnread.length === 0) return;
+
+    freshUnread.forEach((n) => announced.add(n.id));
+    saveAnnouncedNotificationIds(driverId, announced);
+
+    if (!bgNotifyEnabled) return;
+
+    playNotificationChime();
+    if (notifPermission === 'granted') {
+      freshUnread.slice(0, 3).forEach((n) => {
+        showSystemNotification({ id: n.id, title: n.title, body: n.body });
+      });
+    }
+    if (bgVoiceEnabled && isSpeechSynthesisAvailable()) {
+      setIsSpeakingNotifs(true);
+      speakNotificationsQueue(freshUnread.slice(0, 3), () => setIsSpeakingNotifs(false));
+    }
+  }, [
+    allowDriverSelector,
+    data?.driver?.id,
+    data?.notifications,
+    bgNotifyEnabled,
+    bgVoiceEnabled,
+    notifPermission,
+  ]);
 
   const syncPendingItems = useCallback(async () => {
     if (allowDriverSelector || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
@@ -717,6 +897,88 @@ export const DriverApp: React.FC<{
     }
   };
 
+  const handleMarkAllNotificationsRead = async () => {
+    try {
+      await apiFetch('/api/notifications/mark-all-read', { method: 'POST' });
+      await loadDriverData(true);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleToggleBgNotify = async () => {
+    const next = !bgNotifyEnabled;
+    setBgNotifyEnabled(next);
+    setBgNotifyEnabledPref(next);
+    if (next && getNotificationPermission() === 'default') {
+      const perm = await requestDriverNotificationPermission();
+      setNotifPermission(perm);
+    }
+  };
+
+  const handleToggleBgVoice = () => {
+    const next = !bgVoiceEnabled;
+    setBgVoiceEnabled(next);
+    setBgVoiceEnabledPref(next);
+    if (!next) {
+      stopArabicSpeech();
+      setIsSpeakingNotifs(false);
+      setSpeakingNotifId(null);
+    }
+  };
+
+  const handleRequestNotifPermission = async () => {
+    const perm = await requestDriverNotificationPermission();
+    setNotifPermission(perm);
+    if (perm === 'granted') {
+      setBgNotifyEnabled(true);
+      setBgNotifyEnabledPref(true);
+      showSystemNotification({
+        title: 'تم تفعيل إشعارات الخلفية',
+        body: 'ستصلك تنبيهات الإدارة والرسائل الجماعية في الخلفية فور وصولها.',
+      });
+    }
+  };
+
+  const handleReadSingleNotification = (n: NotificationItem) => {
+    if (speakingNotifId === n.id) {
+      stopArabicSpeech();
+      setSpeakingNotifId(null);
+      setIsSpeakingNotifs(false);
+      return;
+    }
+    setSpeakingNotifId(n.id);
+    setIsSpeakingNotifs(true);
+    const ok = speakArabicText(`${n.title}. ${n.body}`, {
+      onEnd: () => {
+        setSpeakingNotifId(null);
+        setIsSpeakingNotifs(false);
+      },
+    });
+    if (!ok) {
+      setSpeakingNotifId(null);
+      setIsSpeakingNotifs(false);
+    }
+  };
+
+  const handleReadUnreadAloud = () => {
+    if (isSpeakingNotifs) {
+      stopArabicSpeech();
+      setIsSpeakingNotifs(false);
+      setSpeakingNotifId(null);
+      return;
+    }
+    const targets = (data?.notifications || []).filter((n) => !n.isRead);
+    const listToSpeak = targets.length > 0 ? targets : (data?.notifications || []).slice(0, 3);
+    if (!listToSpeak.length) return;
+    setIsSpeakingNotifs(true);
+    const ok = speakNotificationsQueue(listToSpeak, () => {
+      setIsSpeakingNotifs(false);
+      setSpeakingNotifId(null);
+    });
+    if (!ok) setIsSpeakingNotifs(false);
+  };
+
   const unreadCount = (data?.notifications || []).filter((n) => !n.isRead).length;
   const driver = data?.driver;
   const salary = data?.salary;
@@ -767,6 +1029,19 @@ export const DriverApp: React.FC<{
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {(activeTab !== 'home' || tabHistory.length > 0) && (
+              <button
+                type="button"
+                onClick={goBackTab}
+                title="العودة للقائمة السابقة دون الخروج"
+                className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 px-2.5 py-1.5 text-xs font-bold text-[#ebd089] transition-colors cursor-pointer"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">العودة للقائمة السابقة</span>
+                <span className="sm:hidden">رجوع</span>
+              </button>
+            )}
+
             {allowDriverSelector && allDrivers.length > 0 && (
               <select
                 value={selectedDriverId}
@@ -969,6 +1244,9 @@ export const DriverApp: React.FC<{
                   </div>
                 </section>
 
+                {/* Automatic Morning Quran & Hadith Section */}
+                <MorningSpiritualRibbon compact />
+
                 {/* Clean Operational Details (Hairline structured list - zero nested subcards) */}
                 <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
                   <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
@@ -1056,7 +1334,7 @@ export const DriverApp: React.FC<{
                       </button>
                     ) : (
                       <button
-                        onClick={() => setActiveTab('location')}
+                        onClick={() => navigateTab('location')}
                         className="min-h-[44px] rounded-xl bg-slate-100 hover:bg-slate-200 px-3.5 py-2 text-xs font-semibold text-[#0B1F3A] shrink-0 cursor-pointer"
                       >
                         تفاصيل التتبع
@@ -1111,18 +1389,84 @@ export const DriverApp: React.FC<{
                   onSavePhotos={handleSaveDriverLicenses}
                 />
 
+                {/* Quick Communication Shortcut */}
+                <section className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigateTab('chat', data.driver?.routeId ? `route_${data.driver.routeId}` : 'broadcast')
+                    }
+                    className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50 p-4 text-right transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-[#0B1F3A] text-[#C89B3C] flex items-center justify-center shrink-0">
+                        <MessageSquare className="w-5 h-5" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-[#0B1F3A] truncate">محادثة الإدارة والمشرفة</p>
+                        <p className="text-[11px] text-slate-500 truncate">رسائل نصية ورسائل صوتية واتصال</p>
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigateTab('chat', 'drivers_broadcast')}
+                    className="flex items-center justify-between gap-3 rounded-2xl border border-[#C89B3C]/40 bg-amber-50/70 hover:bg-amber-50 p-4 text-right transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-xl bg-[#C89B3C] text-[#0B1F3A] flex items-center justify-center shrink-0">
+                        <RadioTower className="w-5 h-5" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-[#0B1F3A] truncate">رسائل الإدارة للسائقين</p>
+                        <p className="text-[11px] text-amber-900 truncate">قناة التعليمات والتوجيهات الجماعية</p>
+                      </div>
+                    </div>
+                  </button>
+                </section>
+
                 {/* Recent Notifications Preview */}
                 <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-                  <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
                     <h2 className="font-display text-base font-bold text-[#0B1F3A]">
                       أحدث التنبيهات ({unreadCount} غير مقروء)
                     </h2>
-                    <button
-                      onClick={() => setActiveTab('notifications')}
-                      className="text-xs font-semibold text-[#C89B3C] hover:underline cursor-pointer"
-                    >
-                      عرض الكل
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {!allowDriverSelector && notifPermission === 'default' && (
+                        <button
+                          type="button"
+                          onClick={handleRequestNotifPermission}
+                          className="rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1 text-[11px] font-bold text-amber-900 hover:bg-amber-100 cursor-pointer"
+                        >
+                          تفعيل بالخلفية
+                        </button>
+                      )}
+                      {isSpeechSynthesisAvailable() && (data.notifications || []).length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleReadUnreadAloud}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] cursor-pointer"
+                        >
+                          {isSpeakingNotifs ? (
+                            <>
+                              <VolumeX className="w-3 h-3 text-red-600" />
+                              إيقاف
+                            </>
+                          ) : (
+                            <>
+                              <Volume2 className="w-3 h-3 text-[#C89B3C]" />
+                              قراءة صوتية
+                            </>
+                          )}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => navigateTab('notifications')}
+                        className="text-xs font-semibold text-[#C89B3C] hover:underline cursor-pointer"
+                      >
+                        عرض الكل
+                      </button>
+                    </div>
                   </div>
                   {(data.notifications || []).slice(0, 2).length === 0 ? (
                     <p className="px-5 py-4 text-xs text-slate-500">لا توجد إشعارات جديدة حالياً.</p>
@@ -1137,6 +1481,19 @@ export const DriverApp: React.FC<{
                         >
                           <p className="font-bold text-[#0B1F3A]">{n.title}</p>
                           <p className="mt-1 leading-relaxed">{n.body}</p>
+                          {n.type === 'drivers_broadcast' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!n.isRead) handleMarkNotificationRead(n.id);
+                                navigateTab('chat', 'drivers_broadcast');
+                              }}
+                              className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-bold text-[#C89B3C] hover:bg-[#13325c] cursor-pointer"
+                            >
+                              <RadioTower className="w-3 h-3" />
+                              فتح في قناة السائقين
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -1520,19 +1877,124 @@ export const DriverApp: React.FC<{
 
             {/* TAB 4: NOTIFICATIONS */}
             {activeTab === 'notifications' && (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <h1 className="font-display text-lg font-bold text-[#0B1F3A]">
                     الإشعارات والتنبيهات ({(data.notifications || []).length})
                   </h1>
-                  <button
-                    onClick={() => loadDriverData()}
-                    className="min-h-[40px] flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    تحديث
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {unreadCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleMarkAllNotificationsRead}
+                        className="min-h-[38px] inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                      >
+                        <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
+                        تحديد الكل كمقروء
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => loadDriverData()}
+                      className="min-h-[38px] flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      تحديث
+                    </button>
+                  </div>
                 </div>
+
+                {/* Background Notification & Voice Reader Controls */}
+                <section className="rounded-2xl border border-slate-200 bg-white p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-[#0B1F3A] text-[#C89B3C] flex items-center justify-center shrink-0">
+                        <BellRing className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <h2 className="font-display text-sm font-bold text-[#0B1F3A]">
+                          قراءة الإشعارات في الخلفية (تلقائياً)
+                        </h2>
+                        <p className="text-[11px] text-slate-500">
+                          مزامنة تلقائية للإشعارات في الخلفية مع قراءة صوتية عربية أثناء القيادة
+                        </p>
+                      </div>
+                    </div>
+
+                    {isSpeechSynthesisAvailable() && (data.notifications || []).length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleReadUnreadAloud}
+                        className={`min-h-[38px] inline-flex items-center gap-1.5 rounded-xl px-3.5 text-xs font-bold cursor-pointer transition-colors ${
+                          isSpeakingNotifs
+                            ? 'bg-red-600 text-white hover:bg-red-700'
+                            : 'bg-[#0B1F3A] text-white hover:bg-[#13325c]'
+                        }`}
+                      >
+                        {isSpeakingNotifs ? (
+                          <>
+                            <VolumeX className="w-3.5 h-3.5" />
+                            إيقاف القراءة الصوتية
+                          </>
+                        ) : (
+                          <>
+                            <Volume2 className="w-3.5 h-3.5 text-[#C89B3C]" />
+                            {unreadCount > 0
+                              ? `قراءة غير المقروء (${unreadCount})`
+                              : 'قراءة أحدث الإشعارات'}
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-slate-100 text-xs">
+                    <button
+                      type="button"
+                      onClick={handleToggleBgNotify}
+                      className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 font-semibold cursor-pointer transition-colors ${
+                        bgNotifyEnabled
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                          : 'border-slate-200 bg-slate-50 text-slate-600'
+                      }`}
+                    >
+                      <span>التنبيه التلقائي في الخلفية</span>
+                      <span>{bgNotifyEnabled ? 'مفعل' : 'متوقف'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleToggleBgVoice}
+                      className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 font-semibold cursor-pointer transition-colors ${
+                        bgVoiceEnabled
+                          ? 'border-amber-200 bg-amber-50 text-amber-950'
+                          : 'border-slate-200 bg-slate-50 text-slate-600'
+                      }`}
+                    >
+                      <span>القراءة الصوتية التلقائية للإشعارات</span>
+                      <span>{bgVoiceEnabled ? 'مفعل' : 'متوقف'}</span>
+                    </button>
+                  </div>
+
+                  {!allowDriverSelector && notifPermission !== 'granted' && notifPermission !== 'unsupported' && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50/70 px-3.5 py-2.5 text-xs text-amber-950">
+                      <span>
+                        {notifPermission === 'denied'
+                          ? 'تم حظر إشعارات المتصفح من إعدادات الجهاز — يمكن تفعيلها من إعدادات الموقع في المتصفح.'
+                          : 'فعّل إذن إشعارات النظام ليصلك التنبيه في شريط الهاتف حتى عند تصغير التطبيق.'}
+                      </span>
+                      {notifPermission === 'default' && (
+                        <button
+                          type="button"
+                          onClick={handleRequestNotifPermission}
+                          className="rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-3 py-1.5 text-[11px] font-bold text-[#C89B3C] cursor-pointer shrink-0"
+                        >
+                          تفعيل إشعارات الهاتف
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </section>
 
                 {(data.notifications || []).length === 0 ? (
                   <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-sm text-slate-500">
@@ -1550,20 +2012,60 @@ export const DriverApp: React.FC<{
                     >
                       <div className="flex items-start justify-between gap-3">
                         <h3 className="text-sm font-bold text-[#0B1F3A]">{n.title}</h3>
-                        {!n.isRead && (
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {isSpeechSynthesisAvailable() && (
+                            <button
+                              type="button"
+                              onClick={() => handleReadSingleNotification(n)}
+                              className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-semibold cursor-pointer ${
+                                speakingNotifId === n.id
+                                  ? 'border-red-200 bg-red-50 text-red-700'
+                                  : 'border-slate-200 bg-white text-[#0B1F3A] hover:bg-slate-50'
+                              }`}
+                            >
+                              {speakingNotifId === n.id ? (
+                                <>
+                                  <VolumeX className="w-3 h-3" />
+                                  إيقاف
+                                </>
+                              ) : (
+                                <>
+                                  <Volume2 className="w-3 h-3 text-[#C89B3C]" />
+                                  استماع
+                                </>
+                              )}
+                            </button>
+                          )}
+                          {!n.isRead && (
+                            <button
+                              onClick={() => handleMarkNotificationRead(n.id)}
+                              className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                            >
+                              <Check className="w-3 h-3" />
+                              تمت القراءة
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-700 leading-relaxed">{n.body}</p>
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <p className="text-[11px] text-slate-400">
+                          {formatRelativeArabicTime(n.createdAt)}
+                        </p>
+                        {n.type === 'drivers_broadcast' && (
                           <button
-                            onClick={() => handleMarkNotificationRead(n.id)}
-                            className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] shrink-0 cursor-pointer"
+                            type="button"
+                            onClick={() => {
+                              if (!n.isRead) handleMarkNotificationRead(n.id);
+                              navigateTab('chat', 'drivers_broadcast');
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] px-3 py-1 text-[11px] font-bold text-[#C89B3C] hover:bg-[#13325c] cursor-pointer"
                           >
-                            <Check className="w-3 h-3" />
-                            تمت القراءة
+                            <RadioTower className="w-3 h-3" />
+                            فتح رسالة الإدارة
                           </button>
                         )}
                       </div>
-                      <p className="text-xs text-slate-700 leading-relaxed">{n.body}</p>
-                      <p className="text-[11px] text-slate-400">
-                        {formatRelativeArabicTime(n.createdAt)}
-                      </p>
                     </div>
                   ))
                 )}
@@ -1574,8 +2076,11 @@ export const DriverApp: React.FC<{
               <div className="space-y-3">
                 <ChatHubModule
                   currentRole="driver"
-                  initialRoomKey={data.driver?.routeId ? `route_${data.driver.routeId}` : 'broadcast'}
+                  initialRoomKey={
+                    chatInitialRoomKey || (data.driver?.routeId ? `route_${data.driver.routeId}` : 'broadcast')
+                  }
                   compact={false}
+                  onClose={goBackTab}
                 />
               </div>
             )}
@@ -1593,7 +2098,7 @@ export const DriverApp: React.FC<{
       <nav className="fixed bottom-0 inset-x-0 z-30 h-16 bg-white border-t border-slate-200">
         <div className="max-w-3xl mx-auto h-full grid grid-cols-5">
           <button
-            onClick={() => setActiveTab('home')}
+            onClick={() => navigateTab('home')}
             className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'home' ? 'text-[#0B1F3A]' : 'text-slate-400 hover:text-slate-600'
             }`}
@@ -1603,7 +2108,7 @@ export const DriverApp: React.FC<{
           </button>
 
           <button
-            onClick={() => setActiveTab('finance')}
+            onClick={() => navigateTab('finance')}
             className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'finance' ? 'text-[#0B1F3A]' : 'text-slate-400 hover:text-slate-600'
             }`}
@@ -1613,7 +2118,7 @@ export const DriverApp: React.FC<{
           </button>
 
           <button
-            onClick={() => setActiveTab('chat')}
+            onClick={() => navigateTab('chat')}
             className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'chat' ? 'text-[#0B1F3A]' : 'text-slate-400 hover:text-slate-600'
             }`}
@@ -1623,7 +2128,7 @@ export const DriverApp: React.FC<{
           </button>
 
           <button
-            onClick={() => setActiveTab('location')}
+            onClick={() => navigateTab('location')}
             className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'location' ? 'text-[#0B1F3A]' : 'text-slate-400 hover:text-slate-600'
             }`}
@@ -1633,7 +2138,7 @@ export const DriverApp: React.FC<{
           </button>
 
           <button
-            onClick={() => setActiveTab('notifications')}
+            onClick={() => navigateTab('notifications')}
             className={`relative min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'notifications'
                 ? 'text-[#0B1F3A]'

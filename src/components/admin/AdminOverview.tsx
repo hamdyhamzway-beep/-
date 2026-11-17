@@ -13,6 +13,7 @@ import {
   Mic,
   Phone,
   Plus,
+  RadioTower,
   RefreshCw,
   Search,
   Send,
@@ -42,8 +43,10 @@ import {
 import { BrandLogo } from '../BrandLogo';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import { DriverAvatar } from '../DriverAvatar';
+import { DriverBroadcastModal } from './DriverBroadcastModal';
 import { DriverLicensesSection } from '../DriverLicensesSection';
 import { DriverPhotoUploader } from '../DriverPhotoUploader';
+import { MorningSpiritualRibbon } from '../MorningSpiritualRibbon';
 import splashScreenImg from '../../assets/images/alwaleed_splash_screen_1794752422708.jpg';
 import travelBackdropImg from '../../assets/images/alwaleed_travel_backdrop_1794752421692.jpg';
 import type {
@@ -99,7 +102,7 @@ interface DriverStatementResponse {
 }
 
 export const AdminOverview: React.FC<{
-  onNavigate: (tab: string) => void;
+  onNavigate: (tab: string, chatRoomKey?: string) => void;
 }> = ({ onNavigate }) => {
   const now = new Date();
   const today = getLocalTodayDateString();
@@ -108,6 +111,7 @@ export const AdminOverview: React.FC<{
   const [year, setYear] = useState(now.getFullYear());
   const initialPeriodSyncedRef = useRef(false);
   const [showCloseMonthModal, setShowCloseMonthModal] = useState(false);
+  const [showDriversBroadcastModal, setShowDriversBroadcastModal] = useState(false);
   const [closeMonthNotes, setCloseMonthNotes] = useState('');
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -357,6 +361,13 @@ export const AdminOverview: React.FC<{
     setActionErr(null);
     setWhatsappHref(null);
     setQuickSwitchLookup('');
+    if (!selectedDriverId && typeof window !== 'undefined') {
+      try {
+        window.history.pushState({ alwaleedDriverWorkspace: d.id }, '');
+      } catch {
+        // ignore
+      }
+    }
     if (d.id === selectedDriverId) {
       loadDriverPage(d.id, month, year);
     } else {
@@ -364,6 +375,19 @@ export const AdminOverview: React.FC<{
       setSelectedDriverId(d.id);
     }
   };
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (selectedDriverId) {
+        setSelectedDriverId(null);
+        setStatement(null);
+        setActionMsg(null);
+        setActionErr(null);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [selectedDriverId]);
 
   const refreshAllForDriver = async (driverId: number) => {
     await Promise.all([loadDashboard(), loadDriverPage(driverId, month, year)]);
@@ -896,6 +920,15 @@ export const AdminOverview: React.FC<{
 
             <button
               type="button"
+              onClick={() => setShowDriversBroadcastModal(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-emerald-400/50 bg-emerald-500/20 hover:bg-emerald-500/30 px-3 py-2 text-xs font-bold text-emerald-100 cursor-pointer whitespace-nowrap"
+            >
+              <RadioTower className="w-3.5 h-3.5 text-emerald-300" />
+              رسائل جماعية للسائقين
+            </button>
+
+            <button
+              type="button"
               onClick={() => onNavigate('voice')}
               className="flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer whitespace-nowrap"
             >
@@ -940,6 +973,8 @@ export const AdminOverview: React.FC<{
         )}
         </div>
       </section>
+
+      {!selectedDriverId && <MorningSpiritualRibbon />}
 
       {error && (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2">
@@ -2012,7 +2047,15 @@ export const AdminOverview: React.FC<{
                   اضغط على أي سائق لفتح صفحته وتعديل بياناته وإضافة أو تعديل السلف والتغطيات والمكافآت
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDriversBroadcastModal(true)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 px-3.5 py-2 text-xs font-bold text-white cursor-pointer"
+                >
+                  <RadioTower className="w-3.5 h-3.5" />
+                  رسائل جماعية للسائقين
+                </button>
                 <button
                   type="button"
                   onClick={() => onNavigate('drivers')}
@@ -2786,6 +2829,11 @@ export const AdminOverview: React.FC<{
           </div>
         </div>
       )}
+      <DriverBroadcastModal
+        open={showDriversBroadcastModal}
+        onClose={() => setShowDriversBroadcastModal(false)}
+        onOpenDriversChat={() => onNavigate('chat', 'drivers_broadcast')}
+      />
     </div>
   );
 };

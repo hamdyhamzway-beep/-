@@ -1,10 +1,11 @@
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { onAuthStateChanged, onIdTokenChanged, signInWithPopup, signOut, User } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase';
 import {
   ApiHttpError,
   apiFetch,
   getDriverSessionToken,
+  restoreDriverSessionToken,
   setDriverSessionToken,
 } from '../lib/api';
 import {
@@ -56,6 +57,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  const manualLoginInProgressRef = useRef(false);
+
   const clearSessionState = useCallback(async () => {
     setDriverSessionToken(null);
     setIsCodeSession(false);
@@ -93,8 +96,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch (err: unknown) {
         const status = err instanceof ApiHttpError ? err.status : 0;
 
+        // If Firebase session got 401 once, force-refresh token and try /api/me once more before failing
+        if (!isTokenSession && status === 401 && auth.currentUser) {
+          try {
+            await auth.currentUser.getIdToken(true);
+            const retryData = await apiFetch<{
+              user: DbUser;
+              driver: DriverSessionIdentity | null;
+              supervisor: SupervisorSessionIdentity | null;
+            }>('/api/me');
+            setDbUser(retryData.user);
+            setDriverRecord(retryData.driver);
+            setSupervisorRecord(retryData.supervisor || null);
+            setAuthError(null);
+            await saveCachedSession({
+              dbUser: retryData.user,
+              driverRecord: retryData.driver,
+              supervisorRecord: retryData.supervisor || null,
+            });
+            return true;
+          } catch {
+            // Fall through to confirmed failure handling below
+          }
+        }
+
         // Only wipe persistent local session on confirmed invalid/revoked credentials (401/403).
-        // Never wipe on offline boot (status 0) or transient server errors (5xx).
+        // Never wipe on offline boot (status 0) or transient server errors (5xx / 503).
         if (status === 401 || status === 403) {
           if (isTokenSession) {
             await clearSessionState();
@@ -107,7 +134,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return false;
         }
 
-        // Fallback to cached session when network/server is temporarily unreachable
+        // Fallback to cached session when network/server is temporarily unreachable (0 or 5xx)
         const cached = await getCachedSession();
         if (cached && cached.dbUser) {
           setDbUser(cached.dbUser);
@@ -126,14 +153,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [clearSessionState]
   );
 
-  // Instant hydration from IndexedDB cache on mount for seamless zero-flicker auto-login
+  // Instant hydration from IndexedDB cache on mount (including token recovery if localStorage was cleared)
   useEffect(() => {
     let active = true;
     (async () => {
-      const hasToken = Boolean(getDriverSessionToken());
+      const recoveredToken = await restoreDriverSessionToken();
+      if (!active) return;
+      if (recoveredToken) {
+        setIsCodeSession(true);
+      }
       const cached = await getCachedSession();
       if (!active || !cached?.dbUser) return;
-      if (hasToken || auth.currentUser) {
+      if (recoveredToken || auth.currentUser) {
         setDbUser((prev) => prev || cached.dbUser);
         setDriverRecord((prev) => prev || cached.driverRecord);
         setSupervisorRecord((prev) => prev || cached.supervisorRecord || null);
@@ -145,25 +176,72 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsubAuth = onAuthStateChanged(auth, async (user) => {
+      if (manualLoginInProgressRef.current) {
+        return;
+      }
       setFirebaseUser(user);
       if (user) {
         setDriverSessionToken(null);
         setIsCodeSession(false);
         await fetchDbProfile(false);
-      } else if (getDriverSessionToken()) {
-        setIsCodeSession(true);
-        await fetchDbProfile(true);
       } else {
-        setIsCodeSession(false);
-        setDbUser(null);
-        setDriverRecord(null);
-        setSupervisorRecord(null);
+        const codeToken = await restoreDriverSessionToken();
+        if (codeToken) {
+          setIsCodeSession(true);
+          await fetchDbProfile(true);
+        } else {
+          setIsCodeSession(false);
+          setDbUser(null);
+          setDriverRecord(null);
+          setSupervisorRecord(null);
+        }
       }
       setLoading(false);
     });
-    return () => unsub();
+
+    // Keep Firebase user object synced cleanly when Firebase rotates ID tokens silently
+    const unsubToken = onIdTokenChanged(auth, (user) => {
+      if (manualLoginInProgressRef.current) return;
+      if (user) {
+        setFirebaseUser(user);
+      }
+    });
+
+    return () => {
+      unsubAuth();
+      unsubToken();
+    };
   }, [fetchDbProfile]);
+
+  // Proactive Firebase ID token keep-alive (prevents 1-hour expiry logout after idle or mobile sleep)
+  useEffect(() => {
+    if (!firebaseUser) return;
+
+    const refreshFirebaseTokenSilently = () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      firebaseUser.getIdToken(true).catch(() => {
+        // Ignore transient network errors; apiFetch & offline cache handle temporary disconnects
+      });
+    };
+
+    const intervalId = window.setInterval(refreshFirebaseTokenSilently, 35 * 60 * 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        refreshFirebaseTokenSilently();
+      }
+    };
+    const onOnline = () => refreshFirebaseTokenSilently();
+
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onOnline);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [firebaseUser]);
 
   const clearAuthError = useCallback(() => setAuthError(null), []);
 
@@ -196,6 +274,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const loginDriverWithPhoneCode = async (identifier: string, driverCode: string) => {
     setAuthError(null);
+    manualLoginInProgressRef.current = true;
     try {
       const res = await fetch('/api/auth/driver-login', {
         method: 'POST',
@@ -211,8 +290,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       setDriverSessionToken(data.token);
       if (auth.currentUser) {
-        await signOut(auth);
+        await signOut(auth).catch(() => undefined);
       }
+      setFirebaseUser(null);
       setIsCodeSession(true);
       setDbUser(data.user);
       setDriverRecord(data.driver);
@@ -228,11 +308,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         err instanceof Error ? err.message : 'تعذر تسجيل الدخول برقم الموبايل أو الاسم والكود';
       setAuthError(msg);
       throw err;
+    } finally {
+      manualLoginInProgressRef.current = false;
     }
   };
 
   const loginSupervisorWithPhoneCode = async (identifier: string, supervisorCode: string) => {
     setAuthError(null);
+    manualLoginInProgressRef.current = true;
     try {
       const res = await fetch('/api/auth/supervisor-login', {
         method: 'POST',
@@ -248,8 +331,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       setDriverSessionToken(data.token);
       if (auth.currentUser) {
-        await signOut(auth);
+        await signOut(auth).catch(() => undefined);
       }
+      setFirebaseUser(null);
       setIsCodeSession(true);
       setDbUser(data.user);
       setDriverRecord(null);
@@ -265,6 +349,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         err instanceof Error ? err.message : 'تعذر تسجيل دخول المشرفة برقم الموبايل أو الاسم والكود';
       setAuthError(msg);
       throw err;
+    } finally {
+      manualLoginInProgressRef.current = false;
     }
   };
 

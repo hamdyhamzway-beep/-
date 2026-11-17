@@ -9,6 +9,7 @@ import {
   Loader2,
   MessageCircle,
   Plus,
+  RadioTower,
   Search,
   Trash2,
   Edit3,
@@ -33,6 +34,7 @@ import {
 } from '../../lib/whatsapp-statement';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import { DriverAvatar } from '../DriverAvatar';
+import { DriverBroadcastModal } from './DriverBroadcastModal';
 import { DriverLicensesSection } from '../DriverLicensesSection';
 import { DriverPhotoUploader } from '../DriverPhotoUploader';
 import type {
@@ -53,12 +55,15 @@ interface StatementResponse {
   transactions: FinancialTransaction[];
 }
 
-export const DriversModule: React.FC = () => {
+export const DriversModule: React.FC<{
+  onOpenDriversChat?: () => void;
+}> = ({ onOpenDriversChat }) => {
   const [driversList, setDriversList] = useState<EnrichedDriver[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [showBroadcastModal, setShowBroadcastModal] = useState(false);
 
   // Add/Edit Modal
   const [showForm, setShowForm] = useState(false);
@@ -712,13 +717,23 @@ export const DriversModule: React.FC = () => {
             السائقون النشطون، تعديل البيانات، إدارة السلف والتغطيات لكل سائق، وكشوف الحساب الشهرية
           </p>
         </div>
-        <button
-          onClick={openAdd}
-          className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap shrink-0"
-        >
-          <Plus className="w-4 h-4 text-[#C89B3C]" />
-          إضافة سائق جديد
-        </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowBroadcastModal(true)}
+            className="flex items-center gap-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 px-4 py-2.5 text-xs font-bold text-white cursor-pointer whitespace-nowrap"
+          >
+            <RadioTower className="w-4 h-4" />
+            رسائل جماعية للسائقين
+          </button>
+          <button
+            onClick={openAdd}
+            className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
+          >
+            <Plus className="w-4 h-4 text-[#C89B3C]" />
+            إضافة سائق جديد
+          </button>
+        </div>
       </div>
 
       {/* Search */}
@@ -2184,6 +2199,11 @@ export const DriversModule: React.FC = () => {
           </div>
         </div>
       )}
+      <DriverBroadcastModal
+        open={showBroadcastModal}
+        onClose={() => setShowBroadcastModal(false)}
+        onOpenDriversChat={onOpenDriversChat}
+      />
     </div>
   );
 };

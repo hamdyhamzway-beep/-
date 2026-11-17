@@ -38,7 +38,7 @@ import { SupervisorsModule } from './components/admin/SupervisorsModule';
 import { DriverApp } from './components/driver/DriverApp';
 import { SupervisorApp } from './components/supervisor/SupervisorApp';
 import { ChatHubModule } from './components/chat/ChatHubModule';
-import { ArrowRight, MessageSquare, RadioTower, UserCheck } from 'lucide-react';
+import { ArrowRight, MessageSquare, UserCheck } from 'lucide-react';
 
 type AdminTabId =
   | 'overview'
@@ -64,12 +64,42 @@ interface NavItem {
 const AppShell: React.FC = () => {
   const { isAuthenticated, dbUser, loading, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<AdminTabId>('overview');
+  const [tabHistory, setTabHistory] = useState<AdminTabId[]>([]);
+  const [chatInitialRoomKey, setChatInitialRoomKey] = useState<string>('broadcast');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [adminMode, setAdminMode] = useState<'admin' | 'driver_preview' | 'supervisor_preview'>(
     'admin'
   );
   const [previewSupervisorId, setPreviewSupervisorId] = useState<string>('');
   const [splashElapsed, setSplashElapsed] = useState(false);
+
+  const tabHistoryRef = React.useRef<AdminTabId[]>([]);
+  tabHistoryRef.current = tabHistory;
+  const activeTabRef = React.useRef<AdminTabId>('overview');
+  activeTabRef.current = activeTab;
+  const adminModeRef = React.useRef<'admin' | 'driver_preview' | 'supervisor_preview'>('admin');
+  adminModeRef.current = adminMode;
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (adminModeRef.current !== 'admin') {
+        setAdminMode('admin');
+        return;
+      }
+      if (tabHistoryRef.current.length > 0) {
+        const nextHistory = [...tabHistoryRef.current];
+        const prevTab = nextHistory.pop()!;
+        setTabHistory(nextHistory);
+        setActiveTab(prevTab);
+        return;
+      }
+      if (activeTabRef.current !== 'overview') {
+        setActiveTab('overview');
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSplashElapsed(true), 750);
@@ -251,12 +281,43 @@ const AppShell: React.FC = () => {
 
   const currentTabLabel = visibleNav.find((n) => n.id === activeTab)?.label || 'لوحة التحكم';
 
-  const handleNavigate = (tab: string) => {
+  const handleNavigate = (tab: string, chatRoomKey?: string) => {
     const match = visibleNav.find((n) => n.id === tab);
+    if (chatRoomKey) {
+      setChatInitialRoomKey(chatRoomKey);
+    }
     if (match) {
-      setActiveTab(match.id);
+      if (match.id !== activeTab) {
+        setTabHistory((prev) => [...prev.slice(-19), activeTab]);
+        setActiveTab(match.id);
+        try {
+          window.history.pushState({ alwaleedAdminTab: match.id }, '');
+        } catch {
+          // ignore history errors
+        }
+      }
       setMobileMenuOpen(false);
     }
+  };
+
+  const handleGoBack = () => {
+    if (tabHistory.length > 0) {
+      const nextHistory = [...tabHistory];
+      const prevTab = nextHistory.pop()!;
+      setTabHistory(nextHistory);
+      setActiveTab(prevTab);
+    } else if (activeTab !== 'overview') {
+      setActiveTab('overview');
+    }
+  };
+
+  const enterPreviewMode = (mode: 'driver_preview' | 'supervisor_preview') => {
+    try {
+      window.history.pushState({ alwaleedAdminMode: mode }, '');
+    } catch {
+      // ignore
+    }
+    setAdminMode(mode);
   };
 
   return (
@@ -310,14 +371,14 @@ const AppShell: React.FC = () => {
           {isSuperAdmin && (
             <div className="space-y-2">
               <button
-                onClick={() => setAdminMode('driver_preview')}
+                onClick={() => enterPreviewMode('driver_preview')}
                 className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 hover:bg-white/10 px-3 py-2 text-xs font-semibold text-white cursor-pointer"
               >
                 <Smartphone className="w-4 h-4 text-[#C89B3C]" />
                 معاينة تطبيق السائق
               </button>
               <button
-                onClick={() => setAdminMode('supervisor_preview')}
+                onClick={() => enterPreviewMode('supervisor_preview')}
                 className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 hover:bg-white/10 px-3 py-2 text-xs font-semibold text-white cursor-pointer"
               >
                 <MapPin className="w-4 h-4 text-[#C89B3C]" />
@@ -399,7 +460,7 @@ const AppShell: React.FC = () => {
                   <button
                     onClick={() => {
                       setMobileMenuOpen(false);
-                      setAdminMode('driver_preview');
+                      enterPreviewMode('driver_preview');
                     }}
                     className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2.5 text-xs font-semibold text-white"
                   >
@@ -409,7 +470,7 @@ const AppShell: React.FC = () => {
                   <button
                     onClick={() => {
                       setMobileMenuOpen(false);
-                      setAdminMode('supervisor_preview');
+                      enterPreviewMode('supervisor_preview');
                     }}
                     className="w-full flex items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/5 px-3 py-2.5 text-xs font-semibold text-white"
                   >
@@ -443,6 +504,18 @@ const AppShell: React.FC = () => {
             >
               <Menu className="w-5 h-5" />
             </button>
+            {(tabHistory.length > 0 || activeTab !== 'overview') && (
+              <button
+                type="button"
+                onClick={handleGoBack}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-bold text-[#0B1F3A] shrink-0 cursor-pointer transition-colors"
+                title="العودة للقائمة السابقة دون الخروج"
+              >
+                <ArrowRight className="w-3.5 h-3.5 text-[#C89B3C]" />
+                <span className="hidden sm:inline">العودة للقائمة السابقة</span>
+                <span className="sm:hidden">رجوع</span>
+              </button>
+            )}
             <span className="font-display text-base font-bold text-[#0B1F3A] truncate">
               {currentTabLabel}
             </span>
@@ -461,12 +534,16 @@ const AppShell: React.FC = () => {
 
         <main className="app-glass-cards flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto">
           {activeTab === 'overview' && <AdminOverview onNavigate={handleNavigate} />}
-          {activeTab === 'drivers' && <DriversModule />}
+          {activeTab === 'drivers' && (
+            <DriversModule
+              onOpenDriversChat={() => handleNavigate('chat', 'drivers_broadcast')}
+            />
+          )}
           {activeTab === 'supervisors' && (
             <SupervisorsModule
               onPreviewSupervisor={(supId) => {
                 setPreviewSupervisorId(String(supId));
-                setAdminMode('supervisor_preview');
+                enterPreviewMode('supervisor_preview');
               }}
             />
           )}
@@ -474,7 +551,13 @@ const AppShell: React.FC = () => {
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
           {activeTab === 'finance' && <FinanceModule />}
           {activeTab === 'map' && <LiveMapModule />}
-          {activeTab === 'chat' && <ChatHubModule currentRole="admin" />}
+          {activeTab === 'chat' && (
+            <ChatHubModule
+              currentRole="admin"
+              initialRoomKey={chatInitialRoomKey}
+              onClose={handleGoBack}
+            />
+          )}
           {activeTab === 'voice' && <VoiceAssistantModule />}
           {activeTab === 'reports' && <ReportsModule />}
           {activeTab === 'archive' && <ArchiveModule />}
@@ -489,6 +572,47 @@ const AppShell: React.FC = () => {
   );
 };
 
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          dir="rtl"
+          className="min-h-screen bg-[#0B1F3A] text-white flex items-center justify-center p-6"
+        >
+          <div className="max-w-md w-full rounded-2xl bg-white text-[#0B1F3A] p-6 text-center space-y-4 shadow-2xl">
+            <AlertTriangle className="w-10 h-10 text-[#C89B3C] mx-auto" />
+            <h2 className="font-display text-lg font-bold">حدث تعارض مؤقت في العرض</h2>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              تم حفظ جلستك ولن يتم تسجيل الخروج. اضغط على الزر أدناه لإعادة تنشيط الشاشة الحالية.
+            </p>
+            <button
+              type="button"
+              onClick={() => this.setState({ hasError: false })}
+              className="w-full rounded-xl bg-[#0B1F3A] text-white py-2.5 text-sm font-bold hover:bg-[#13325c] cursor-pointer"
+            >
+              العودة للبرنامج
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [quotaExceeded, setQuotaExceeded] = useState(false);
 
@@ -499,31 +623,33 @@ export default function App() {
   }, []);
 
   return (
-    <AuthProvider>
-      {quotaExceeded && (
-        <div
-          role="alert"
-          className="sticky top-0 z-50 bg-amber-600 text-white px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3"
-        >
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>
-              تم تجاوز حصة مفتاح خرائط جوجل التجريبي. لاستمرار التتبع المباشر بدون انقطاع، يرجى
-              الربط بمشروع Google Cloud الخاص بك:
-            </span>
-          </div>
-          <a
-            href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
-            target="_blank"
-            rel="noreferrer"
-            className="underline font-bold whitespace-nowrap"
+    <AppErrorBoundary>
+      <AuthProvider>
+        {quotaExceeded && (
+          <div
+            role="alert"
+            className="sticky top-0 z-50 bg-amber-600 text-white px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3"
           >
-            دليل حل مشكلة الحصة (Quota Guide)
-          </a>
-        </div>
-      )}
-      <OfflineIndicator />
-      <AppShell />
-    </AuthProvider>
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                تم تجاوز حصة مفتاح خرائط جوجل التجريبي. لاستمرار التتبع المباشر بدون انقطاع، يرجى
+                الربط بمشروع Google Cloud الخاص بك:
+              </span>
+            </div>
+            <a
+              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+              target="_blank"
+              rel="noreferrer"
+              className="underline font-bold whitespace-nowrap"
+            >
+              دليل حل مشكلة الحصة (Quota Guide)
+            </a>
+          </div>
+        )}
+        <OfflineIndicator />
+        <AppShell />
+      </AuthProvider>
+    </AppErrorBoundary>
   );
 }

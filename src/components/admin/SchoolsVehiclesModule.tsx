@@ -1,12 +1,30 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Building2, Bus, Edit3, Plus, Route, Trash2, User, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowRight,
+  Building2,
+  Bus,
+  Edit3,
+  Plus,
+  Route,
+  Trash2,
+  User,
+  Users,
+  Wallet,
+  X,
+} from 'lucide-react';
 import { apiFetch, formatArabicTripTime, formatEGP, normalizeTimeInputValue } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import type { FleetVehicle, RouteItem, SchoolItem, VehicleOwner } from '../../types';
 
+type SubTabId = 'schools' | 'vehicles' | 'owners' | 'routes';
+
 export const SchoolsVehiclesModule: React.FC = () => {
-  const [tab, setTab] = useState<'schools' | 'vehicles' | 'owners' | 'routes'>('schools');
+  const [tab, setTab] = useState<SubTabId>('schools');
+  const [tabHistory, setTabHistory] = useState<Array<{ tab: SubTabId; schoolId: number | 'all' }>>([]);
+  const [selectedSchoolId, setSelectedSchoolId] = useState<number | 'all'>('all');
+  const [billingPeriod, setBillingPeriod] = useState<{ month: number; year: number } | null>(null);
   const [schoolsList, setSchoolsList] = useState<SchoolItem[]>([]);
   const [routesList, setRoutesList] = useState<RouteItem[]>([]);
   const [vehiclesList, setVehiclesList] = useState<FleetVehicle[]>([]);
@@ -20,15 +38,19 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const [showVehicleModal, setShowVehicleModal] = useState(false);
   const [editingVehicleId, setEditingVehicleId] = useState<number | null>(null);
   const [showOwnerModal, setShowOwnerModal] = useState(false);
+  const [editingOwnerId, setEditingOwnerId] = useState<number | null>(null);
+  const [deletingOwner, setDeletingOwner] = useState<VehicleOwner | null>(null);
+  const [deletingOwnerBusy, setDeletingOwnerBusy] = useState(false);
   const [showRouteModal, setShowRouteModal] = useState(false);
   const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [savingModal, setSavingModal] = useState(false);
 
   useEscapeKey(
-    Boolean(showRouteModal || showOwnerModal || showVehicleModal || showSchoolModal),
+    Boolean(deletingOwner || showRouteModal || showOwnerModal || showVehicleModal || showSchoolModal),
     () => {
-      if (showRouteModal) setShowRouteModal(false);
+      if (deletingOwner) setDeletingOwner(null);
+      else if (showRouteModal) setShowRouteModal(false);
       else if (showOwnerModal) setShowOwnerModal(false);
       else if (showVehicleModal) setShowVehicleModal(false);
       else if (showSchoolModal) setShowSchoolModal(false);
@@ -77,12 +99,17 @@ export const SchoolsVehiclesModule: React.FC = () => {
     setError(null);
     try {
       const [sRes, vRes, oRes] = await Promise.all([
-        apiFetch<{ schools: SchoolItem[]; routes: RouteItem[] }>('/api/schools'),
+        apiFetch<{
+          schools: SchoolItem[];
+          routes: RouteItem[];
+          billingPeriod?: { month: number; year: number };
+        }>('/api/schools'),
         apiFetch<{ vehicles: FleetVehicle[] }>('/api/vehicles'),
         apiFetch<{ owners: VehicleOwner[] }>('/api/owners'),
       ]);
       setSchoolsList(sRes.schools);
       setRoutesList(sRes.routes);
+      if (sRes.billingPeriod) setBillingPeriod(sRes.billingPeriod);
       setVehiclesList(vRes.vehicles);
       setOwnersList(oRes.owners);
     } catch (err: unknown) {
@@ -95,6 +122,26 @@ export const SchoolsVehiclesModule: React.FC = () => {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const navigateSubView = (nextTab: SubTabId, nextSchoolId: number | 'all' = selectedSchoolId) => {
+    if (nextTab === tab && nextSchoolId === selectedSchoolId) return;
+    setTabHistory((prev) => [...prev.slice(-14), { tab, schoolId: selectedSchoolId }]);
+    setTab(nextTab);
+    setSelectedSchoolId(nextSchoolId);
+  };
+
+  const goBackSubView = () => {
+    setTabHistory((prev) => {
+      if (prev.length === 0) {
+        if (selectedSchoolId !== 'all') setSelectedSchoolId('all');
+        return prev;
+      }
+      const last = prev[prev.length - 1];
+      setTab(last.tab);
+      setSelectedSchoolId(last.schoolId);
+      return prev.slice(0, -1);
+    });
+  };
 
   const handleAddSchool = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -175,19 +222,47 @@ export const SchoolsVehiclesModule: React.FC = () => {
     }
   };
 
-  const handleAddOwner = async (e: React.FormEvent) => {
+  const handleSaveOwner = async (e: React.FormEvent) => {
     e.preventDefault();
     setModalError(null);
     setSavingModal(true);
     try {
-      await apiFetch('/api/owners', { method: 'POST', body: JSON.stringify(ownerForm) });
+      if (editingOwnerId) {
+        await apiFetch(`/api/owners/${editingOwnerId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(ownerForm),
+        });
+      } else {
+        await apiFetch('/api/owners', {
+          method: 'POST',
+          body: JSON.stringify(ownerForm),
+        });
+      }
       setShowOwnerModal(false);
+      setEditingOwnerId(null);
       setOwnerForm({ fullName: '', phone: '', nationalId: '', notes: '' });
       await loadData();
     } catch (err: unknown) {
-      setModalError(err instanceof Error ? err.message : 'تعذر إضافة مالك المركبة');
+      setModalError(
+        err instanceof Error ? err.message : editingOwnerId ? 'تعذر تعديل بيانات المالك' : 'تعذر إضافة مالك المركبة'
+      );
     } finally {
       setSavingModal(false);
+    }
+  };
+
+  const handleDeleteOwner = async () => {
+    if (!deletingOwner) return;
+    setDeletingOwnerBusy(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/owners/${deletingOwner.id}`, { method: 'DELETE' });
+      setDeletingOwner(null);
+      await loadData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر حذف مالك المركبة');
+    } finally {
+      setDeletingOwnerBusy(false);
     }
   };
 
@@ -300,6 +375,25 @@ export const SchoolsVehiclesModule: React.FC = () => {
     setShowVehicleModal(true);
   };
 
+  const openAddOwner = () => {
+    setModalError(null);
+    setEditingOwnerId(null);
+    setOwnerForm({ fullName: '', phone: '', nationalId: '', notes: '' });
+    setShowOwnerModal(true);
+  };
+
+  const openEditOwner = (o: VehicleOwner) => {
+    setModalError(null);
+    setEditingOwnerId(o.id);
+    setOwnerForm({
+      fullName: o.fullName,
+      phone: o.phone,
+      nationalId: o.nationalId || '',
+      notes: o.notes || '',
+    });
+    setShowOwnerModal(true);
+  };
+
   const openAddRoute = () => {
     setModalError(null);
     setEditingRouteId(null);
@@ -331,6 +425,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
     setShowRouteModal(true);
   };
 
+  const selectedSchoolObj =
+    selectedSchoolId === 'all'
+      ? null
+      : schoolsList.find((s) => s.id === selectedSchoolId) || null;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -339,11 +438,21 @@ export const SchoolsVehiclesModule: React.FC = () => {
             المدارس والمركبات وخطوط السير
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            عقود المدارس الشهرية، تكاليف ملاك الباصات، صافي هامش الربح، وإدارة خطوط التوصيل
+            عقود المدارس مقسمة حسب كل مدرسة بسائقيها ورواتبهم وأرباحها، وإدارة الملاك والمركبات
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {(tabHistory.length > 0 || (tab === 'schools' && selectedSchoolObj)) && (
+            <button
+              type="button"
+              onClick={goBackSubView}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer"
+            >
+              <ArrowRight className="w-3.5 h-3.5 text-[#C89B3C]" />
+              رجوع للقائمة السابقة
+            </button>
+          )}
           {tab === 'schools' && (
             <button
               onClick={openAddSchool}
@@ -364,10 +473,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
           )}
           {tab === 'owners' && (
             <button
-              onClick={() => {
-                setModalError(null);
-                setShowOwnerModal(true);
-              }}
+              onClick={openAddOwner}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
             >
               <Plus className="w-4 h-4 text-[#C89B3C]" />
@@ -398,7 +504,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
           return (
             <button
               key={item.id}
-              onClick={() => setTab(item.id as typeof tab)}
+              onClick={() => navigateSubView(item.id as SubTabId, item.id === 'schools' ? selectedSchoolId : 'all')}
               className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
                 tab === item.id
                   ? 'bg-white text-[#0B1F3A] shadow-xs'
@@ -423,63 +529,376 @@ export const SchoolsVehiclesModule: React.FC = () => {
           جاري التحميل...
         </div>
       ) : tab === 'schools' ? (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {schoolsList.map((s) => (
-            <div key={s.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="font-display text-base font-bold text-[#0B1F3A]">{s.name}</h3>
-                  <div className="text-xs text-slate-500 mt-1">
-                    {s.contactName} · <span className="font-mono">{s.contactPhone}</span>
-                  </div>
-                  <div className="text-xs text-slate-500 mt-0.5">{s.address}</div>
-                </div>
-                <div className="text-left shrink-0">
-                  <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
-                  <div className="font-mono text-base font-bold text-[#0B1F3A] tabular-nums">
-                    {formatEGP(s.monthlyContractValue)}
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3 border-t border-slate-100 pt-3 text-xs">
-                <div>
-                  <div className="text-slate-500">المركبات / السائقون</div>
-                  <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
-                    {s.vehicleCount ?? 0} باص · {s.driverCount ?? 0} سائق
-                  </div>
-                </div>
-                <div>
-                  <div className="text-slate-500">تكلفة الملاك</div>
-                  <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
-                    {formatEGP(s.ownerCost ?? 0)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-slate-500">صافي ربح المكتب</div>
-                  <div className="font-mono font-bold text-emerald-700 mt-0.5 tabular-nums">
-                    {formatEGP(s.estimatedProfit ?? 0)}
-                  </div>
-                </div>
-              </div>
-
-              <div className="text-[11px] text-slate-400 border-t border-slate-100 pt-2.5 flex items-center justify-between gap-2">
-                <span className="font-mono tabular-nums">
-                  العقد: {s.contractStartDate} إلى {s.contractEndDate}
-                </span>
-                <div className="flex items-center gap-2">
-                  <span>{s.isActive ? 'عقد ساري' : 'غير نشط'}</span>
-                  <button
-                    onClick={() => openEditSchool(s)}
-                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+        <div className="space-y-5">
+          {/* School Selector Bar (Isolate per school or view all) */}
+          <div className="bg-white border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => navigateSubView('schools', 'all')}
+                className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  selectedSchoolId === 'all'
+                    ? 'bg-[#0B1F3A] text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                كل المدارس ({schoolsList.length})
+              </button>
+              {schoolsList.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => navigateSubView('schools', s.id)}
+                  className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-2 ${
+                    selectedSchoolId === s.id
+                      ? 'bg-[#0B1F3A] text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  <span>{s.name}</span>
+                  <span
+                    className={`font-mono text-[11px] tabular-nums ${
+                      selectedSchoolId === s.id ? 'text-[#C89B3C]' : 'text-slate-500'
+                    }`}
                   >
-                    <Edit3 className="w-3 h-3" />
-                    تعديل
-                  </button>
+                    ({s.driverCount ?? 0} سائق)
+                  </span>
+                </button>
+              ))}
+            </div>
+            {billingPeriod && (
+              <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                الفترة المالية: {billingPeriod.month}/{billingPeriod.year}
+              </span>
+            )}
+          </div>
+
+          {selectedSchoolObj ? (
+            /* ISOLATED SINGLE-SCHOOL CONTRACT, DRIVERS, SALARIES & PROFIT VIEW */
+            <div className="space-y-5">
+              {/* Isolated School Contract Header & P&L KPIs */}
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Building2 className="w-5 h-5 text-[#C89B3C]" />
+                      <h2 className="font-display text-xl font-bold text-[#0B1F3A]">
+                        {selectedSchoolObj.name}
+                      </h2>
+                      <span
+                        className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                          selectedSchoolObj.isActive
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-slate-100 text-slate-600'
+                        }`}
+                      >
+                        {selectedSchoolObj.isActive ? 'عقد ساري' : 'غير نشط'}
+                      </span>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1.5 flex flex-wrap items-center gap-3">
+                      {selectedSchoolObj.contactName && <span>المسؤول: {selectedSchoolObj.contactName}</span>}
+                      {selectedSchoolObj.contactPhone && (
+                        <span className="font-mono" dir="ltr">
+                          {selectedSchoolObj.contactPhone}
+                        </span>
+                      )}
+                      {selectedSchoolObj.address && <span>{selectedSchoolObj.address}</span>}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openEditSchool(selectedSchoolObj)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      تعديل العقد
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-4 border-t border-slate-100">
+                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
+                    <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
+                    <div className="font-mono text-lg font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                      {formatEGP(selectedSchoolObj.monthlyContractValue)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
+                    <div className="text-[11px] text-slate-500">
+                      رواتب سائقين المدرسة ({selectedSchoolObj.driverCount ?? 0})
+                    </div>
+                    <div className="font-mono text-lg font-bold text-red-700 mt-1 tabular-nums">
+                      {formatEGP(selectedSchoolObj.totalDriverSalaries ?? 0)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
+                    <div className="text-[11px] text-slate-500">
+                      تكلفة ملاك الباصات ({selectedSchoolObj.vehicleCount ?? 0})
+                    </div>
+                    <div className="font-mono text-lg font-bold text-slate-800 mt-1 tabular-nums">
+                      {formatEGP(selectedSchoolObj.ownerCost ?? 0)}
+                    </div>
+                  </div>
+                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-3.5">
+                    <div className="text-[11px] text-emerald-800 font-semibold">
+                      صافي ربح المدرسة الشهري
+                    </div>
+                    <div
+                      className={`font-mono text-lg font-bold mt-1 tabular-nums ${
+                        (selectedSchoolObj.estimatedProfit ?? 0) >= 0
+                          ? 'text-emerald-700'
+                          : 'text-red-700'
+                      }`}
+                    >
+                      {formatEGP(selectedSchoolObj.estimatedProfit ?? 0)}
+                    </div>
+                  </div>
+                </div>
+
+                {(selectedSchoolObj.contractStartDate || selectedSchoolObj.contractEndDate) && (
+                  <div className="text-[11px] text-slate-500 font-mono tabular-nums">
+                    مدة التعاقد: {selectedSchoolObj.contractStartDate || '—'} إلى{' '}
+                    {selectedSchoolObj.contractEndDate || '—'}
+                  </div>
+                )}
+              </div>
+
+              {/* Isolated School Drivers & Salaries Table */}
+              <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Users className="w-4 h-4 text-[#C89B3C]" />
+                    <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
+                      سائقو {selectedSchoolObj.name} ورواتبهم ({(selectedSchoolObj.drivers || []).length})
+                    </h3>
+                  </div>
+                  <div className="text-xs font-mono text-slate-600 tabular-nums">
+                    صافي مستحقات السائقين بعد السلف والتسويات:{' '}
+                    <strong className="text-[#0B1F3A]">
+                      {formatEGP(selectedSchoolObj.totalNetDriverSalaries ?? 0)}
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-right text-xs">
+                    <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-4 font-semibold">الكود</th>
+                        <th className="py-3 px-4 font-semibold">السائق والموبايل</th>
+                        <th className="py-3 px-4 font-semibold">الباص وخط السير</th>
+                        <th className="py-3 px-4 font-semibold">الراتب الأساسي</th>
+                        <th className="py-3 px-4 font-semibold">السلف / التغطيات</th>
+                        <th className="py-3 px-4 font-semibold">مكافآت / خصومات</th>
+                        <th className="py-3 px-4 font-semibold">صافي المستحق</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(selectedSchoolObj.drivers || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="py-8 text-center text-slate-400">
+                            لا يوجد سائقون معينون لهذه المدرسة حالياً
+                          </td>
+                        </tr>
+                      ) : (
+                        (selectedSchoolObj.drivers || []).map((drv) => (
+                          <tr key={drv.id} className="hover:bg-slate-50/70">
+                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                              {drv.driverCode}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-bold text-slate-900">{drv.fullName}</div>
+                              <div className="font-mono text-slate-500 tabular-nums" dir="ltr">
+                                {drv.phone}
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-mono font-semibold text-slate-800">
+                                باص {drv.busNumber || '—'}
+                              </div>
+                              <div className="text-slate-500">{drv.routeName || '—'}</div>
+                            </td>
+                            <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
+                              {formatEGP(drv.baseSalary)}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                              {formatEGP(drv.totalAdvances + drv.totalCoverageDeductions)}
+                            </td>
+                            <td className="py-3 px-4 font-mono tabular-nums">
+                              <span className="text-emerald-700">+{formatEGP(drv.bonuses)}</span>
+                              {' / '}
+                              <span className="text-red-700">−{formatEGP(drv.otherDeductions)}</span>
+                            </td>
+                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                              {formatEGP(drv.netSalary)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Isolated School Vehicles & Owner Costs */}
+              <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
+                  <Bus className="w-4 h-4 text-[#C89B3C]" />
+                  <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
+                    المركبات والملاك المخصصون لـ {selectedSchoolObj.name} ({(selectedSchoolObj.vehicles || []).length})
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-right text-xs">
+                    <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-4 font-semibold">رقم الباص</th>
+                        <th className="py-3 px-4 font-semibold">اللوحة والنوع</th>
+                        <th className="py-3 px-4 font-semibold">المالك</th>
+                        <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
+                        <th className="py-3 px-4 font-semibold">السائق</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(selectedSchoolObj.vehicles || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-8 text-center text-slate-400">
+                            لا توجد مركبات مربوطة بهذه المدرسة حالياً
+                          </td>
+                        </tr>
+                      ) : (
+                        (selectedSchoolObj.vehicles || []).map((v) => (
+                          <tr key={v.id} className="hover:bg-slate-50/70">
+                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A]">
+                              {v.busNumber}
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-800">{v.registrationNumber}</div>
+                              <div className="text-slate-500">{v.vehicleType || '—'}</div>
+                            </td>
+                            <td className="py-3 px-4">
+                              <div className="text-slate-800">{v.ownerName}</div>
+                              <div className="font-mono text-slate-500">{v.ownerPhone}</div>
+                            </td>
+                            <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
+                              {formatEGP(v.monthlyOwnerCost)}
+                            </td>
+                            <td className="py-3 px-4 text-slate-700">{v.driverName}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
-          ))}
+          ) : (
+            /* ALL SCHOOLS CONTRACTS OVERVIEW — EACH CARD ISOLATED WITH DRIVERS, SALARIES & NET PROFIT */
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {schoolsList.map((s) => (
+                <div key={s.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="font-display text-base font-bold text-[#0B1F3A]">{s.name}</h3>
+                      <div className="text-xs text-slate-500 mt-1">
+                        {s.contactName} · <span className="font-mono">{s.contactPhone}</span>
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">{s.address}</div>
+                    </div>
+                    <div className="text-left shrink-0">
+                      <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
+                      <div className="font-mono text-base font-bold text-[#0B1F3A] tabular-nums">
+                        {formatEGP(s.monthlyContractValue)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 border-t border-slate-100 pt-3 text-xs">
+                    <div>
+                      <div className="text-slate-500">السائقون / الباصات</div>
+                      <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
+                        {s.driverCount ?? 0} سائق · {s.vehicleCount ?? 0} باص
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-500">رواتب السائقين</div>
+                      <div className="font-mono font-semibold text-red-700 mt-0.5 tabular-nums">
+                        {formatEGP(s.totalDriverSalaries ?? 0)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-500">تكلفة الملاك</div>
+                      <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
+                        {formatEGP(s.ownerCost ?? 0)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-slate-500">صافي ربح المدرسة</div>
+                      <div
+                        className={`font-mono font-bold mt-0.5 tabular-nums ${
+                          (s.estimatedProfit ?? 0) >= 0 ? 'text-emerald-700' : 'text-red-700'
+                        }`}
+                      >
+                        {formatEGP(s.estimatedProfit ?? 0)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Quick preview of this school's drivers & salaries */}
+                  {(s.drivers || []).length > 0 && (
+                    <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-1.5">
+                      <div className="text-[11px] font-bold text-slate-600 flex items-center gap-1.5">
+                        <Wallet className="w-3.5 h-3.5 text-[#C89B3C]" />
+                        <span>سائقو المدرسة ورواتبهم:</span>
+                      </div>
+                      <div className="divide-y divide-slate-200/60 text-[11px]">
+                        {(s.drivers || []).slice(0, 4).map((drv) => (
+                          <div key={drv.id} className="py-1 flex items-center justify-between gap-2">
+                            <span className="font-semibold text-slate-800 truncate">
+                              {drv.fullName} ({drv.busNumber || '—'})
+                            </span>
+                            <span className="font-mono font-bold text-[#0B1F3A] tabular-nums shrink-0">
+                              أساسي {formatEGP(drv.baseSalary)} · صافي {formatEGP(drv.netSalary)}
+                            </span>
+                          </div>
+                        ))}
+                        {(s.drivers || []).length > 4 && (
+                          <div className="pt-1 text-[10px] text-slate-500">
+                            + {(s.drivers || []).length - 4} سائقين آخرين...
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="text-[11px] text-slate-400 border-t border-slate-100 pt-2.5 flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono tabular-nums">
+                      العقد: {s.contractStartDate || '—'} إلى {s.contractEndDate || '—'}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => navigateSubView('schools', s.id)}
+                        className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                      >
+                        <Users className="w-3 h-3 text-[#C89B3C]" />
+                        عرض العقد والسائقين والربح
+                      </button>
+                      <button
+                        onClick={() => openEditSchool(s)}
+                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        تعديل
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       ) : tab === 'vehicles' ? (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -550,16 +969,57 @@ export const SchoolsVehiclesModule: React.FC = () => {
         </div>
       ) : tab === 'owners' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {ownersList.map((o) => (
-            <div key={o.id} className="bg-white border border-slate-200 rounded-xl p-5">
-              <h3 className="font-bold text-[#0B1F3A] text-sm">{o.fullName}</h3>
-              <div className="mt-1 font-mono text-xs text-slate-600">{o.phone}</div>
-              {o.nationalId && (
-                <div className="mt-1 font-mono text-xs text-slate-500">الرقم القومي/السجل: {o.nationalId}</div>
-              )}
-              {o.notes && <p className="mt-2 text-xs text-slate-500">{o.notes}</p>}
-            </div>
-          ))}
+          {ownersList.map((o) => {
+            const linkedVehicles = vehiclesList.filter((v) => v.ownerId === o.id);
+            return (
+              <div
+                key={o.id}
+                className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between gap-4"
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="font-bold text-[#0B1F3A] text-sm">{o.fullName}</h3>
+                    <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
+                      {linkedVehicles.length} مركبة
+                    </span>
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-slate-600" dir="ltr">
+                    {o.phone}
+                  </div>
+                  {o.nationalId && (
+                    <div className="mt-1 font-mono text-xs text-slate-500">
+                      الرقم القومي/السجل: {o.nationalId}
+                    </div>
+                  )}
+                  {linkedVehicles.length > 0 && (
+                    <div className="mt-2 text-[11px] text-slate-600">
+                      الباصات: {linkedVehicles.map((v) => v.busNumber).join('، ')}
+                    </div>
+                  )}
+                  {o.notes && <p className="mt-2 text-xs text-slate-500">{o.notes}</p>}
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => openEditOwner(o)}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                  >
+                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                    تعديل
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeletingOwner(o)}
+                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    حذف
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       ) : (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -804,17 +1264,26 @@ export const SchoolsVehiclesModule: React.FC = () => {
         </div>
       )}
 
-      {/* Add Owner Modal */}
+      {/* Add/Edit Owner Modal */}
       {showOwnerModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
             <div className="px-6 py-4 bg-[#0B1F3A] text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">إضافة مالك مركبة</h3>
-              <button onClick={() => setShowOwnerModal(false)} className="cursor-pointer">
+              <h3 className="font-bold text-sm">
+                {editingOwnerId ? 'تعديل بيانات مالك المركبة' : 'إضافة مالك مركبة'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowOwnerModal(false);
+                  setEditingOwnerId(null);
+                }}
+                className="cursor-pointer"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <form onSubmit={handleAddOwner} className="p-6 space-y-3 text-xs">
+            <form onSubmit={handleSaveOwner} className="p-6 space-y-3 text-xs">
               {modalError && (
                 <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
                   {modalError}
@@ -846,13 +1315,54 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 onChange={(e) => setOwnerForm({ ...ownerForm, nationalId: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
               />
+              <textarea
+                rows={2}
+                placeholder="ملاحظات إضافية (اختياري)"
+                value={ownerForm.notes}
+                onChange={(e) => setOwnerForm({ ...ownerForm, notes: e.target.value })}
+                className="w-full rounded-lg border border-slate-200 px-3 py-2"
+              />
               <button
                 type="submit"
-                className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                disabled={savingModal}
+                className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
               >
-                حفظ المالك
+                {savingModal ? 'جاري الحفظ...' : editingOwnerId ? 'حفظ التعديلات' : 'حفظ المالك'}
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Owner Confirmation Modal */}
+      {deletingOwner && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-xl p-5 space-y-4 text-xs">
+            <div className="flex items-center gap-2 text-red-700 font-bold text-sm">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              <span>تأكيد حذف مالك المركبة</span>
+            </div>
+            <p className="text-slate-600 leading-relaxed">
+              هل تريد حذف المالك <strong>{deletingOwner.fullName}</strong>؟ سيتم فك ارتباطه بأي باصات مسجلة باسمه دون حذف الباصات نفسها.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={deletingOwnerBusy}
+                onClick={() => setDeletingOwner(null)}
+                className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={deletingOwnerBusy}
+                onClick={handleDeleteOwner}
+                className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 disabled:opacity-50 cursor-pointer"
+              >
+                {deletingOwnerBusy ? 'جاري الحذف...' : 'تأكيد الحذف'}
+              </button>
+            </div>
           </div>
         </div>
       )}

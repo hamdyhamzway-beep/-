@@ -15,6 +15,22 @@ interface ClientMeta {
 const clientsMap = new Map<WebSocket, ClientMeta>();
 let wssInstance: WebSocketServer | null = null;
 
+export const DRIVERS_BROADCAST_ROOM = 'drivers_broadcast';
+
+function isSupervisorRole(role?: string): boolean {
+  return role === 'supervisor';
+}
+
+function isDriverOrStaffRole(role?: string): boolean {
+  return (
+    role === 'driver' ||
+    role === 'super_admin' ||
+    role === 'admin' ||
+    role === 'movement_manager' ||
+    role === 'accountant'
+  );
+}
+
 /**
  * Initializes the WebSocket server for real-time messaging, voice notes, and live audio/PTT calls.
  * Uses noServer mode attached to the existing HTTP server on path '/ws/chat'.
@@ -56,14 +72,26 @@ export function initChatWebSocketServer(httpServer: http.Server) {
           meta.userId = payload.userId;
           meta.role = payload.role || 'user';
           meta.name = payload.name || 'مستخدم';
+          if (isDriverOrStaffRole(meta.role)) {
+            meta.rooms.add(DRIVERS_BROADCAST_ROOM);
+          } else {
+            meta.rooms.delete(DRIVERS_BROADCAST_ROOM);
+          }
           if (Array.isArray(payload.initialRooms)) {
-            payload.initialRooms.forEach((r: string) => meta.rooms.add(r));
+            payload.initialRooms.forEach((r: string) => {
+              if (r === DRIVERS_BROADCAST_ROOM && isSupervisorRole(meta.role)) return;
+              meta.rooms.add(r);
+            });
           }
           ws.send(JSON.stringify({ type: 'authenticated', rooms: Array.from(meta.rooms) }));
           return;
         }
 
         if (payload.type === 'join_room' && payload.roomKey) {
+          if (payload.roomKey === DRIVERS_BROADCAST_ROOM && isSupervisorRole(meta.role)) {
+            ws.send(JSON.stringify({ type: 'error', message: 'غير مصرح بالوصول لقناة السائقين فقط' }));
+            return;
+          }
           meta.rooms.add(payload.roomKey);
           ws.send(JSON.stringify({ type: 'room_joined', roomKey: payload.roomKey }));
           return;
@@ -77,6 +105,9 @@ export function initChatWebSocketServer(httpServer: http.Server) {
 
         // Live Audio Call Signaling & Push-To-Talk (PTT) streams
         if (payload.type === 'call_signal' && payload.roomKey) {
+          if (payload.roomKey === DRIVERS_BROADCAST_ROOM && isSupervisorRole(meta.role)) {
+            return;
+          }
           broadcastToRoom(payload.roomKey, {
             type: 'call_signal',
             roomKey: payload.roomKey,
@@ -101,6 +132,10 @@ export function initChatWebSocketServer(httpServer: http.Server) {
 
         // New Message (Text or Voice Note) sent via WebSocket
         if (payload.type === 'send_message' && payload.roomKey) {
+          if (payload.roomKey === DRIVERS_BROADCAST_ROOM && isSupervisorRole(meta.role)) {
+            ws.send(JSON.stringify({ type: 'error', message: 'غير مصرح بالإرسال في قناة السائقين' }));
+            return;
+          }
           const saved = await saveMessageToDb({
             roomKey: payload.roomKey,
             senderUserId: meta.userId,
@@ -144,12 +179,21 @@ export function initChatWebSocketServer(httpServer: http.Server) {
 /**
  * Broadcasts an event payload to all clients subscribed to the specific roomKey.
  * If roomKey is 'broadcast', sends to all connected clients.
+ * If roomKey is 'drivers_broadcast', strictly excludes supervisors & anonymous sockets.
  */
 export function broadcastToRoom(roomKey: string, payload: any, senderWs?: WebSocket) {
   const messageStr = JSON.stringify(payload);
   for (const [clientWs, meta] of clientsMap.entries()) {
     if (clientWs !== senderWs && clientWs.readyState === WebSocket.OPEN) {
-      if (roomKey === 'broadcast' || meta.rooms.has(roomKey)) {
+      if (roomKey === DRIVERS_BROADCAST_ROOM) {
+        if (!isSupervisorRole(meta.role) && isDriverOrStaffRole(meta.role)) {
+          try {
+            clientWs.send(messageStr);
+          } catch {
+            // ignore dead socket
+          }
+        }
+      } else if (roomKey === 'broadcast' || meta.rooms.has(roomKey)) {
         try {
           clientWs.send(messageStr);
         } catch {
@@ -189,11 +233,14 @@ export async function saveMessageToDb(data: {
       chId = existingChan[0].id;
     } else {
       let title = 'محادثة مباشرة';
-      let channelType: 'broadcast' | 'route' | 'direct' = 'direct';
+      let channelType: 'broadcast' | 'drivers_broadcast' | 'route' | 'direct' = 'direct';
 
       if (data.roomKey === 'broadcast') {
         title = 'غرفة العمليات والطوارئ العامة';
         channelType = 'broadcast';
+      } else if (data.roomKey === DRIVERS_BROADCAST_ROOM) {
+        title = 'رسائل جماعية للسائقين (خاص بالسائقين فقط)';
+        channelType = 'drivers_broadcast';
       } else if (data.roomKey.startsWith('route_')) {
         const routeId = parseInt(data.roomKey.replace('route_', ''), 10);
         title = `محادثة خط السير #${routeId}`;
@@ -266,9 +313,10 @@ export async function saveMessageToDb(data: {
 }
 
 /**
- * Gets all active chat channels and ensures route channels exist for current routes.
+ * Gets all active chat channels and ensures route & broadcast channels exist.
+ * Excludes drivers-only broadcast room for supervisor role.
  */
-export async function getEnrichedChatChannels(): Promise<ChatChannel[]> {
+export async function getEnrichedChatChannels(viewerRole?: string): Promise<ChatChannel[]> {
   // Synchronize route channels from routes table
   const allRoutes = await db
     .select({
@@ -302,7 +350,7 @@ export async function getEnrichedChatChannels(): Promise<ChatChannel[]> {
     }
   }
 
-  // Ensure broadcast exists
+  // Ensure general broadcast exists
   const bcExists = await db
     .select({ id: chatChannels.id })
     .from(chatChannels)
@@ -317,6 +365,26 @@ export async function getEnrichedChatChannels(): Promise<ChatChannel[]> {
         channelType: 'broadcast',
         title: 'غرفة العمليات والطوارئ العامة',
         lastMessageText: 'مرحباً بكم في شبكة التواصل الموحدة',
+        lastMessageAt: new Date(),
+      })
+      .onConflictDoNothing();
+  }
+
+  // Ensure driver-only broadcast exists
+  const dbcExists = await db
+    .select({ id: chatChannels.id })
+    .from(chatChannels)
+    .where(eq(chatChannels.roomKey, DRIVERS_BROADCAST_ROOM))
+    .limit(1);
+
+  if (dbcExists.length === 0) {
+    await db
+      .insert(chatChannels)
+      .values({
+        roomKey: DRIVERS_BROADCAST_ROOM,
+        channelType: 'drivers_broadcast',
+        title: 'رسائل جماعية للسائقين (خاص بالسائقين فقط)',
+        lastMessageText: 'قناة الرسائل الجماعية والفويس نوت من الإدارة للسائقين فقط',
         lastMessageAt: new Date(),
       })
       .onConflictDoNothing();
@@ -338,26 +406,36 @@ export async function getEnrichedChatChannels(): Promise<ChatChannel[]> {
     .leftJoin(supervisors, eq(chatChannels.supervisorId, supervisors.id))
     .orderBy(desc(chatChannels.lastMessageAt));
 
-  return rows.map((r) => {
-    const c = r.channel;
-    return {
-      id: c.id,
-      roomKey: c.roomKey,
-      channelType: c.channelType as any,
-      title: c.title,
-      routeId: c.routeId,
-      routeName: r.routeName || undefined,
-      schoolId: c.schoolId,
-      schoolName: r.schoolName || undefined,
-      driverId: c.driverId,
-      driverName: r.driverName || undefined,
-      supervisorId: c.supervisorId,
-      supervisorName: r.supervisorName || undefined,
-      lastMessageText: c.lastMessageText,
-      lastMessageAt: c.lastMessageAt ? c.lastMessageAt.toISOString() : c.createdAt.toISOString(),
-      onlineParticipantsCount: Math.max(1, countClientsInRoom(c.roomKey)),
-    };
-  });
+  return rows
+    .filter((r) => {
+      if (isSupervisorRole(viewerRole)) {
+        return (
+          r.channel.roomKey !== DRIVERS_BROADCAST_ROOM &&
+          r.channel.channelType !== 'drivers_broadcast'
+        );
+      }
+      return true;
+    })
+    .map((r) => {
+      const c = r.channel;
+      return {
+        id: c.id,
+        roomKey: c.roomKey,
+        channelType: c.channelType as ChatChannel['channelType'],
+        title: c.title,
+        routeId: c.routeId,
+        routeName: r.routeName || undefined,
+        schoolId: c.schoolId,
+        schoolName: r.schoolName || undefined,
+        driverId: c.driverId,
+        driverName: r.driverName || undefined,
+        supervisorId: c.supervisorId,
+        supervisorName: r.supervisorName || undefined,
+        lastMessageText: c.lastMessageText,
+        lastMessageAt: c.lastMessageAt ? c.lastMessageAt.toISOString() : c.createdAt.toISOString(),
+        onlineParticipantsCount: Math.max(1, countClientsInRoom(c.roomKey)),
+      };
+    });
 }
 
 /**
@@ -366,7 +444,11 @@ export async function getEnrichedChatChannels(): Promise<ChatChannel[]> {
 export function countClientsInRoom(roomKey: string): number {
   let count = 0;
   for (const [, meta] of clientsMap.entries()) {
-    if (roomKey === 'broadcast' || meta.rooms.has(roomKey)) {
+    if (roomKey === DRIVERS_BROADCAST_ROOM) {
+      if (!isSupervisorRole(meta.role) && isDriverOrStaffRole(meta.role)) {
+        count++;
+      }
+    } else if (roomKey === 'broadcast' || meta.rooms.has(roomKey)) {
       count++;
     }
   }

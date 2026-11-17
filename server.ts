@@ -74,6 +74,7 @@ import {
 } from './src/services/gemini-voice.ts';
 import {
   broadcastToRoom,
+  DRIVERS_BROADCAST_ROOM,
   getEnrichedChatChannels,
   getMessagesForRoom,
   initChatWebSocketServer,
@@ -1727,30 +1728,79 @@ async function startServer() {
   // 4. Schools, Vehicle Owners, Vehicles & Routes
   app.get('/api/schools', requireAuth, requireAdminOrStaff, requirePermission('schools:read'), async (_req: AuthRequest, res) => {
     try {
-      const allSchools = await db.select().from(schools).orderBy(schools.name);
-      const allRoutes = await db.select().from(routes).orderBy(routes.name);
-      const enrichedDrivers = await getEnrichedDrivers();
-      const fleet = await getFleetWithLatestGps();
+      const activePeriod = await getActiveBillingPeriod();
+      const [allSchools, allRoutes, enrichedDrivers, fleet, periodSalaries] = await Promise.all([
+        db.select().from(schools).orderBy(schools.name),
+        db.select().from(routes).orderBy(routes.name),
+        getEnrichedDrivers(),
+        getFleetWithLatestGps(),
+        db
+          .select()
+          .from(salaries)
+          .where(and(eq(salaries.month, activePeriod.month), eq(salaries.year, activePeriod.year))),
+      ]);
+
+      const salaryByDriver: Record<number, typeof salaries.$inferSelect> = {};
+      for (const sal of periodSalaries) {
+        salaryByDriver[sal.driverId] = sal;
+      }
 
       const data = allSchools.map((s) => {
-        const schoolVehicles = fleet.filter((v) => v.schoolId === s.id);
-        const schoolDrivers = enrichedDrivers.filter((d) => d.schoolId === s.id);
+        const schoolVehicles = fleet.filter(
+          (v) => v.schoolId === s.id && v.operationalStatus !== 'inactive'
+        );
+        const schoolDrivers = enrichedDrivers.filter(
+          (d) => d.schoolId === s.id && d.accountStatus === 'active'
+        );
         const schoolRoutes = allRoutes.filter((r) => r.schoolId === s.id);
         const ownerCost = schoolVehicles.reduce((sum, v) => sum + v.monthlyOwnerCost, 0);
+
+        const driverSummaries = schoolDrivers.map((d) => {
+          const sal = salaryByDriver[d.id];
+          const baseSalary = sal ? Number(sal.baseSalary) : Number(d.monthlyAgreedSalary || 0);
+          const totalAdvances = sal ? Number(sal.totalAdvances) : 0;
+          const totalCoverageDeductions = sal ? Number(sal.totalCoverageDeductions) : 0;
+          const otherDeductions = sal ? Number(sal.otherDeductions) : 0;
+          const bonuses = sal ? Number(sal.bonuses) : 0;
+          const netSalary = sal ? Number(sal.netSalary) : baseSalary;
+          return {
+            id: d.id,
+            driverCode: d.driverCode,
+            fullName: d.fullName,
+            phone: d.phone,
+            busNumber: d.busNumber,
+            routeName: d.routeName,
+            monthlyAgreedSalary: Number(d.monthlyAgreedSalary || 0),
+            baseSalary,
+            totalAdvances,
+            totalCoverageDeductions,
+            otherDeductions,
+            bonuses,
+            netSalary,
+            salaryStatus: sal?.status || 'open',
+          };
+        });
+
+        const totalDriverSalaries = driverSummaries.reduce((sum, d) => sum + d.baseSalary, 0);
+        const totalNetDriverSalaries = driverSummaries.reduce((sum, d) => sum + d.netSalary, 0);
+        const contractValue = Number(s.monthlyContractValue || 0);
+
         return {
           ...s,
-          monthlyContractValue: Number(s.monthlyContractValue || 0),
+          monthlyContractValue: contractValue,
           vehicleCount: schoolVehicles.length,
-          driverCount: schoolDrivers.length,
+          driverCount: driverSummaries.length,
           ownerCost,
-          estimatedProfit: Number(s.monthlyContractValue || 0) - ownerCost,
+          totalDriverSalaries,
+          totalNetDriverSalaries,
+          estimatedProfit: contractValue - ownerCost - totalDriverSalaries,
           routes: schoolRoutes,
           vehicles: schoolVehicles,
-          drivers: schoolDrivers,
+          drivers: driverSummaries,
         };
       });
 
-      res.json({ schools: data, routes: allRoutes });
+      res.json({ schools: data, routes: allRoutes, billingPeriod: activePeriod });
     } catch (error) {
       console.error('Get schools error:', error);
       res.status(500).json({ error: 'تعذر تحميل المدارس' });
@@ -1906,12 +1956,105 @@ async function startServer() {
       }
       const [owner] = await db
         .insert(vehicleOwners)
-        .values({ fullName, phone, nationalId: nationalId || '', notes: notes || '' })
+        .values({
+          fullName: String(fullName).trim(),
+          phone: String(phone).trim(),
+          nationalId: String(nationalId || '').trim(),
+          notes: String(notes || '').trim(),
+        })
         .returning();
       res.status(201).json({ owner });
     } catch (error) {
       console.error('Create owner error:', error);
       res.status(500).json({ error: 'تعذر إضافة مالك المركبة' });
+    }
+  });
+
+  app.patch('/api/owners/:id', requireAuth, requireAdminOrStaff, requirePermission('vehicles:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) {
+        return res.status(400).json({ error: 'معرف المالك غير صالح' });
+      }
+      const [existing] = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, id)).limit(1);
+      if (!existing) {
+        return res.status(404).json({ error: 'مالك المركبة غير موجود' });
+      }
+      const nextName =
+        req.body.fullName !== undefined ? String(req.body.fullName).trim() : existing.fullName;
+      const nextPhone =
+        req.body.phone !== undefined ? String(req.body.phone).trim() : existing.phone;
+      if (!nextName || !nextPhone) {
+        return res.status(400).json({ error: 'اسم المالك ورقم الهاتف مطلوبان' });
+      }
+
+      const [updated] = await db
+        .update(vehicleOwners)
+        .set({
+          fullName: nextName,
+          phone: nextPhone,
+          nationalId:
+            req.body.nationalId !== undefined
+              ? String(req.body.nationalId || '').trim()
+              : existing.nationalId,
+          notes:
+            req.body.notes !== undefined
+              ? String(req.body.notes || '').trim()
+              : existing.notes,
+        })
+        .where(eq(vehicleOwners.id, id))
+        .returning();
+
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'UPDATE_VEHICLE_OWNER',
+        entityType: 'vehicle_owners',
+        entityId: String(id),
+        beforeJson: existing,
+        afterJson: updated,
+        ipAddress: req.ip || '',
+      });
+
+      res.json({ owner: updated });
+    } catch (error) {
+      console.error('Update owner error:', error);
+      res.status(500).json({ error: 'تعذر تحديث بيانات مالك المركبة' });
+    }
+  });
+
+  app.delete('/api/owners/:id', requireAuth, requireAdminOrStaff, requirePermission('vehicles:write'), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) {
+        return res.status(400).json({ error: 'معرف المالك غير صالح' });
+      }
+      const [existing] = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, id)).limit(1);
+      if (!existing) {
+        return res.status(404).json({ error: 'مالك المركبة غير موجود' });
+      }
+
+      await db.transaction(async (tx) => {
+        await tx
+          .update(vehicles)
+          .set({ ownerId: null })
+          .where(eq(vehicles.ownerId, id));
+
+        await tx.delete(vehicleOwners).where(eq(vehicleOwners.id, id));
+
+        await tx.insert(auditLogs).values({
+          actorUserId: req.dbUser!.id,
+          action: 'DELETE_VEHICLE_OWNER',
+          entityType: 'vehicle_owners',
+          entityId: String(id),
+          beforeJson: existing,
+          ipAddress: req.ip || '',
+        });
+      });
+
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('Delete owner error:', error);
+      res.status(500).json({ error: 'تعذر حذف مالك المركبة' });
     }
   });
 
@@ -2134,7 +2277,7 @@ async function startServer() {
         }
       }
 
-      const [rawMonthSalaries, monthAdvances, monthCoverages, monthLedger] = await Promise.all([
+      const [rawMonthSalaries, monthAdvances, monthCoverages, monthLedger, allSchools, allEmployees, allVehicles] = await Promise.all([
         db
           .select()
           .from(salaries)
@@ -2154,6 +2297,9 @@ async function startServer() {
           .from(financialTransactions)
           .where(and(eq(financialTransactions.month, month), eq(financialTransactions.year, year)))
           .orderBy(desc(financialTransactions.createdAt)),
+        db.select().from(schools).orderBy(schools.name),
+        db.select().from(employees),
+        db.select().from(vehicles),
       ]);
 
       // If the month is already closed, keep ALL recorded salaries for that ended month intact;
@@ -2165,12 +2311,9 @@ async function startServer() {
       const driverMap: Record<number, (typeof allDrivers)[number]> = {};
       for (const d of allDrivers) driverMap[d.id] = d;
 
-      res.json({
-        period: { month, year },
-        activePeriod,
-        currentClosing,
-        closingsHistory,
-        salaries: monthSalaries.map((s) => ({
+      const enrichedSalaries = monthSalaries.map((s) => {
+        const drv = driverMap[s.driverId];
+        return {
           ...s,
           baseSalary: Number(s.baseSalary),
           totalAdvances: Number(s.totalAdvances),
@@ -2178,16 +2321,211 @@ async function startServer() {
           otherDeductions: Number(s.otherDeductions),
           bonuses: Number(s.bonuses),
           netSalary: Number(s.netSalary),
-          driverName: driverMap[s.driverId]?.fullName || '—',
-          driverCode: driverMap[s.driverId]?.driverCode || '—',
-          schoolName: driverMap[s.driverId]?.schoolName || '—',
-          busNumber: driverMap[s.driverId]?.busNumber || '—',
-        })),
+          driverName: drv?.fullName || '—',
+          driverCode: drv?.driverCode || '—',
+          schoolId: drv?.schoolId ?? null,
+          schoolName: drv?.schoolName || 'غير معين',
+          busNumber: drv?.busNumber || '—',
+          routeName: drv?.routeName || '—',
+        };
+      });
+
+      const schoolById: Record<number, (typeof allSchools)[number]> = {};
+      for (const sc of allSchools) schoolById[sc.id] = sc;
+
+      const salariesBySchoolKey = new Map<string, typeof enrichedSalaries>();
+      for (const sal of enrichedSalaries) {
+        const key = sal.schoolId ? String(sal.schoolId) : 'unassigned';
+        const list = salariesBySchoolKey.get(key) || [];
+        list.push(sal);
+        salariesBySchoolKey.set(key, list);
+      }
+
+      const schoolContracts = allSchools.map((sc) => {
+        const scDrivers = salariesBySchoolKey.get(String(sc.id)) || [];
+        const monthlyContractValue = Number(sc.monthlyContractValue || 0);
+        const totalBaseSalaries = scDrivers.reduce((sum, r) => sum + r.baseSalary, 0);
+        const totalAdvances = scDrivers.reduce((sum, r) => sum + r.totalAdvances, 0);
+        const totalCoverageDeductions = scDrivers.reduce(
+          (sum, r) => sum + r.totalCoverageDeductions,
+          0
+        );
+        const totalOtherDeductions = scDrivers.reduce((sum, r) => sum + r.otherDeductions, 0);
+        const totalBonuses = scDrivers.reduce((sum, r) => sum + r.bonuses, 0);
+        const totalNetSalaries = scDrivers.reduce((sum, r) => sum + r.netSalary, 0);
+        const profit = monthlyContractValue - totalBaseSalaries;
+        const netPayoutProfit = monthlyContractValue - totalNetSalaries;
+        const profitMarginPct =
+          monthlyContractValue > 0 ? Math.round((profit / monthlyContractValue) * 1000) / 10 : 0;
+
+        return {
+          schoolId: sc.id,
+          schoolName: sc.name,
+          isActive: sc.isActive,
+          monthlyContractValue,
+          contactPerson: sc.contactName || '',
+          contactPhone: sc.contactPhone || '',
+          driversCount: scDrivers.length,
+          totalBaseSalaries,
+          totalAdvances,
+          totalCoverageDeductions,
+          totalOtherDeductions,
+          totalBonuses,
+          totalNetSalaries,
+          profit,
+          netPayoutProfit,
+          profitMarginPct,
+          drivers: scDrivers,
+        };
+      });
+
+      const unassignedDrivers = salariesBySchoolKey.get('unassigned') || [];
+      if (unassignedDrivers.length > 0) {
+        const totalBaseSalaries = unassignedDrivers.reduce((sum, r) => sum + r.baseSalary, 0);
+        const totalAdvances = unassignedDrivers.reduce((sum, r) => sum + r.totalAdvances, 0);
+        const totalCoverageDeductions = unassignedDrivers.reduce(
+          (sum, r) => sum + r.totalCoverageDeductions,
+          0
+        );
+        const totalOtherDeductions = unassignedDrivers.reduce(
+          (sum, r) => sum + r.otherDeductions,
+          0
+        );
+        const totalBonuses = unassignedDrivers.reduce((sum, r) => sum + r.bonuses, 0);
+        const totalNetSalaries = unassignedDrivers.reduce((sum, r) => sum + r.netSalary, 0);
+        schoolContracts.push({
+          schoolId: null as unknown as number,
+          schoolName: 'سائقون غير معينين بمدرسة',
+          isActive: true,
+          monthlyContractValue: 0,
+          contactPerson: '',
+          contactPhone: '',
+          driversCount: unassignedDrivers.length,
+          totalBaseSalaries,
+          totalAdvances,
+          totalCoverageDeductions,
+          totalOtherDeductions,
+          totalBonuses,
+          totalNetSalaries,
+          profit: -totalBaseSalaries,
+          netPayoutProfit: -totalNetSalaries,
+          profitMarginPct: 0,
+          drivers: unassignedDrivers,
+        });
+      }
+
+      const activeContractSchools = schoolContracts.filter((c) => c.schoolId !== null && c.isActive);
+      const totalContractsValue = activeContractSchools.reduce(
+        (sum, c) => sum + c.monthlyContractValue,
+        0
+      );
+      const totalAllBaseSalaries = schoolContracts.reduce((sum, c) => sum + c.totalBaseSalaries, 0);
+      const totalAllNetSalaries = schoolContracts.reduce((sum, c) => sum + c.totalNetSalaries, 0);
+      const totalAllProfit = totalContractsValue - totalAllBaseSalaries;
+
+      const totalDriverAdvances = enrichedSalaries.reduce((sum, s) => sum + s.totalAdvances, 0);
+      const totalCoverageDriverDeductions = enrichedSalaries.reduce(
+        (sum, s) => sum + s.totalCoverageDeductions,
+        0
+      );
+      const totalOtherDeductions = enrichedSalaries.reduce((sum, s) => sum + s.otherDeductions, 0);
+      const totalBonuses = enrichedSalaries.reduce((sum, s) => sum + s.bonuses, 0);
+      const totalCoverageReplacementCost = monthCoverages
+        .filter((c) => !c.isReversed)
+        .reduce((sum, c) => sum + Number(c.actualReplacementCost || 0), 0);
+      const totalPaidSalaries = enrichedSalaries
+        .filter((s) => s.status === 'paid')
+        .reduce((sum, s) => sum + s.netSalary, 0);
+      const totalUnpaidSalaries = enrichedSalaries
+        .filter((s) => s.status !== 'paid')
+        .reduce((sum, s) => sum + s.netSalary, 0);
+
+      const activeEmployees = allEmployees.filter((e) => e.status === 'active');
+      const totalEmployeeBaseSalaries = activeEmployees.reduce(
+        (sum, e) => sum + Number(e.monthlySalary || 0),
+        0
+      );
+      const totalEmployeeBonuses = activeEmployees.reduce(
+        (sum, e) => sum + Number(e.bonuses || 0),
+        0
+      );
+      const totalEmployeeDeductions = activeEmployees.reduce(
+        (sum, e) => sum + Number(e.deductions || 0),
+        0
+      );
+      const totalEmployeeNetSalaries = activeEmployees.reduce((sum, e) => {
+        const net = Math.max(
+          0,
+          Number(e.monthlySalary || 0) + Number(e.bonuses || 0) - Number(e.deductions || 0)
+        );
+        return sum + net;
+      }, 0);
+
+      const activeVehicles = allVehicles.filter((v) => v.operationalStatus !== 'inactive');
+      const totalVehicleOwnerCosts = activeVehicles.reduce(
+        (sum, v) => sum + Number(v.monthlyOwnerCost || 0),
+        0
+      );
+
+      const totalLedgerCredits = monthLedger
+        .filter((t) => t.direction === 'credit')
+        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+      const totalLedgerDebits = monthLedger
+        .filter((t) => t.direction === 'debit')
+        .reduce((sum, t) => sum + Number(t.amount || 0), 0);
+
+      const totalCombinedPayroll = totalAllNetSalaries + totalEmployeeNetSalaries;
+      const overallNetBalance =
+        totalContractsValue -
+        (totalAllBaseSalaries + totalEmployeeNetSalaries + totalVehicleOwnerCosts + totalCoverageReplacementCost);
+
+      res.json({
+        period: { month, year },
+        activePeriod,
+        currentClosing,
+        closingsHistory,
+        schoolContracts,
+        contractsSummary: {
+          schoolsCount: activeContractSchools.length,
+          totalContractsValue,
+          totalAllBaseSalaries,
+          totalAllNetSalaries,
+          totalAllProfit,
+        },
+        grandTotals: {
+          schoolsCount: activeContractSchools.length,
+          driversCount: enrichedSalaries.length,
+          employeesCount: activeEmployees.length,
+          vehiclesCount: activeVehicles.length,
+          totalSchoolContracts: totalContractsValue,
+          totalDriverBaseSalaries: totalAllBaseSalaries,
+          totalDriverAdvances,
+          totalCoverageReplacementCost,
+          totalCoverageDriverDeductions,
+          totalOtherDeductions,
+          totalBonuses,
+          totalDriverNetSalaries: totalAllNetSalaries,
+          totalPaidSalaries,
+          totalUnpaidSalaries,
+          totalEmployeeBaseSalaries,
+          totalEmployeeBonuses,
+          totalEmployeeDeductions,
+          totalEmployeeNetSalaries,
+          totalVehicleOwnerCosts,
+          totalCombinedPayroll,
+          totalLedgerCredits,
+          totalLedgerDebits,
+          netLedgerBalance: totalLedgerCredits - totalLedgerDebits,
+          contractsProfitAfterDrivers: totalAllProfit,
+          overallNetBalance,
+        },
+        salaries: enrichedSalaries,
         advances: monthAdvances.map((a) => ({
           ...a,
           amount: Number(a.amount),
           driverName: driverMap[a.driverId]?.fullName || '—',
           driverCode: driverMap[a.driverId]?.driverCode || '—',
+          schoolId: driverMap[a.driverId]?.schoolId ?? null,
           schoolName: driverMap[a.driverId]?.schoolName || '—',
         })),
         coverages: monthCoverages.map((c) => ({
@@ -2199,7 +2537,11 @@ async function startServer() {
           replacementDriverName: c.replacementDriverId
             ? driverMap[c.replacementDriverId]?.fullName || '—'
             : c.replacementExternalName || 'سائق خارجي',
-          schoolName: driverMap[c.absentDriverId]?.schoolName || '—',
+          schoolId: c.schoolId ?? driverMap[c.absentDriverId]?.schoolId ?? null,
+          schoolName:
+            (c.schoolId && schoolById[c.schoolId]?.name) ||
+            driverMap[c.absentDriverId]?.schoolName ||
+            '—',
           busNumber: driverMap[c.absentDriverId]?.busNumber || '—',
         })),
         ledger: monthLedger.map((t) => ({
@@ -2207,6 +2549,8 @@ async function startServer() {
           amount: Number(t.amount),
           driverName: driverMap[t.driverId]?.fullName || '—',
           driverCode: driverMap[t.driverId]?.driverCode || '—',
+          schoolId: driverMap[t.driverId]?.schoolId ?? null,
+          schoolName: driverMap[t.driverId]?.schoolName || '—',
         })),
       });
     } catch (error) {
@@ -3767,6 +4111,9 @@ async function startServer() {
   // 9. Notifications
   app.get('/api/notifications', requireAuth, async (req: AuthRequest, res) => {
     try {
+      if (req.dbUser?.roleSlug === 'supervisor' || req.supervisorRecord) {
+        return res.json({ notifications: [] });
+      }
       if (req.dbUser?.roleSlug === 'driver') {
         if (!req.driverRecord) return res.json({ notifications: [] });
         const rows = await db
@@ -3853,6 +4200,25 @@ async function startServer() {
       res.json({ ok: true });
     } catch (error) {
       res.status(500).json({ error: 'تعذر تحديث الإشعار' });
+    }
+  });
+
+  app.post('/api/notifications/mark-all-read', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug === 'driver') {
+        if (!req.driverRecord) {
+          return res.status(403).json({ error: 'غير مصرح لك بتعديل الإشعارات' });
+        }
+        await db
+          .update(notifications)
+          .set({ isRead: true })
+          .where(eq(notifications.recipientDriverId, req.driverRecord.id));
+        return res.json({ ok: true });
+      }
+      await db.update(notifications).set({ isRead: true });
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ error: 'تعذر تحديث الإشعارات' });
     }
   });
 
@@ -5301,6 +5667,56 @@ async function startServer() {
     }
   });
 
+  // Supervisor App: Explicitly Stop/Close Live Location if desired
+  app.post('/api/supervisor-app/gps/stop', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'supervisor' && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'هذا المسار مخصص لنسخة المشرفة والمدير العام فقط' });
+      }
+
+      let targetSupervisorId: number | null = req.supervisorRecord?.id || null;
+      if (req.dbUser?.roleSlug === 'super_admin') {
+        const override = req.query.asSupervisorId || req.body?.supervisorId;
+        if (override) targetSupervisorId = Number(override);
+      }
+
+      if (!targetSupervisorId) {
+        return res.status(403).json({ error: 'لا يوجد ملف مشرفة مرتبط بهذا الحساب' });
+      }
+
+      const now = new Date();
+      await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        await db
+          .update(supervisors)
+          .set({
+            liveLat: null,
+            liveLng: null,
+            liveSpeedKmh: 0,
+            liveAccuracyMeters: null,
+            liveUpdatedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(supervisors.id, targetSupervisorId));
+
+        if (req.dbUser?.id) {
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser.id,
+            action: 'SUPERVISOR_GPS_STOP',
+            entityType: 'supervisors',
+            entityId: String(targetSupervisorId),
+            afterJson: { stoppedAt: now.toISOString() },
+            ipAddress: req.ip || '',
+          });
+        }
+      });
+
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('Supervisor GPS stop error:', error);
+      res.status(500).json({ error: 'تعذر إغلاق اللايف لوكيشن' });
+    }
+  });
+
   // Supervisor App: Two Daily Missions (1: Morning Trip Start / 2: Evening Trip End)
   app.post('/api/supervisor-app/trip-action', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -5446,10 +5862,28 @@ async function startServer() {
     }
   });
 
-  // ==================== Unified Chat & Messaging API ====================
+  // ==================== Unified Chat & Driver-Only Broadcast API ====================
+  const resolveChatActor = (req: AuthRequest) => {
+    const isSupervisor = req.dbUser?.roleSlug === 'supervisor' || Boolean(req.supervisorRecord);
+    const senderName =
+      req.driverRecord?.fullName ||
+      req.supervisorRecord?.fullName ||
+      req.dbUser?.fullName ||
+      'مستخدم';
+    const senderRole = req.driverRecord
+      ? 'driver'
+      : req.supervisorRecord
+      ? 'supervisor'
+      : req.dbUser?.roleSlug || 'admin';
+    const senderAvatar =
+      req.driverRecord?.photoUrl || req.supervisorRecord?.photoUrl || '';
+    return { senderName, senderRole, senderAvatar, isSupervisor };
+  };
+
   app.get('/api/chat/channels', requireAuth, async (req: AuthRequest, res) => {
     try {
-      const channels = await getEnrichedChatChannels();
+      const { senderRole } = resolveChatActor(req);
+      const channels = await getEnrichedChatChannels(senderRole);
       res.json({ ok: true, channels });
     } catch (err) {
       console.error('Error fetching chat channels:', err);
@@ -5460,6 +5894,10 @@ async function startServer() {
   app.get('/api/chat/messages', requireAuth, async (req: AuthRequest, res) => {
     try {
       const roomKey = String(req.query.roomKey || 'broadcast');
+      const { isSupervisor } = resolveChatActor(req);
+      if (roomKey === DRIVERS_BROADCAST_ROOM && isSupervisor) {
+        return res.status(403).json({ error: 'هذه القناة مخصصة للإدارة والسائقين فقط' });
+      }
       const messages = await getMessagesForRoom(roomKey);
       res.json({ ok: true, roomKey, messages });
     } catch (err) {
@@ -5475,18 +5913,10 @@ async function startServer() {
         return res.status(400).json({ error: 'roomKey مطلوب' });
       }
 
-      const senderName =
-        req.driverRecord?.fullName ||
-        req.supervisorRecord?.fullName ||
-        req.dbUser?.fullName ||
-        'مستخدم';
-      const senderRole = req.driverRecord
-        ? 'driver'
-        : req.supervisorRecord
-        ? 'supervisor'
-        : req.dbUser?.roleSlug || 'admin';
-      const senderAvatar =
-        req.driverRecord?.photoUrl || req.supervisorRecord?.photoUrl || '';
+      const { senderName, senderRole, senderAvatar, isSupervisor } = resolveChatActor(req);
+      if (roomKey === DRIVERS_BROADCAST_ROOM && isSupervisor) {
+        return res.status(403).json({ error: 'هذه القناة مخصصة للإدارة والسائقين فقط' });
+      }
 
       const saved = await saveMessageToDb({
         roomKey,
@@ -5513,19 +5943,116 @@ async function startServer() {
     }
   });
 
+  // Dedicated Admin Driver-Only Broadcast Endpoint (Text + Voice Note -> Drivers Only, Excludes Supervisors)
+  app.post('/api/admin/drivers-broadcast', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const { title, textContent, audioDataUrl, audioDurationSec } = req.body || {};
+      const cleanText = String(textContent || '').trim();
+      const hasAudio = typeof audioDataUrl === 'string' && audioDataUrl.startsWith('data:audio/');
+      if (!cleanText && !hasAudio) {
+        return res.status(400).json({ error: 'يرجى كتابة رسالة نصية أو تسجيل فويس نوت للسائقين' });
+      }
+
+      const senderName = req.dbUser?.fullName || 'الإدارة';
+      const senderRole = req.dbUser?.roleSlug || 'super_admin';
+
+      let lastMessage: Awaited<ReturnType<typeof saveMessageToDb>> | null = null;
+
+      if (cleanText) {
+        const textSaved = await saveMessageToDb({
+          roomKey: DRIVERS_BROADCAST_ROOM,
+          senderUserId: req.dbUser?.id || null,
+          senderRole,
+          senderName,
+          messageType: 'text',
+          textContent: cleanText,
+        });
+        lastMessage = textSaved;
+        broadcastToRoom(DRIVERS_BROADCAST_ROOM, {
+          type: 'new_message',
+          roomKey: DRIVERS_BROADCAST_ROOM,
+          message: textSaved,
+        });
+      }
+
+      if (hasAudio) {
+        const voiceSaved = await saveMessageToDb({
+          roomKey: DRIVERS_BROADCAST_ROOM,
+          senderUserId: req.dbUser?.id || null,
+          senderRole,
+          senderName,
+          messageType: 'voice_note',
+          textContent: cleanText || '',
+          audioDataUrl,
+          audioDurationSec: Math.max(1, Number(audioDurationSec) || 1),
+        });
+        lastMessage = voiceSaved;
+        broadcastToRoom(DRIVERS_BROADCAST_ROOM, {
+          type: 'new_message',
+          roomKey: DRIVERS_BROADCAST_ROOM,
+          message: voiceSaved,
+        });
+      }
+
+      // Notify ONLY active driver accounts (supervisors are strictly excluded)
+      const activeDrivers = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        return db
+          .select({ id: drivers.id, userId: drivers.userId })
+          .from(drivers)
+          .where(eq(drivers.accountStatus, 'active'));
+      });
+
+      const notifTitle =
+        String(title || '').trim() ||
+        (hasAudio ? '🎤 رسالة صوتية جماعية من الإدارة للسائقين' : '📢 رسالة جماعية من الإدارة للسائقين');
+      const notifBody =
+        cleanText ||
+        `تم إرسال تسجيل صوتي من ${senderName} (${Math.max(1, Number(audioDurationSec) || 1)} ثانية) — افتح تبويب المحادثات للاستماع.`;
+
+      if (activeDrivers.length > 0) {
+        await db.insert(notifications).values(
+          activeDrivers.map((d) => ({
+            recipientDriverId: d.id,
+            recipientUserId: d.userId || null,
+            targetRole: 'driver',
+            type: 'drivers_broadcast',
+            title: notifTitle,
+            body: notifBody,
+          }))
+        );
+      }
+
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'DRIVERS_ONLY_BROADCAST',
+        entityType: 'chat_channels',
+        entityId: DRIVERS_BROADCAST_ROOM,
+        afterJson: {
+          hasText: Boolean(cleanText),
+          hasAudio,
+          notifiedDriversCount: activeDrivers.length,
+        },
+        ipAddress: req.ip || '',
+      });
+
+      res.status(201).json({
+        ok: true,
+        notifiedDriversCount: activeDrivers.length,
+        message: lastMessage,
+      });
+    } catch (err) {
+      console.error('Drivers-only broadcast error:', err);
+      res.status(500).json({ error: 'تعذر إرسال الرسالة الجماعية للسائقين' });
+    }
+  });
+
   app.post('/api/chat/call-signal', requireAuth, async (req: AuthRequest, res) => {
     try {
       const { roomKey, action, payload } = req.body;
-      const senderName =
-        req.driverRecord?.fullName ||
-        req.supervisorRecord?.fullName ||
-        req.dbUser?.fullName ||
-        'مستخدم';
-      const senderRole = req.driverRecord
-        ? 'driver'
-        : req.supervisorRecord
-        ? 'supervisor'
-        : req.dbUser?.roleSlug || 'admin';
+      const { senderName, senderRole, isSupervisor } = resolveChatActor(req);
+      if (roomKey === DRIVERS_BROADCAST_ROOM && isSupervisor) {
+        return res.status(403).json({ error: 'هذه القناة مخصصة للإدارة والسائقين فقط' });
+      }
 
       broadcastToRoom(roomKey, {
         type: 'call_signal',

@@ -7,6 +7,8 @@ import {
 } from '@vis.gl/react-google-maps';
 import {
   AlertCircle,
+  ArrowRight,
+  BatteryCharging,
   Bus,
   CheckCircle2,
   Loader2,
@@ -15,6 +17,7 @@ import {
   Moon,
   Navigation,
   Phone,
+  PowerOff,
   RadioTower,
   MessageSquare,
   RefreshCw,
@@ -42,6 +45,7 @@ import { AppLogoBackdrop } from '../AppLogoBackdrop';
 import { ChatHubModule } from '../chat/ChatHubModule';
 import { CompanyLegalFooter } from '../CompanyLegalFooter';
 import { DriverAvatar } from '../DriverAvatar';
+import { MorningSpiritualRibbon } from '../MorningSpiritualRibbon';
 import {
   ALEXANDRIA_CENTER,
   AdvancedMarkerWithRef,
@@ -62,6 +66,13 @@ import type {
 } from '../../types';
 
 const SUPERVISOR_GPS_PREF_KEY = 'alwaleed_supervisor_live_gps_enabled';
+const SUPERVISOR_GPS_ECONOMY_KEY = 'alwaleed_supervisor_gps_economy';
+
+const ECONOMY_GPS_OPTIONS: PositionOptions = {
+  enableHighAccuracy: false,
+  timeout: 15000,
+  maximumAge: 60000,
+};
 
 /**
  * Dedicated Supervisor App ("نسخة المشرفة")
@@ -107,6 +118,13 @@ export const SupervisorApp: React.FC<{
       return true;
     }
   });
+  const [gpsEconomyMode, setGpsEconomyMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SUPERVISOR_GPS_ECONOMY_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [gpsPermissionError, setGpsPermissionError] = useState<string | null>(null);
   const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
   const [livePosition, setLivePosition] = useState<SupervisorLiveLocation | null>(null);
@@ -119,6 +137,31 @@ export const SupervisorApp: React.FC<{
   const [actionBusy, setActionBusy] = useState<'start_morning' | 'end_evening' | null>(null);
   const [actionBanner, setActionBanner] = useState<string | null>(null);
   const [showChatHub, setShowChatHub] = useState<boolean>(false);
+
+  const openChatHub = useCallback(() => {
+    if (!showChatHub && typeof window !== 'undefined') {
+      try {
+        window.history.pushState({ alwaleedSupervisorChat: true }, '');
+      } catch {
+        // ignore
+      }
+    }
+    setShowChatHub(true);
+  }, [showChatHub]);
+
+  const closeChatHub = useCallback(() => {
+    setShowChatHub(false);
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (showChatHub) {
+        setShowChatHub(false);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [showChatHub]);
 
   const hasDataRef = useRef(false);
   hasDataRef.current = Boolean(data);
@@ -267,9 +310,11 @@ export const SupervisorApp: React.FC<{
       },
       force = false
     ) => {
+      if (!gpsEnabled) return;
       if (!isValidGpsCoordinate(coords.lat, coords.lng)) return;
       const nowMs = Date.now();
-      if (!force && nowMs - lastGpsSentAtRef.current < 4800) return;
+      const minInterval = gpsEconomyMode ? 55000 : 4800;
+      if (!force && nowMs - lastGpsSentAtRef.current < minInterval) return;
       lastGpsSentAtRef.current = nowMs;
 
       latestCoordsRef.current = {
@@ -299,7 +344,7 @@ export const SupervisorApp: React.FC<{
           `/api/supervisor-app/gps${params.toString() ? `?${params.toString()}` : ''}`,
           {
             method: 'POST',
-            body: JSON.stringify(coords),
+            body: JSON.stringify({ ...coords, economyMode: gpsEconomyMode }),
           }
         );
         if (res.liveLocation) {
@@ -312,10 +357,10 @@ export const SupervisorApp: React.FC<{
         setGpsSending(false);
       }
     },
-    [allowSupervisorSelector, selectedSupervisorId]
+    [allowSupervisorSelector, selectedSupervisorId, gpsEnabled, gpsEconomyMode]
   );
 
-  // Auto-Start Live Location immediately when supervisor opens the app
+  // Auto-Start Live Location (or Economy snapshot) when supervisor has GPS enabled
   useEffect(() => {
     if (allowSupervisorSelector || !data?.linked || !supervisor?.id || !gpsEnabled) {
       return;
@@ -329,6 +374,7 @@ export const SupervisorApp: React.FC<{
     estimator.reset();
     let watchId: number | null = null;
     let firstFixCentered = false;
+    const geoOptions = gpsEconomyMode ? ECONOMY_GPS_OPTIONS : HIGH_ACCURACY_GPS_OPTIONS;
 
     const handlePosition = (pos: GeolocationPosition, forceSend: boolean) => {
       setGpsPermissionError(null);
@@ -358,30 +404,38 @@ export const SupervisorApp: React.FC<{
     navigator.geolocation.getCurrentPosition(
       (pos) => handlePosition(pos, true),
       handleGpsError,
-      HIGH_ACCURACY_GPS_OPTIONS
+      geoOptions
     );
 
-    watchId = navigator.geolocation.watchPosition(
-      (pos) => handlePosition(pos, false),
-      handleGpsError,
-      HIGH_ACCURACY_GPS_OPTIONS
-    );
+    // In Economy mode, skip continuous watchPosition to save battery & GPS radio
+    if (!gpsEconomyMode) {
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => handlePosition(pos, false),
+        handleGpsError,
+        HIGH_ACCURACY_GPS_OPTIONS
+      );
+    }
 
     return () => {
       if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
       }
     };
-  }, [allowSupervisorSelector, data?.linked, supervisor?.id, gpsEnabled, transmitSupervisorGps]);
+  }, [allowSupervisorSelector, data?.linked, supervisor?.id, gpsEnabled, gpsEconomyMode, transmitSupervisorGps]);
 
-  // Persistent Background Service & WakeLock (6:00 AM to 4:00 PM / Background persistence)
+  // Persistent Background Service & WakeLock (disabled in Economy mode to conserve battery)
   useEffect(() => {
     if (allowSupervisorSelector || !data?.linked || !supervisor?.id || !gpsEnabled) {
+      setWakeLockActive(false);
       return;
     }
 
     let wakeLockObj: any = null;
     const requestWakeLock = async () => {
+      if (gpsEconomyMode) {
+        setWakeLockActive(false);
+        return;
+      }
       try {
         if ('wakeLock' in navigator && (navigator as any).wakeLock?.request) {
           wakeLockObj = await (navigator as any).wakeLock.request('screen');
@@ -396,7 +450,9 @@ export const SupervisorApp: React.FC<{
     };
     requestWakeLock();
 
-    // Background interval check every 15s even when app is minimized or hidden
+    const intervalMs = gpsEconomyMode ? 60000 : 15000;
+    const pollOptions = gpsEconomyMode ? ECONOMY_GPS_OPTIONS : HIGH_ACCURACY_GPS_OPTIONS;
+
     const bgInterval = window.setInterval(() => {
       if (typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
       navigator.geolocation.getCurrentPosition(
@@ -409,27 +465,61 @@ export const SupervisorApp: React.FC<{
             heading: est.heading,
             accuracyMeters: est.accuracyMeters,
           };
-          transmitSupervisorGps(payload, false);
+          transmitSupervisorGps(payload, gpsEconomyMode);
         },
         () => {},
-        HIGH_ACCURACY_GPS_OPTIONS
+        pollOptions
       );
-    }, 15000);
+    }, intervalMs);
 
     return () => {
       window.clearInterval(bgInterval);
       if (wakeLockObj && typeof wakeLockObj.release === 'function') {
         wakeLockObj.release().catch(() => {});
       }
+      setWakeLockActive(false);
     };
-  }, [allowSupervisorSelector, data?.linked, supervisor?.id, gpsEnabled, transmitSupervisorGps]);
+  }, [allowSupervisorSelector, data?.linked, supervisor?.id, gpsEnabled, gpsEconomyMode, transmitSupervisorGps]);
 
-  const toggleLiveGps = () => {
+  const toggleLiveGps = async () => {
     const next = !gpsEnabled;
     setGpsEnabled(next);
     setGpsPermissionError(null);
     try {
       localStorage.setItem(SUPERVISOR_GPS_PREF_KEY, String(next));
+    } catch {
+      // ignore
+    }
+
+    if (!next) {
+      setWakeLockActive(false);
+      setLivePosition(null);
+      latestCoordsRef.current = null;
+      setData((prev) =>
+        prev && prev.supervisor
+          ? { ...prev, supervisor: { ...prev.supervisor, liveLocation: null } }
+          : prev
+      );
+      try {
+        const params = new URLSearchParams();
+        if (allowSupervisorSelector && selectedSupervisorId) {
+          params.set('asSupervisorId', selectedSupervisorId);
+        }
+        await apiFetch(
+          `/api/supervisor-app/gps/stop${params.toString() ? `?${params.toString()}` : ''}`,
+          { method: 'POST' }
+        );
+      } catch {
+        // ignore network errors on stop
+      }
+    }
+  };
+
+  const toggleEconomyMode = () => {
+    const next = !gpsEconomyMode;
+    setGpsEconomyMode(next);
+    try {
+      localStorage.setItem(SUPERVISOR_GPS_ECONOMY_KEY, String(next));
     } catch {
       // ignore
     }
@@ -598,6 +688,28 @@ export const SupervisorApp: React.FC<{
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {showChatHub ? (
+              <button
+                type="button"
+                onClick={closeChatHub}
+                className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3 text-xs font-bold text-[#0B1F3A] cursor-pointer"
+              >
+                <ArrowRight className="w-4 h-4" />
+                <span>العودة للقائمة السابقة</span>
+              </button>
+            ) : (
+              data?.linked && (
+                <button
+                  type="button"
+                  onClick={openChatHub}
+                  className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 px-3 text-xs font-semibold text-white cursor-pointer"
+                >
+                  <MessageSquare className="w-4 h-4 text-[#C89B3C]" />
+                  <span>المحادثات</span>
+                </button>
+              )
+            )}
+
             {allowSupervisorSelector && allSupervisors.length > 0 && (
               <select
                 value={selectedSupervisorId}
@@ -707,6 +819,14 @@ export const SupervisorApp: React.FC<{
               )}
             </div>
           </div>
+        ) : showChatHub ? (
+          <div className="space-y-4">
+            <ChatHubModule
+              currentRole="supervisor"
+              initialRoomKey={route ? `route_${route.id}` : 'broadcast'}
+              onClose={closeChatHub}
+            />
+          </div>
         ) : (
           <>
             {/* 1. Supervisor Identity Card (Photo, Name, Mobile, Code ONLY) */}
@@ -748,13 +868,23 @@ export const SupervisorApp: React.FC<{
                       <h1 className="font-display text-2xl font-bold">{supervisor.fullName}</h1>
                     </div>
                   </div>
-                  <span
-                    className={`text-xs font-bold ${
-                      supervisor.accountStatus === 'active' ? 'text-emerald-300' : 'text-amber-300'
-                    }`}
-                  >
-                    {supervisor.accountStatus === 'active' ? 'حساب نشط' : 'غير نشط'}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={openChatHub}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer"
+                    >
+                      <RadioTower className="w-4 h-4" />
+                      غرفة محادثة الخط
+                    </button>
+                    <span
+                      className={`text-xs font-bold ${
+                        supervisor.accountStatus === 'active' ? 'text-emerald-300' : 'text-amber-300'
+                      }`}
+                    >
+                      {supervisor.accountStatus === 'active' ? 'حساب نشط' : 'غير نشط'}
+                    </span>
+                  </div>
                 </div>
 
                 <dl className="grid grid-cols-2 sm:grid-cols-3 gap-4 pt-4 border-t border-white/15 text-sm">
@@ -786,7 +916,9 @@ export const SupervisorApp: React.FC<{
               </div>
             </section>
 
-            {/* 2. Auto-Started Live Location Status Strip */}
+            <MorningSpiritualRibbon compact />
+
+            {/* 2. Live Location Control Card (Auto-Start + Close Option + Economy Mode) */}
             <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
@@ -796,7 +928,7 @@ export const SupervisorApp: React.FC<{
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                         : effectiveLiveLocation?.isLive
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        : 'bg-slate-100 text-slate-500 border border-slate-200'
                     }`}
                   >
                     {!allowSupervisorSelector && gpsEnabled && !gpsPermissionError ? (
@@ -808,64 +940,114 @@ export const SupervisorApp: React.FC<{
                     )}
                   </div>
                   <div className="min-w-0">
-                    <div className="text-sm font-bold text-[#0B1F3A] flex items-center gap-2">
+                    <div className="text-sm font-bold text-[#0B1F3A] flex flex-wrap items-center gap-2">
                       <span>اللايف لوكيشن (الموقع المباشر)</span>
+                      {gpsEnabled && gpsEconomyMode && (
+                        <span className="text-[11px] font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                          وضع الاقتصاد نشط
+                        </span>
+                      )}
                       {gpsSending && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C89B3C]" />}
                     </div>
                     <p className="text-xs text-slate-600 mt-0.5 tabular-nums">
                       {allowSupervisorSelector
                         ? effectiveLiveLocation?.recordedAt
                           ? `آخر موقع مسجل للمشرفة ${formatRelativeArabicTime(effectiveLiveLocation.recordedAt)}`
-                          : 'يبدأ اللايف لوكيشن تلقائياً فور فتح المشرفة للتطبيق'
+                          : 'اللايف لوكيشن مغلق أو لم يتم تسجيل موقع بعد'
                         : !gpsEnabled
-                        ? 'تم إيقاف البث مؤقتاً من المشرفة'
+                        ? 'تم إغلاق اللايف لوكيشن بناءً على رغبتك — يمكنك إعادة تشغيله في أي وقت'
                         : gpsPermissionError
                         ? gpsPermissionError
                         : effectiveLiveLocation?.recordedAt
-                        ? `يعمل تلقائياً الآن · آخر تحديث ${formatRelativeArabicTime(effectiveLiveLocation.recordedAt)} (دقة ${effectiveLiveLocation.accuracyMeters ?? 15} م)`
+                        ? `${gpsEconomyMode ? 'وضع اقتصاد البطارية (تحديث كل 60ث)' : 'بث فوري عالي الدقة'} · آخر تحديث ${formatRelativeArabicTime(effectiveLiveLocation.recordedAt)} (دقة ${effectiveLiveLocation.accuracyMeters ?? 15} م)`
                         : 'جاري تشغيل اللايف لوكيشن وتحديد الموقع تلقائياً...'}
                     </p>
                   </div>
                 </div>
 
                 {!allowSupervisorSelector && (
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {gpsEnabled && (
+                      <button
+                        type="button"
+                        onClick={requestInstantLocationFix}
+                        className="min-h-[40px] inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 text-xs font-semibold text-[#0B1F3A] cursor-pointer"
+                      >
+                        <Navigation className="w-3.5 h-3.5 text-[#C89B3C]" />
+                        تحديث الموقع
+                      </button>
+                    )}
+
                     <button
                       type="button"
-                      onClick={requestInstantLocationFix}
-                      className="min-h-[40px] inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 text-xs font-semibold text-[#0B1F3A] cursor-pointer"
+                      onClick={toggleEconomyMode}
+                      className={`min-h-[40px] inline-flex items-center gap-1.5 rounded-xl border px-3 text-xs font-bold cursor-pointer transition-colors ${
+                        gpsEconomyMode
+                          ? 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                      }`}
+                      title="تقليل استهلاك البطارية والإنترنت بتحديث الموقع كل 60 ثانية"
                     >
-                      <Navigation className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      تحديث الموقع
+                      <BatteryCharging className="w-3.5 h-3.5" />
+                      {gpsEconomyMode ? 'إلغاء وضع الاقتصاد' : 'اقتصاد اللوكيشن'}
                     </button>
+
                     <button
                       type="button"
                       onClick={toggleLiveGps}
-                      className={`min-h-[40px] rounded-xl px-3.5 text-xs font-bold cursor-pointer transition-colors ${
+                      className={`min-h-[40px] inline-flex items-center gap-1.5 rounded-xl px-3.5 text-xs font-bold cursor-pointer transition-colors ${
                         gpsEnabled
-                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                          : 'bg-[#0B1F3A] hover:bg-[#13325c] text-white'
+                          ? 'border border-red-200 bg-red-50 hover:bg-red-100 text-red-700'
+                          : 'bg-emerald-600 hover:bg-emerald-700 text-white'
                       }`}
                     >
-                      {gpsEnabled ? 'نشط تلقائياً' : 'تشغيل البث'}
+                      {gpsEnabled ? (
+                        <>
+                          <PowerOff className="w-3.5 h-3.5" />
+                          <span>إغلاق اللايف لوكيشن</span>
+                        </>
+                      ) : (
+                        <>
+                          <Signal className="w-3.5 h-3.5" />
+                          <span>تشغيل اللايف لوكيشن</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 )}
               </div>
             </section>
 
-            {/* Background Location Tracking Persistence Notice */}
-            <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 text-xs text-blue-900 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <Navigation className="w-4 h-4 text-[#C89B3C] shrink-0" />
-                <span>
-                  <strong>تتبع الموقع في الخلفية نشط (06:00 ص – 04:00 م):</strong> يستمر إرسال الإحداثيات تلقائياً حتى عند تصغير أو إغلاق التطبيق.
+            {/* Background Location Tracking / Economy Persistence Notice */}
+            {gpsEnabled && (
+              <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 text-xs text-blue-900 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  {gpsEconomyMode ? (
+                    <BatteryCharging className="w-4 h-4 text-emerald-700 shrink-0" />
+                  ) : (
+                    <Navigation className="w-4 h-4 text-[#C89B3C] shrink-0" />
+                  )}
+                  <span>
+                    {gpsEconomyMode ? (
+                      <>
+                        <strong>وضع اقتصاد اللوكيشن مفعل:</strong> يتم إرسال الموقع كل 60 ثانية بدقة اقتصادية للحفاظ على شحن البطارية والباقة.
+                      </>
+                    ) : (
+                      <>
+                        <strong>تتبع الموقع في الخلفية نشط (06:00 ص – 04:00 م):</strong> يستمر إرسال الإحداثيات تلقائياً حتى عند تصغير التطبيق.
+                      </>
+                    )}
+                  </span>
+                </div>
+                <span className="text-[11px] font-mono font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded shrink-0">
+                  {gpsEconomyMode
+                    ? 'اقتصادي · 60ث'
+                    : wakeLockActive
+                    ? 'حماية السبات نشطة'
+                    : 'وضع الخلفية'}
                 </span>
               </div>
-              <span className="text-[11px] font-mono font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded shrink-0">
-                {wakeLockActive ? 'حماية السبات نشطة' : 'وضع الخلفية'}
-              </span>
-            </div>
+            )}
 
             {/* 3. Two Daily Trip Missions When Boarding the Bus */}
             <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
