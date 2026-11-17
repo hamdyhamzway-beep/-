@@ -85,30 +85,30 @@ const POLICY_SPECS: PolicySpec[] = [
     name: 'supervisors_admin_select',
     forCmd: 'SELECT',
     usingExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')",
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
   },
   {
     table: 'supervisors',
     name: 'supervisors_admin_insert',
     forCmd: 'INSERT',
     withCheckExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')",
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
   },
   {
     table: 'supervisors',
     name: 'supervisors_admin_update',
     forCmd: 'UPDATE',
     usingExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')",
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
     withCheckExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')",
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
   },
   {
     table: 'supervisors',
     name: 'supervisors_admin_delete',
     forCmd: 'DELETE',
     usingExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')",
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
   },
   {
     table: 'supervisors',
