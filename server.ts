@@ -4467,7 +4467,6 @@ async function startServer() {
     '/api/supervisors',
     requireAuth,
     requireAdminOrStaff,
-    requirePermission('*'),
     async (req: AuthRequest, res) => {
       try {
         const {
@@ -4512,145 +4511,126 @@ async function startServer() {
           }
         }
 
-        const existingSups = await db
-          .select({
-            id: supervisors.id,
-            supervisorCode: supervisors.supervisorCode,
-            fullName: supervisors.fullName,
-          })
-          .from(supervisors);
-        const duplicateSup = existingSups.find(
-          (s) => s.supervisorCode.trim().toLowerCase() === cleanCode.toLowerCase()
-        );
-        if (duplicateSup) {
-          return res.status(409).json({
-            error: `كود المشرفة «${cleanCode}» مسجل بالفعل للمشرفة (${duplicateSup.fullName})`,
-          });
-        }
-
-        const cleanRouteNameInput = String(routeName ?? '').trim();
-        const safeRouteName = PLACEHOLDER_ASSIGNMENTS.has(cleanRouteNameInput)
-          ? ''
-          : cleanRouteNameInput;
-        const cleanPickupArea = String(pickupArea ?? '').trim();
-        const cleanDropoffArea = String(dropoffArea ?? '').trim();
-        const cleanPickupTime = normalizeArabicDigits(String(pickupTime ?? '')).trim();
-        const cleanDropoffTime = normalizeArabicDigits(String(dropoffTime ?? '')).trim();
-        const cleanSchoolName = String(schoolName ?? '').trim();
-        const safeSchoolName = PLACEHOLDER_ASSIGNMENTS.has(cleanSchoolName) ? '' : cleanSchoolName;
-
-        const hasTripDetails = Boolean(
-          cleanPickupArea || cleanDropoffArea || cleanPickupTime || cleanDropoffTime
-        );
-        const effectiveRouteName =
-          safeRouteName ||
-          (hasTripDetails
-            ? cleanPickupArea && (cleanDropoffArea || safeSchoolName)
-              ? `${cleanPickupArea} - ${cleanDropoffArea || safeSchoolName}`
-              : cleanPickupArea || `خط ${cleanName}`
-            : '');
-
-        const created = await db.transaction(async (tx) => {
-          const resolvedSchoolId = await resolveSchoolIdForDriver(tx, {
-            schoolId,
-            schoolName: safeSchoolName,
-          });
-          const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
-          const resolvedRouteId = await resolveRouteIdForDriver(tx, {
-            schoolId: resolvedSchoolId,
-            routeId,
-            routeName: effectiveRouteName || undefined,
-            pickupArea: cleanPickupArea,
-            pickupTime: cleanPickupTime,
-            dropoffTime: cleanDropoffTime,
-          });
-
-          if (resolvedRouteId && hasTripDetails) {
-            const [curRoute] = await tx
-              .select()
-              .from(routes)
-              .where(eq(routes.id, resolvedRouteId))
-              .limit(1);
-            if (curRoute) {
-              await tx
-                .update(routes)
-                .set({
-                  pickupArea: cleanPickupArea || curRoute.pickupArea,
-                  dropoffArea: cleanDropoffArea || curRoute.dropoffArea,
-                  pickupTime: cleanPickupTime || curRoute.pickupTime,
-                  dropoffTime: cleanDropoffTime || curRoute.dropoffTime,
-                })
-                .where(eq(routes.id, resolvedRouteId));
-            }
-          }
-
-          const [row] = await tx
-            .insert(supervisors)
-            .values({
-              supervisorCode: cleanCode,
-              fullName: cleanName,
-              phone: cleanPhone,
-              photoUrl: safePhotoUrl,
-              linkedEmail: String(linkedEmail ?? '').trim().toLowerCase(),
-              schoolId: resolvedSchoolId,
-              vehicleId: resolvedVehicleId,
-              routeId: resolvedRouteId,
-              accountStatus: accountStatus === 'inactive' ? 'inactive' : 'active',
-              notes: String(notes ?? '').trim(),
+        const created = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const existingSups = await db
+            .select({
+              id: supervisors.id,
+              supervisorCode: supervisors.supervisorCode,
+              fullName: supervisors.fullName,
             })
-            .returning();
-
-          if (req.dbUser?.id) {
-            await tx.insert(auditLogs).values({
-              actorUserId: req.dbUser.id,
-              action: 'CREATE_SUPERVISOR',
-              entityType: 'supervisors',
-              entityId: String(row.id),
-              afterJson: { supervisorCode: row.supervisorCode, fullName: row.fullName },
-              ipAddress: req.ip || '',
-            });
+            .from(supervisors);
+          const duplicateSup = existingSups.find(
+            (s) => s.supervisorCode.trim().toLowerCase() === cleanCode.toLowerCase()
+          );
+          if (duplicateSup) {
+            throw new Error(`DUPLICATE_CODE:${duplicateSup.fullName}`);
           }
 
-          return row;
+          const cleanRouteNameInput = String(routeName ?? '').trim();
+          const safeRouteName = PLACEHOLDER_ASSIGNMENTS.has(cleanRouteNameInput)
+            ? ''
+            : cleanRouteNameInput;
+          const cleanPickupArea = String(pickupArea ?? '').trim();
+          const cleanDropoffArea = String(dropoffArea ?? '').trim();
+          const cleanPickupTime = normalizeArabicDigits(String(pickupTime ?? '')).trim();
+          const cleanDropoffTime = normalizeArabicDigits(String(dropoffTime ?? '')).trim();
+          const cleanSchoolName = String(schoolName ?? '').trim();
+          const safeSchoolName = PLACEHOLDER_ASSIGNMENTS.has(cleanSchoolName) ? '' : cleanSchoolName;
+
+          const hasTripDetails = Boolean(
+            cleanPickupArea || cleanDropoffArea || cleanPickupTime || cleanDropoffTime
+          );
+          const effectiveRouteName =
+            safeRouteName ||
+            (hasTripDetails
+              ? cleanPickupArea && (cleanDropoffArea || safeSchoolName)
+                ? `${cleanPickupArea} - ${cleanDropoffArea || safeSchoolName}`
+                : cleanPickupArea || `خط ${cleanName}`
+              : '');
+
+          return await db.transaction(async (tx) => {
+            const resolvedSchoolId = await resolveSchoolIdForDriver(tx, {
+              schoolId,
+              schoolName: safeSchoolName,
+            });
+            const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
+            const resolvedRouteId = await resolveRouteIdForDriver(tx, {
+              schoolId: resolvedSchoolId,
+              routeId,
+              routeName: effectiveRouteName || undefined,
+              pickupArea: cleanPickupArea,
+              pickupTime: cleanPickupTime,
+              dropoffTime: cleanDropoffTime,
+            });
+
+            if (resolvedRouteId && hasTripDetails) {
+              const [curRoute] = await tx
+                .select()
+                .from(routes)
+                .where(eq(routes.id, resolvedRouteId))
+                .limit(1);
+              if (curRoute) {
+                await tx
+                  .update(routes)
+                  .set({
+                    pickupArea: cleanPickupArea || curRoute.pickupArea,
+                    dropoffArea: cleanDropoffArea || curRoute.dropoffArea,
+                    pickupTime: cleanPickupTime || curRoute.pickupTime,
+                    dropoffTime: cleanDropoffTime || curRoute.dropoffTime,
+                  })
+                  .where(eq(routes.id, resolvedRouteId));
+              }
+            }
+
+            const [row] = await tx
+              .insert(supervisors)
+              .values({
+                supervisorCode: cleanCode,
+                fullName: cleanName,
+                phone: cleanPhone,
+                photoUrl: safePhotoUrl,
+                linkedEmail: String(linkedEmail ?? '').trim().toLowerCase(),
+                schoolId: resolvedSchoolId,
+                vehicleId: resolvedVehicleId,
+                routeId: resolvedRouteId,
+                accountStatus: accountStatus === 'inactive' ? 'inactive' : 'active',
+                notes: String(notes ?? '').trim(),
+              })
+              .returning();
+
+            if (req.dbUser?.id) {
+              await tx.insert(auditLogs).values({
+                actorUserId: req.dbUser.id,
+                action: 'CREATE_SUPERVISOR',
+                entityType: 'supervisors',
+                entityId: String(row.id),
+                afterJson: { supervisorCode: row.supervisorCode, fullName: row.fullName },
+                ipAddress: req.ip || '',
+              });
+            }
+
+            return row;
+          });
         });
 
         const enriched = (await getEnrichedSupervisors()).find((s) => s.id === created.id);
         res.status(201).json({ supervisor: enriched || created });
       } catch (error: unknown) {
         console.error('Create supervisor error:', error);
+        const errStr = error instanceof Error ? error.message : String(error);
+        if (errStr.startsWith('DUPLICATE_CODE:')) {
+          const supName = errStr.split(':')[1] || '';
+          return res.status(409).json({
+            error: `كود المشرفة مسجل بالفعل للمشرفة (${supName})`,
+          });
+        }
         const pgInfo = extractDatabaseErrorInfo(error);
         const lowerMsg = pgInfo.message.toLowerCase();
 
         if (pgInfo.code === '23505' || lowerMsg.includes('unique')) {
-          if (pgInfo.constraint?.includes('supervisor_code') || lowerMsg.includes('supervisor_code')) {
-            return res.status(409).json({
-              error: 'كود المشرفة مسجل بالفعل لمشرفة أخرى',
-              details: pgInfo.detail || pgInfo.message,
-            });
-          }
-          if (pgInfo.constraint?.includes('vehicles') || lowerMsg.includes('vehicles')) {
-            return res.status(409).json({
-              error: 'رقم الباص المدخل متعارض مع مركبة أخرى مسجلة',
-              details: pgInfo.detail || pgInfo.message,
-            });
-          }
           return res.status(409).json({
-            error: `بيانات مكررة غير مسموح بتكرارها: ${pgInfo.detail || pgInfo.message}`,
-            details: pgInfo.message,
-          });
-        }
-
-        if (pgInfo.code === '42501' || lowerMsg.includes('row-level security')) {
-          return res.status(403).json({
-            error: 'صلاحيات قاعدة البيانات لا تسمح بإضافة المشرفة من هذا الحساب',
-            details: pgInfo.message,
-          });
-        }
-
-        if (pgInfo.code === '23502' || pgInfo.code === '23503') {
-          return res.status(400).json({
-            error: `بيانات غير مكتملة أو ربط غير صالح: ${pgInfo.detail || pgInfo.message}`,
-            details: pgInfo.message,
+            error: 'كود المشرفة أو رقم الباص مسجل بالفعل لبيان آخر',
+            details: pgInfo.detail || pgInfo.message,
           });
         }
 
@@ -4666,17 +4646,9 @@ async function startServer() {
     '/api/supervisors/:id',
     requireAuth,
     requireAdminOrStaff,
-    requirePermission('*'),
     async (req: AuthRequest, res) => {
       try {
         const id = Number(req.params.id);
-        const [existing] = await db
-          .select()
-          .from(supervisors)
-          .where(eq(supervisors.id, id))
-          .limit(1);
-        if (!existing) return res.status(404).json({ error: 'المشرفة غير موجودة' });
-
         const {
           supervisorCode,
           fullName,
@@ -4697,178 +4669,197 @@ async function startServer() {
           notes,
         } = req.body ?? {};
 
-        const nextCode =
-          supervisorCode !== undefined
-            ? normalizeDriverCode(supervisorCode) || existing.supervisorCode
-            : existing.supervisorCode;
-        const nextName =
-          fullName !== undefined ? String(fullName ?? '').trim() : existing.fullName;
-        const rawPhone =
-          phone !== undefined ? normalizeArabicDigits(String(phone ?? '')).trim() : existing.phone;
-        const nextPhone = normalizeEgyptPhone(rawPhone) || rawPhone;
-
-        if (!nextCode || !nextName || !nextPhone) {
-          return res
-            .status(400)
-            .json({ error: 'كود المشرفة والاسم الكامل ورقم الموبايل حقول إلزامية' });
-        }
-
-        let nextPhotoUrl = existing.photoUrl || '';
-        if (photoUrl !== undefined) {
-          try {
-            nextPhotoUrl = sanitizeDriverPhotoUrl(photoUrl);
-          } catch (err: unknown) {
-            return res.status(400).json({
-              error: err instanceof Error ? err.message : 'صورة المشرفة غير صالحة',
-            });
-          }
-        }
-
-        if (nextCode.toLowerCase() !== existing.supervisorCode.toLowerCase()) {
-          const [dupSup] = await db
-            .select({ id: supervisors.id })
+        const updated = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
             .from(supervisors)
-            .where(
-              and(
-                ne(supervisors.id, id),
-                sql`LOWER(TRIM(${supervisors.supervisorCode})) = LOWER(${nextCode})`
-              )
-            )
+            .where(eq(supervisors.id, id))
             .limit(1);
-          if (dupSup) {
-            return res
-              .status(409)
-              .json({ error: `كود المشرفة ${nextCode} مسجل مسبقاً لمشرفة أخرى` });
+          if (!existing) {
+            throw new Error('SUPERVISOR_NOT_FOUND');
           }
-        }
 
-        const cleanRouteNameInput = routeName !== undefined ? String(routeName ?? '').trim() : undefined;
-        const safeRouteName =
-          cleanRouteNameInput !== undefined && PLACEHOLDER_ASSIGNMENTS.has(cleanRouteNameInput)
-            ? ''
-            : cleanRouteNameInput;
-        const cleanPickupArea =
-          pickupArea !== undefined ? String(pickupArea ?? '').trim() : undefined;
-        const cleanDropoffArea =
-          dropoffArea !== undefined ? String(dropoffArea ?? '').trim() : undefined;
-        const cleanPickupTime =
-          pickupTime !== undefined ? normalizeArabicDigits(String(pickupTime ?? '')).trim() : undefined;
-        const cleanDropoffTime =
-          dropoffTime !== undefined
-            ? normalizeArabicDigits(String(dropoffTime ?? '')).trim()
-            : undefined;
+          const nextCode =
+            supervisorCode !== undefined
+              ? normalizeDriverCode(supervisorCode) || existing.supervisorCode
+              : existing.supervisorCode;
+          const nextName =
+            fullName !== undefined ? String(fullName ?? '').trim() : existing.fullName;
+          const rawPhone =
+            phone !== undefined ? normalizeArabicDigits(String(phone ?? '')).trim() : existing.phone;
+          const nextPhone = normalizeEgyptPhone(rawPhone) || rawPhone;
 
-        await db.transaction(async (tx) => {
-          const nextSchoolId =
-            schoolName !== undefined || schoolId !== undefined
-              ? await resolveSchoolIdForDriver(tx, { schoolId, schoolName })
-              : existing.schoolId;
-          const nextVehicleId =
-            busNumber !== undefined || vehicleId !== undefined
-              ? await resolveVehicleIdForDriver(tx, { vehicleId, busNumber })
-              : existing.vehicleId;
+          if (!nextCode || !nextName || !nextPhone) {
+            throw new Error('INVALID_FIELDS:كود المشرفة والاسم الكامل ورقم الموبايل حقول إلزامية');
+          }
 
-          const hasTripUpdate = Boolean(
-            cleanPickupArea || cleanDropoffArea || cleanPickupTime || cleanDropoffTime
-          );
-          const effectiveRouteName =
-            safeRouteName !== undefined
-              ? safeRouteName ||
-                (hasTripUpdate
-                  ? cleanPickupArea && cleanDropoffArea
-                    ? `${cleanPickupArea} - ${cleanDropoffArea}`
-                    : cleanPickupArea || `خط ${nextName}`
-                  : '')
-              : undefined;
-
-          const nextRouteId =
-            effectiveRouteName !== undefined || routeId !== undefined
-              ? await resolveRouteIdForDriver(tx, {
-                  schoolId: nextSchoolId,
-                  routeId,
-                  routeName: effectiveRouteName,
-                  pickupArea: cleanPickupArea,
-                  pickupTime: cleanPickupTime,
-                  dropoffTime: cleanDropoffTime,
-                })
-              : existing.routeId;
-
-          if (
-            nextRouteId &&
-            (cleanPickupArea !== undefined ||
-              cleanDropoffArea !== undefined ||
-              cleanPickupTime !== undefined ||
-              cleanDropoffTime !== undefined)
-          ) {
-            const [curRoute] = await tx
-              .select()
-              .from(routes)
-              .where(eq(routes.id, nextRouteId))
-              .limit(1);
-            if (curRoute) {
-              await tx
-                .update(routes)
-                .set({
-                  pickupArea: cleanPickupArea !== undefined ? cleanPickupArea : curRoute.pickupArea,
-                  dropoffArea:
-                    cleanDropoffArea !== undefined ? cleanDropoffArea : curRoute.dropoffArea,
-                  pickupTime: cleanPickupTime !== undefined ? cleanPickupTime : curRoute.pickupTime,
-                  dropoffTime:
-                    cleanDropoffTime !== undefined ? cleanDropoffTime : curRoute.dropoffTime,
-                })
-                .where(eq(routes.id, nextRouteId));
+          let nextPhotoUrl = existing.photoUrl || '';
+          if (photoUrl !== undefined) {
+            try {
+              nextPhotoUrl = sanitizeDriverPhotoUrl(photoUrl);
+            } catch (err: unknown) {
+              throw new Error(`INVALID_PHOTO:${err instanceof Error ? err.message : 'صورة غير صالحة'}`);
             }
           }
 
-          await tx
-            .update(supervisors)
-            .set({
-              supervisorCode: nextCode,
-              fullName: nextName,
-              phone: nextPhone,
-              photoUrl: nextPhotoUrl,
-              linkedEmail:
-                linkedEmail !== undefined
-                  ? String(linkedEmail ?? '').trim().toLowerCase()
-                  : existing.linkedEmail,
-              schoolId: nextSchoolId,
-              vehicleId: nextVehicleId,
-              routeId: nextRouteId,
-              accountStatus:
-                accountStatus === 'inactive' || accountStatus === 'active'
-                  ? accountStatus
-                  : existing.accountStatus,
-              notes: notes !== undefined ? String(notes ?? '').trim() : existing.notes,
-              updatedAt: new Date(),
-            })
-            .where(eq(supervisors.id, id));
+          if (nextCode.toLowerCase() !== existing.supervisorCode.toLowerCase()) {
+            const [dupSup] = await db
+              .select({ id: supervisors.id })
+              .from(supervisors)
+              .where(
+                and(
+                  ne(supervisors.id, id),
+                  sql`LOWER(TRIM(${supervisors.supervisorCode})) = LOWER(${nextCode})`
+                )
+              )
+              .limit(1);
+            if (dupSup) {
+              throw new Error(`DUPLICATE_CODE:${nextCode}`);
+            }
+          }
 
-          await tx.insert(auditLogs).values({
-            actorUserId: req.dbUser!.id,
-            action: 'UPDATE_SUPERVISOR',
-            entityType: 'supervisors',
-            entityId: String(id),
-            beforeJson: {
-              supervisorCode: existing.supervisorCode,
-              fullName: existing.fullName,
-              accountStatus: existing.accountStatus,
-            },
-            afterJson: {
-              supervisorCode: nextCode,
-              fullName: nextName,
-              accountStatus:
-                accountStatus === 'inactive' || accountStatus === 'active'
-                  ? accountStatus
-                  : existing.accountStatus,
-            },
-            ipAddress: req.ip || '',
+          const cleanRouteNameInput = routeName !== undefined ? String(routeName ?? '').trim() : undefined;
+          const safeRouteName =
+            cleanRouteNameInput !== undefined && PLACEHOLDER_ASSIGNMENTS.has(cleanRouteNameInput)
+              ? ''
+              : cleanRouteNameInput;
+          const cleanPickupArea =
+            pickupArea !== undefined ? String(pickupArea ?? '').trim() : undefined;
+          const cleanDropoffArea =
+            dropoffArea !== undefined ? String(dropoffArea ?? '').trim() : undefined;
+          const cleanPickupTime =
+            pickupTime !== undefined ? normalizeArabicDigits(String(pickupTime ?? '')).trim() : undefined;
+          const cleanDropoffTime =
+            dropoffTime !== undefined
+              ? normalizeArabicDigits(String(dropoffTime ?? '')).trim()
+              : undefined;
+
+          await db.transaction(async (tx) => {
+            const nextSchoolId =
+              schoolName !== undefined || schoolId !== undefined
+                ? await resolveSchoolIdForDriver(tx, { schoolId, schoolName })
+                : existing.schoolId;
+            const nextVehicleId =
+              busNumber !== undefined || vehicleId !== undefined
+                ? await resolveVehicleIdForDriver(tx, { vehicleId, busNumber })
+                : existing.vehicleId;
+
+            const hasTripUpdate = Boolean(
+              cleanPickupArea || cleanDropoffArea || cleanPickupTime || cleanDropoffTime
+            );
+            const effectiveRouteName =
+              safeRouteName !== undefined
+                ? safeRouteName ||
+                  (hasTripUpdate
+                    ? cleanPickupArea && cleanDropoffArea
+                      ? `${cleanPickupArea} - ${cleanDropoffArea}`
+                      : cleanPickupArea || `خط ${nextName}`
+                    : '')
+                : undefined;
+
+            const nextRouteId =
+              effectiveRouteName !== undefined || routeId !== undefined
+                ? await resolveRouteIdForDriver(tx, {
+                    schoolId: nextSchoolId,
+                    routeId,
+                    routeName: effectiveRouteName,
+                    pickupArea: cleanPickupArea,
+                    pickupTime: cleanPickupTime,
+                    dropoffTime: cleanDropoffTime,
+                  })
+                : existing.routeId;
+
+            if (
+              nextRouteId &&
+              (cleanPickupArea !== undefined ||
+                cleanDropoffArea !== undefined ||
+                cleanPickupTime !== undefined ||
+                cleanDropoffTime !== undefined)
+            ) {
+              const [curRoute] = await tx
+                .select()
+                .from(routes)
+                .where(eq(routes.id, nextRouteId))
+                .limit(1);
+              if (curRoute) {
+                await tx
+                  .update(routes)
+                  .set({
+                    pickupArea: cleanPickupArea !== undefined ? cleanPickupArea : curRoute.pickupArea,
+                    dropoffArea:
+                      cleanDropoffArea !== undefined ? cleanDropoffArea : curRoute.dropoffArea,
+                    pickupTime: cleanPickupTime !== undefined ? cleanPickupTime : curRoute.pickupTime,
+                    dropoffTime:
+                      cleanDropoffTime !== undefined ? cleanDropoffTime : curRoute.dropoffTime,
+                  })
+                  .where(eq(routes.id, nextRouteId));
+              }
+            }
+
+            await tx
+              .update(supervisors)
+              .set({
+                supervisorCode: nextCode,
+                fullName: nextName,
+                phone: nextPhone,
+                photoUrl: nextPhotoUrl,
+                linkedEmail:
+                  linkedEmail !== undefined
+                    ? String(linkedEmail ?? '').trim().toLowerCase()
+                    : existing.linkedEmail,
+                schoolId: nextSchoolId,
+                vehicleId: nextVehicleId,
+                routeId: nextRouteId,
+                accountStatus:
+                  accountStatus === 'inactive' || accountStatus === 'active'
+                    ? accountStatus
+                    : existing.accountStatus,
+                notes: notes !== undefined ? String(notes ?? '').trim() : existing.notes,
+                updatedAt: new Date(),
+              })
+              .where(eq(supervisors.id, id));
+
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'UPDATE_SUPERVISOR',
+              entityType: 'supervisors',
+              entityId: String(id),
+              beforeJson: {
+                supervisorCode: existing.supervisorCode,
+                fullName: existing.fullName,
+                accountStatus: existing.accountStatus,
+              },
+              afterJson: {
+                supervisorCode: nextCode,
+                fullName: nextName,
+                accountStatus:
+                  accountStatus === 'inactive' || accountStatus === 'active'
+                    ? accountStatus
+                    : existing.accountStatus,
+              },
+              ipAddress: req.ip || '',
+            });
           });
+
+          return (await getEnrichedSupervisors()).find((s) => s.id === id);
         });
 
-        const enriched = (await getEnrichedSupervisors()).find((s) => s.id === id);
-        res.json({ supervisor: enriched });
+        res.json({ supervisor: updated });
       } catch (error: unknown) {
         console.error('Update supervisor error:', error);
+        const errStr = error instanceof Error ? error.message : String(error);
+        if (errStr === 'SUPERVISOR_NOT_FOUND') {
+          return res.status(404).json({ error: 'المشرفة غير موجودة' });
+        }
+        if (errStr.startsWith('INVALID_FIELDS:')) {
+          return res.status(400).json({ error: errStr.split(':')[1] });
+        }
+        if (errStr.startsWith('INVALID_PHOTO:')) {
+          return res.status(400).json({ error: errStr.split(':')[1] });
+        }
+        if (errStr.startsWith('DUPLICATE_CODE:')) {
+          return res.status(409).json({ error: 'كود المشرفة مسجل بالفعل لمشرفة أخرى' });
+        }
         const pgInfo = extractDatabaseErrorInfo(error);
         if (pgInfo.code === '23505') {
           return res.status(409).json({
@@ -4888,32 +4879,39 @@ async function startServer() {
     '/api/supervisors/:id',
     requireAuth,
     requireAdminOrStaff,
-    requirePermission('*'),
     async (req: AuthRequest, res) => {
       try {
         const id = Number(req.params.id);
-        const [existing] = await db
-          .select()
-          .from(supervisors)
-          .where(eq(supervisors.id, id))
-          .limit(1);
-        if (!existing) return res.status(404).json({ error: 'المشرفة غير موجودة' });
+        await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(supervisors)
+            .where(eq(supervisors.id, id))
+            .limit(1);
+          if (!existing) {
+            throw new Error('SUPERVISOR_NOT_FOUND');
+          }
 
-        await db.transaction(async (tx) => {
-          await tx.delete(supervisorTrips).where(eq(supervisorTrips.supervisorId, id));
-          await tx.delete(supervisors).where(eq(supervisors.id, id));
-          await tx.insert(auditLogs).values({
-            actorUserId: req.dbUser!.id,
-            action: 'DELETE_SUPERVISOR',
-            entityType: 'supervisors',
-            entityId: String(id),
-            beforeJson: { supervisorCode: existing.supervisorCode, fullName: existing.fullName },
-            ipAddress: req.ip || '',
+          await db.transaction(async (tx) => {
+            await tx.delete(supervisorTrips).where(eq(supervisorTrips.supervisorId, id));
+            await tx.delete(supervisors).where(eq(supervisors.id, id));
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'DELETE_SUPERVISOR',
+              entityType: 'supervisors',
+              entityId: String(id),
+              beforeJson: { supervisorCode: existing.supervisorCode, fullName: existing.fullName },
+              ipAddress: req.ip || '',
+            });
           });
         });
         res.json({ ok: true, deletedId: id });
-      } catch (error) {
+      } catch (error: unknown) {
         console.error('Delete supervisor error:', error);
+        const errStr = error instanceof Error ? error.message : String(error);
+        if (errStr === 'SUPERVISOR_NOT_FOUND') {
+          return res.status(404).json({ error: 'المشرفة غير موجودة' });
+        }
         res.status(500).json({ error: 'تعذر حذف المشرفة' });
       }
     }

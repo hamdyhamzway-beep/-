@@ -477,8 +477,8 @@ export const SupervisorApp: React.FC<{
           : formatArabicTimestampTime(res.todayTrip.eveningEndedAt);
       setActionBanner(
         action === 'start_morning'
-          ? `تم تسجيل بداية الرحلة صباحاً بنجاح الساعة ${loggedTime}`
-          : `تم تسجيل نهاية الرحلة مساءً بنجاح الساعة ${loggedTime}`
+          ? `تم تسجيل (بدأت الرحلة) بنجاح الساعة ${loggedTime}`
+          : `تم تسجيل (انتهاء الرحلة) بنجاح الساعة ${loggedTime}`
       );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تسجيل حالة الرحلة');
@@ -866,7 +866,7 @@ export const SupervisorApp: React.FC<{
                           todayTrip?.morningStartedAt ? 'text-emerald-950' : 'text-white'
                         }`}
                       >
-                        بداية الرحلة صباحاً
+                        بدأت الرحلة
                       </div>
                       <div
                         className={`text-xs mt-0.5 tabular-nums ${
@@ -875,7 +875,7 @@ export const SupervisorApp: React.FC<{
                       >
                         {todayTrip?.morningStartedAt
                           ? `تم التسجيل الساعة ${formatArabicTimestampTime(todayTrip.morningStartedAt)}`
-                          : 'اضغطي عند ركوب الباص صباحاً'}
+                          : 'اضغطي عند ركوب الباص'}
                       </div>
                     </div>
                   </div>
@@ -914,7 +914,7 @@ export const SupervisorApp: React.FC<{
                           todayTrip?.eveningEndedAt ? 'text-emerald-950' : 'text-[#0B1F3A]'
                         }`}
                       >
-                        نهاية الرحلة مساءً
+                        انتهاء الرحلة
                       </div>
                       <div
                         className={`text-xs mt-0.5 tabular-nums ${
@@ -923,7 +923,7 @@ export const SupervisorApp: React.FC<{
                       >
                         {todayTrip?.eveningEndedAt
                           ? `تم التسجيل الساعة ${formatArabicTimestampTime(todayTrip.eveningEndedAt)}`
-                          : 'اضغطي عند انتهاء الرحلة مساءً'}
+                          : 'اضغطي عند انتهاء الرحلة'}
                       </div>
                     </div>
                   </div>

@@ -553,23 +553,23 @@ export const supervisors = pgTable(
     pgPolicy('supervisors_admin_select', {
       for: 'select',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')`,
     }),
     pgPolicy('supervisors_admin_insert', {
       for: 'insert',
       to: 'public',
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')`,
     }),
     pgPolicy('supervisors_admin_update', {
       for: 'update',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')`,
     }),
     pgPolicy('supervisors_admin_delete', {
       for: 'delete',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff')`,
     }),
     pgPolicy('supervisors_self_select', {
       for: 'select',

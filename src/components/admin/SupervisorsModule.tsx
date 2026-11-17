@@ -657,7 +657,28 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-[#0B1F3A] mb-1">رقم الموبايل *</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-bold text-[#0B1F3A]">رقم الموبايل *</label>
+                    {'contacts' in navigator && 'select' in (navigator as any).contacts ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const contacts = await (navigator as any).contacts.select(['tel'], { multiple: false });
+                            if (contacts && contacts.length > 0 && contacts[0].tel && contacts[0].tel.length > 0) {
+                              setForm((p) => ({ ...p, phone: contacts[0].tel[0] }));
+                            }
+                          } catch (err) {
+                            console.warn('Contact picker error:', err);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#0B1F3A] hover:text-[#C89B3C] cursor-pointer"
+                      >
+                        <Phone className="w-3 h-3 text-[#C89B3C]" />
+                        جهات الاتصال
+                      </button>
+                    ) : null}
+                  </div>
                   <input
                     required
                     dir="ltr"
