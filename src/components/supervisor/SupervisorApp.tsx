@@ -15,6 +15,8 @@ import {
   Moon,
   Navigation,
   Phone,
+  RadioTower,
+  MessageSquare,
   RefreshCw,
   Route,
   School,
@@ -33,9 +35,12 @@ import {
 import {
   HIGH_ACCURACY_GPS_OPTIONS,
   HighPrecisionSpeedEstimator,
+  isWithinDailyTrackingWindow,
   isValidGpsCoordinate,
 } from '../../lib/gps-tracker';
 import { AppLogoBackdrop } from '../AppLogoBackdrop';
+import { ChatHubModule } from '../chat/ChatHubModule';
+import { CompanyLegalFooter } from '../CompanyLegalFooter';
 import { DriverAvatar } from '../DriverAvatar';
 import {
   ALEXANDRIA_CENTER,
@@ -103,6 +108,7 @@ export const SupervisorApp: React.FC<{
     }
   });
   const [gpsPermissionError, setGpsPermissionError] = useState<string | null>(null);
+  const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
   const [livePosition, setLivePosition] = useState<SupervisorLiveLocation | null>(null);
   const [gpsSending, setGpsSending] = useState(false);
   const speedEstimatorRef = useRef(new HighPrecisionSpeedEstimator());
@@ -112,6 +118,7 @@ export const SupervisorApp: React.FC<{
   // Daily 2 trip missions state
   const [actionBusy, setActionBusy] = useState<'start_morning' | 'end_evening' | null>(null);
   const [actionBanner, setActionBanner] = useState<string | null>(null);
+  const [showChatHub, setShowChatHub] = useState<boolean>(false);
 
   const hasDataRef = useRef(false);
   hasDataRef.current = Boolean(data);
@@ -363,6 +370,56 @@ export const SupervisorApp: React.FC<{
     return () => {
       if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
+      }
+    };
+  }, [allowSupervisorSelector, data?.linked, supervisor?.id, gpsEnabled, transmitSupervisorGps]);
+
+  // Persistent Background Service & WakeLock (6:00 AM to 4:00 PM / Background persistence)
+  useEffect(() => {
+    if (allowSupervisorSelector || !data?.linked || !supervisor?.id || !gpsEnabled) {
+      return;
+    }
+
+    let wakeLockObj: any = null;
+    const requestWakeLock = async () => {
+      try {
+        if ('wakeLock' in navigator && (navigator as any).wakeLock?.request) {
+          wakeLockObj = await (navigator as any).wakeLock.request('screen');
+          setWakeLockActive(true);
+          wakeLockObj.addEventListener('release', () => {
+            setWakeLockActive(false);
+          });
+        }
+      } catch {
+        setWakeLockActive(false);
+      }
+    };
+    requestWakeLock();
+
+    // Background interval check every 15s even when app is minimized or hidden
+    const bgInterval = window.setInterval(() => {
+      if (typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const est = speedEstimatorRef.current.compute(pos.coords, pos.timestamp || Date.now());
+          const payload = {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            speedKmh: est.speedKmh,
+            heading: est.heading,
+            accuracyMeters: est.accuracyMeters,
+          };
+          transmitSupervisorGps(payload, false);
+        },
+        () => {},
+        HIGH_ACCURACY_GPS_OPTIONS
+      );
+    }, 15000);
+
+    return () => {
+      window.clearInterval(bgInterval);
+      if (wakeLockObj && typeof wakeLockObj.release === 'function') {
+        wakeLockObj.release().catch(() => {});
       }
     };
   }, [allowSupervisorSelector, data?.linked, supervisor?.id, gpsEnabled, transmitSupervisorGps]);
@@ -796,6 +853,19 @@ export const SupervisorApp: React.FC<{
                 )}
               </div>
             </section>
+
+            {/* Background Location Tracking Persistence Notice */}
+            <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-3.5 text-xs text-blue-900 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <Navigation className="w-4 h-4 text-[#C89B3C] shrink-0" />
+                <span>
+                  <strong>تتبع الموقع في الخلفية نشط (06:00 ص – 04:00 م):</strong> يستمر إرسال الإحداثيات تلقائياً حتى عند تصغير أو إغلاق التطبيق.
+                </span>
+              </div>
+              <span className="text-[11px] font-mono font-semibold bg-blue-100 text-blue-800 px-2 py-0.5 rounded shrink-0">
+                {wakeLockActive ? 'حماية السبات نشطة' : 'وضع الخلفية'}
+              </span>
+            </div>
 
             {/* 3. Two Daily Trip Missions When Boarding the Bus */}
             <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
@@ -1238,6 +1308,8 @@ export const SupervisorApp: React.FC<{
           </>
         )}
       </main>
+
+      <CompanyLegalFooter variant="light" className="mt-auto" />
     </div>
   );
 };

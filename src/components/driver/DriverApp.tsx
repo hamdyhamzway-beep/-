@@ -10,6 +10,7 @@ import {
   Home,
   LogOut,
   MapPin,
+  MessageSquare,
   Navigation,
   PauseCircle,
   Phone,
@@ -48,6 +49,8 @@ import {
   saveCachedDriverProfile,
 } from '../../lib/local-store';
 import { AppLogoBackdrop } from '../AppLogoBackdrop';
+import { ChatHubModule } from '../chat/ChatHubModule';
+import { CompanyLegalFooter } from '../CompanyLegalFooter';
 import { DriverAvatar } from '../DriverAvatar';
 import { DriverLicensesSection } from '../DriverLicensesSection';
 import { PWAInstallButton } from '../PWAInstall';
@@ -87,7 +90,7 @@ interface DriverAppResponse {
   };
 }
 
-type DriverTab = 'home' | 'finance' | 'location' | 'notifications';
+type DriverTab = 'home' | 'finance' | 'chat' | 'location' | 'notifications';
 
 const ARABIC_MONTHS = [
   'يناير',
@@ -1566,13 +1569,29 @@ export const DriverApp: React.FC<{
                 )}
               </div>
             )}
+            {/* TAB: CHAT & VOICE HUB */}
+            {activeTab === 'chat' && (
+              <div className="space-y-3">
+                <ChatHubModule
+                  currentRole="driver"
+                  initialRoomKey={data.driver?.routeId ? `route_${data.driver.routeId}` : 'broadcast'}
+                  compact={false}
+                />
+              </div>
+            )}
           </>
         )}
+
+        <CompanyLegalFooter
+          variant="light"
+          compact
+          className="rounded-2xl border border-slate-200 shadow-xs mt-6"
+        />
       </main>
 
       {/* Bottom Thumb-Zone Navigation Bar */}
       <nav className="fixed bottom-0 inset-x-0 z-30 h-16 bg-white border-t border-slate-200">
-        <div className="max-w-3xl mx-auto h-full grid grid-cols-4">
+        <div className="max-w-3xl mx-auto h-full grid grid-cols-5">
           <button
             onClick={() => setActiveTab('home')}
             className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
@@ -1591,6 +1610,16 @@ export const DriverApp: React.FC<{
           >
             <Wallet className={`w-5 h-5 ${activeTab === 'finance' ? 'text-[#C89B3C]' : ''}`} />
             <span>المالية</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('chat')}
+            className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
+              activeTab === 'chat' ? 'text-[#0B1F3A]' : 'text-slate-400 hover:text-slate-600'
+            }`}
+          >
+            <MessageSquare className={`w-5 h-5 ${activeTab === 'chat' ? 'text-[#C89B3C]' : ''}`} />
+            <span>المحادثات</span>
           </button>
 
           <button

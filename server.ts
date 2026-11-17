@@ -72,6 +72,13 @@ import {
   synthesizeArabicSpeech,
   transcribeEgyptianAudio,
 } from './src/services/gemini-voice.ts';
+import {
+  broadcastToRoom,
+  getEnrichedChatChannels,
+  getMessagesForRoom,
+  initChatWebSocketServer,
+  saveMessageToDb,
+} from './src/services/chat-service.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -5439,11 +5446,124 @@ async function startServer() {
     }
   });
 
+  // ==================== Unified Chat & Messaging API ====================
+  app.get('/api/chat/channels', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const channels = await getEnrichedChatChannels();
+      res.json({ ok: true, channels });
+    } catch (err) {
+      console.error('Error fetching chat channels:', err);
+      res.status(500).json({ error: 'تعذر تحميل غرف المحادثة' });
+    }
+  });
+
+  app.get('/api/chat/messages', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const roomKey = String(req.query.roomKey || 'broadcast');
+      const messages = await getMessagesForRoom(roomKey);
+      res.json({ ok: true, roomKey, messages });
+    } catch (err) {
+      console.error('Error fetching messages:', err);
+      res.status(500).json({ error: 'تعذر تحميل الرسائل' });
+    }
+  });
+
+  app.post('/api/chat/messages', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { roomKey, messageType, textContent, audioDataUrl, audioDurationSec } = req.body;
+      if (!roomKey) {
+        return res.status(400).json({ error: 'roomKey مطلوب' });
+      }
+
+      const senderName =
+        req.driverRecord?.fullName ||
+        req.supervisorRecord?.fullName ||
+        req.dbUser?.fullName ||
+        'مستخدم';
+      const senderRole = req.driverRecord
+        ? 'driver'
+        : req.supervisorRecord
+        ? 'supervisor'
+        : req.dbUser?.roleSlug || 'admin';
+      const senderAvatar =
+        req.driverRecord?.photoUrl || req.supervisorRecord?.photoUrl || '';
+
+      const saved = await saveMessageToDb({
+        roomKey,
+        senderUserId: req.dbUser?.id || null,
+        senderRole,
+        senderName,
+        senderAvatar,
+        messageType: messageType || 'text',
+        textContent: textContent || '',
+        audioDataUrl: audioDataUrl || null,
+        audioDurationSec: Number(audioDurationSec) || 0,
+      });
+
+      broadcastToRoom(roomKey, {
+        type: 'new_message',
+        roomKey,
+        message: saved,
+      });
+
+      res.json({ ok: true, message: saved });
+    } catch (err) {
+      console.error('Error saving chat message:', err);
+      res.status(500).json({ error: 'تعذر إرسال الرسالة' });
+    }
+  });
+
+  app.post('/api/chat/call-signal', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { roomKey, action, payload } = req.body;
+      const senderName =
+        req.driverRecord?.fullName ||
+        req.supervisorRecord?.fullName ||
+        req.dbUser?.fullName ||
+        'مستخدم';
+      const senderRole = req.driverRecord
+        ? 'driver'
+        : req.supervisorRecord
+        ? 'supervisor'
+        : req.dbUser?.roleSlug || 'admin';
+
+      broadcastToRoom(roomKey, {
+        type: 'call_signal',
+        roomKey,
+        action,
+        callerName: senderName,
+        callerRole: senderRole,
+        payload,
+      });
+
+      if (action === 'call_start') {
+        const logMsg = await saveMessageToDb({
+          roomKey,
+          senderRole,
+          senderName,
+          messageType: 'call_log',
+          textContent: `📞 مكالمة صوتية مباشرة بواسطة ${senderName}`,
+        });
+        broadcastToRoom(roomKey, {
+          type: 'new_message',
+          roomKey,
+          message: logMsg,
+        });
+      }
+
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Error in call signal:', err);
+      res.status(500).json({ error: 'تعذر إرسال إشارة الاتصال' });
+    }
+  });
+
   await ensureRlsPoliciesApplied().catch((err) => {
     console.warn('[RLS] Startup policy sync warning:', err);
   });
 
   const httpServer = http.createServer(app);
+  initChatWebSocketServer(httpServer);
 
   // Vite / Static Frontend Serving
   if (process.env.NODE_ENV !== 'production') {

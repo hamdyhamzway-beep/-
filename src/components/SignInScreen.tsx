@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ShieldCheck, MapPin, Mic, User, KeyRound, Loader2, Wallet } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { BrandLogo } from './BrandLogo';
+import { CompanyLegalFooter } from './CompanyLegalFooter';
 import { PWAInstallButton } from './PWAInstall';
 import splashScreenImg from '../assets/images/alwaleed_splash_screen_1794752422708.jpg';
 import travelBackdropImg from '../assets/images/alwaleed_travel_backdrop_1794752421692.jpg';
@@ -329,9 +330,7 @@ export const SignInScreen: React.FC = () => {
         </div>
       </main>
 
-      <footer className="relative z-10 py-4 px-6 text-center text-xs text-slate-300 border-t border-white/10 bg-[#0B1F3A]/90">
-        الوليد ترافيل للنقل المدرسي · AL WALEED TRAVEL · جميع الحقوق محفوظة
-      </footer>
+      <CompanyLegalFooter variant="dark" />
     </div>
   );
 };

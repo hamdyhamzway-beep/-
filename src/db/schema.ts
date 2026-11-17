@@ -591,3 +591,65 @@ export const supervisorTripsRelations = relations(supervisorTrips, ({ one }) => 
   vehicle: one(vehicles, { fields: [supervisorTrips.vehicleId], references: [vehicles.id] }),
 }));
 
+// 23. Chat Channels & Conversations (غرف المحادثة: خطوط السير، الاتصال المباشر، الإعلانات العامة)
+export const chatChannels = pgTable(
+  'chat_channels',
+  {
+    id: serial('id').primaryKey(),
+    roomKey: text('room_key').notNull().unique(), // e.g. "broadcast", "route_1", "direct_driver_5", "direct_supervisor_2"
+    channelType: text('channel_type').notNull().default('route'), // 'broadcast' | 'route' | 'direct'
+    title: text('title').notNull(),
+    routeId: integer('route_id').references(() => routes.id),
+    schoolId: integer('school_id').references(() => schools.id),
+    driverId: integer('driver_id').references(() => drivers.id),
+    supervisorId: integer('supervisor_id').references(() => supervisors.id),
+    lastMessageText: text('last_message_text').default(''),
+    lastMessageAt: timestamp('last_message_at').defaultNow().notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_chat_channels_room_key').on(table.roomKey),
+    index('idx_chat_channels_route').on(table.routeId),
+  ]
+);
+
+// 24. Chat Messages (الرسائل: كتابية، رسائل صوتية مسجلة، سجل مكالمات مباشرة، لاسلكي)
+export const chatMessages = pgTable(
+  'chat_messages',
+  {
+    id: serial('id').primaryKey(),
+    channelId: integer('channel_id').references(() => chatChannels.id, { onDelete: 'cascade' }),
+    roomKey: text('room_key').notNull(),
+    senderUserId: integer('sender_user_id').references(() => users.id),
+    senderRole: text('sender_role').notNull(), // 'super_admin' | 'admin' | 'driver' | 'supervisor'
+    senderName: text('sender_name').notNull(),
+    senderAvatar: text('sender_avatar').default(''),
+    messageType: text('message_type').notNull().default('text'), // 'text' | 'voice_note' | 'call_log' | 'ptt_audio'
+    textContent: text('text_content').default(''),
+    audioDataUrl: text('audio_data_url'), // base64 or audio file url
+    audioDurationSec: integer('audio_duration_sec').default(0),
+    isRead: boolean('is_read').notNull().default(false),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_chat_messages_room').on(table.roomKey),
+    index('idx_chat_messages_created').on(table.createdAt),
+    index('idx_chat_messages_channel').on(table.channelId),
+  ]
+);
+
+export const chatChannelsRelations = relations(chatChannels, ({ one, many }) => ({
+  route: one(routes, { fields: [chatChannels.routeId], references: [routes.id] }),
+  school: one(schools, { fields: [chatChannels.schoolId], references: [schools.id] }),
+  driver: one(drivers, { fields: [chatChannels.driverId], references: [drivers.id] }),
+  supervisor: one(supervisors, { fields: [chatChannels.supervisorId], references: [supervisors.id] }),
+  messages: many(chatMessages),
+}));
+
+export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
+  channel: one(chatChannels, { fields: [chatMessages.channelId], references: [chatChannels.id] }),
+  senderUser: one(users, { fields: [chatMessages.senderUserId], references: [users.id] }),
+}));
+
+

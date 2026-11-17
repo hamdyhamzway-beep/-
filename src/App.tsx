@@ -20,6 +20,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AppLogoBackdrop } from './components/AppLogoBackdrop';
 import { BrandLogo } from './components/BrandLogo';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstall';
+import { CompanyLegalFooter } from './components/CompanyLegalFooter';
 import { SignInScreen } from './components/SignInScreen';
 import { SplashScreen } from './components/SplashScreen';
 import splashScreenImg from './assets/images/alwaleed_splash_screen_1794752422708.jpg';
@@ -36,7 +37,8 @@ import { ArchiveModule } from './components/admin/ArchiveModule';
 import { SupervisorsModule } from './components/admin/SupervisorsModule';
 import { DriverApp } from './components/driver/DriverApp';
 import { SupervisorApp } from './components/supervisor/SupervisorApp';
-import { ArrowRight, UserCheck } from 'lucide-react';
+import { ChatHubModule } from './components/chat/ChatHubModule';
+import { ArrowRight, MessageSquare, RadioTower, UserCheck } from 'lucide-react';
 
 type AdminTabId =
   | 'overview'
@@ -46,6 +48,7 @@ type AdminTabId =
   | 'schools'
   | 'finance'
   | 'map'
+  | 'chat'
   | 'voice'
   | 'reports'
   | 'archive'
@@ -115,6 +118,12 @@ const AppShell: React.FC = () => {
         label: 'التتبع المباشر (GPS)',
         icon: MapPin,
         visible: isSuperAdmin || can('gps:read'),
+      },
+      {
+        id: 'chat',
+        label: 'المحادثات والاتصال المباشر',
+        icon: MessageSquare,
+        visible: true,
       },
       {
         id: 'voice',
@@ -465,6 +474,7 @@ const AppShell: React.FC = () => {
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
           {activeTab === 'finance' && <FinanceModule />}
           {activeTab === 'map' && <LiveMapModule />}
+          {activeTab === 'chat' && <ChatHubModule currentRole="admin" />}
           {activeTab === 'voice' && <VoiceAssistantModule />}
           {activeTab === 'reports' && <ReportsModule />}
           {activeTab === 'archive' && <ArchiveModule />}
@@ -472,6 +482,8 @@ const AppShell: React.FC = () => {
             <SettingsUsersModule onOpenSupervisors={() => handleNavigate('supervisors')} />
           )}
         </main>
+
+        <CompanyLegalFooter variant="light" className="mt-auto" />
       </div>
     </div>
   );

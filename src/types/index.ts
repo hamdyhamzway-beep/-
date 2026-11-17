@@ -331,3 +331,54 @@ export interface SupervisorAppResponse {
   } | null;
   trackedVehicles: SupervisorTrackedVehicle[];
 }
+
+// ==================== Unified Chat & Communication Hub ====================
+export type ChatMessageType = 'text' | 'voice_note' | 'call_log' | 'ptt_audio' | 'system';
+
+export interface ChatMessage {
+  id: number;
+  channelId?: number | null;
+  roomKey: string;
+  senderUserId?: number | null;
+  senderRole: 'super_admin' | 'admin' | 'driver' | 'supervisor' | string;
+  senderName: string;
+  senderAvatar?: string | null;
+  messageType: ChatMessageType;
+  textContent?: string;
+  audioDataUrl?: string | null;
+  audioDurationSec?: number;
+  isRead?: boolean;
+  createdAt: string;
+}
+
+export interface ChatChannel {
+  id: number;
+  roomKey: string;
+  channelType: 'broadcast' | 'route' | 'direct';
+  title: string;
+  routeId?: number | null;
+  routeName?: string;
+  schoolId?: number | null;
+  schoolName?: string;
+  driverId?: number | null;
+  driverName?: string;
+  supervisorId?: number | null;
+  supervisorName?: string;
+  lastMessageText?: string | null;
+  lastMessageAt: string;
+  unreadCount?: number;
+  onlineParticipantsCount?: number;
+}
+
+export interface ChatSyncPayload {
+  type: 'new_message' | 'incoming_call' | 'call_ended' | 'ptt_stream' | 'presence';
+  roomKey: string;
+  message?: ChatMessage;
+  callData?: {
+    callerName: string;
+    callerRole: string;
+    roomKey: string;
+    status: 'ringing' | 'active' | 'ended';
+  };
+}
+
