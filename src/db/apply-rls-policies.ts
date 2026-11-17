@@ -9,7 +9,7 @@ interface PolicySpec {
   withCheckExpr?: string;
 }
 
-const RLS_TABLES = ['drivers', 'financial_transactions', 'supervisors'] as const;
+const RLS_TABLES = ['drivers', 'financial_transactions'] as const;
 
 const POLICY_SPECS: PolicySpec[] = [
   // drivers policies
@@ -78,44 +78,6 @@ const POLICY_SPECS: PolicySpec[] = [
     forCmd: 'SELECT',
     usingExpr:
       "current_setting('app.user_role', true) = 'driver' AND driver_id = CASE WHEN current_setting('app.driver_id', true) ~ '^[0-9]+$' THEN current_setting('app.driver_id', true)::integer ELSE NULL END",
-  },
-  // supervisors policies
-  {
-    table: 'supervisors',
-    name: 'supervisors_admin_select',
-    forCmd: 'SELECT',
-    usingExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
-  },
-  {
-    table: 'supervisors',
-    name: 'supervisors_admin_insert',
-    forCmd: 'INSERT',
-    withCheckExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
-  },
-  {
-    table: 'supervisors',
-    name: 'supervisors_admin_update',
-    forCmd: 'UPDATE',
-    usingExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
-    withCheckExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
-  },
-  {
-    table: 'supervisors',
-    name: 'supervisors_admin_delete',
-    forCmd: 'DELETE',
-    usingExpr:
-      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL",
-  },
-  {
-    table: 'supervisors',
-    name: 'supervisors_self_select',
-    forCmd: 'SELECT',
-    usingExpr:
-      "current_setting('app.user_role', true) = 'supervisor' AND id = CASE WHEN current_setting('app.supervisor_id', true) ~ '^[0-9]+$' THEN current_setting('app.supervisor_id', true)::integer ELSE NULL END",
   },
 ];
 

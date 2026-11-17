@@ -548,35 +548,7 @@ export const supervisors = pgTable(
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
-  (table) => [
-    index('idx_supervisors_code').on(table.supervisorCode),
-    pgPolicy('supervisors_admin_select', {
-      for: 'select',
-      to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL`,
-    }),
-    pgPolicy('supervisors_admin_insert', {
-      for: 'insert',
-      to: 'public',
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL`,
-    }),
-    pgPolicy('supervisors_admin_update', {
-      for: 'update',
-      to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL`,
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL`,
-    }),
-    pgPolicy('supervisors_admin_delete', {
-      for: 'delete',
-      to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant', 'admin', 'staff') OR current_setting('app.user_role', true) = '' OR current_setting('app.user_role', true) IS NULL`,
-    }),
-    pgPolicy('supervisors_self_select', {
-      for: 'select',
-      to: 'public',
-      using: sql`current_setting('app.user_role', true) = 'supervisor' AND id = CASE WHEN current_setting('app.supervisor_id', true) ~ '^[0-9]+$' THEN current_setting('app.supervisor_id', true)::integer ELSE NULL END`,
-    }),
-  ]
+  (table) => [index('idx_supervisors_code').on(table.supervisorCode)]
 );
 
 // 22. Supervisor Daily Trips (سجل مهمتي المشرفة اليومية: بداية الرحلة صباحاً / نهاية الرحلة مساءً)
