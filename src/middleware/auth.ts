@@ -4,11 +4,17 @@ import type { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import {
   issueDriverSessionToken,
+  issueStaffSessionToken,
   issueSupervisorSessionToken,
   shouldRefreshSessionToken,
   verifyDriverSessionToken,
+  verifyStaffSessionToken,
   verifySupervisorSessionToken,
 } from '../lib/driver-session.ts';
+import {
+  ROLE_DEFAULT_PERMISSIONS,
+  normalizeSchoolIds,
+} from '../lib/permissions.ts';
 import { db } from '../db/index.ts';
 import { runWithRlsContext } from '../db/rls-context.ts';
 import { drivers, supervisors, userRoles, users } from '../db/schema.ts';
@@ -23,6 +29,10 @@ export interface DbUserContext {
   roleSlug: string;
   roleNameAr: string;
   permissions: string[];
+  customPermissions: string[] | null;
+  assignedSchoolIds: number[];
+  staffCode: string | null;
+  employeeId: number | null;
   isActive: boolean;
 }
 
@@ -39,48 +49,31 @@ const DEFAULT_ROLES = [
     slug: 'super_admin',
     nameAr: 'المدير العام (المالك)',
     description: 'صلاحيات كاملة على كافة المدارس والسائقين والحسابات والتتبع والمساعد الصوتي',
-    permissions: ['*'],
+    permissions: ROLE_DEFAULT_PERMISSIONS.super_admin,
   },
   {
     slug: 'driver',
     nameAr: 'سائق',
     description: 'عرض الملف الشخصي والمركبة والراتب وكشف الحساب ومشاركة الموقع فقط',
-    permissions: ['driver:self_read', 'driver:gps_write', 'driver:notifications'],
+    permissions: ROLE_DEFAULT_PERMISSIONS.driver,
   },
   {
     slug: 'supervisor',
     nameAr: 'المشرفة',
     description: 'عرض بيانات المشرفة وخط السير والتتبع المباشر للباص فقط بدون أي بيانات مالية',
-    permissions: ['supervisor:self_read', 'supervisor:gps_read'],
+    permissions: ROLE_DEFAULT_PERMISSIONS.supervisor,
   },
   {
     slug: 'movement_manager',
     nameAr: 'مشرف حركة',
-    description: 'إدارة المسارات والمركبات والتغطيات اليومية ومتابعة الخريطة المباشرة',
-    permissions: [
-      'dashboard:read',
-      'drivers:read',
-      'vehicles:read',
-      'vehicles:write',
-      'schools:read',
-      'routes:write',
-      'coverage:write',
-      'attendance:write',
-      'gps:read',
-    ],
+    description: 'إدارة المسارات والمركبات والتغطيات والسلف والوصول للسائقين في المدارس المخصصة له',
+    permissions: ROLE_DEFAULT_PERMISSIONS.movement_manager,
   },
   {
     slug: 'accountant',
     nameAr: 'محاسب',
-    description: 'إدارة المرتبات والسلف والخصومات والمكافآت والتقارير المالية',
-    permissions: [
-      'dashboard:read',
-      'drivers:read',
-      'schools:read',
-      'finance:read',
-      'finance:write',
-      'reports:read',
-    ],
+    description: 'إدارة المرتبات والسلف والتغطيات والخصومات والمكافآت والتقارير المالية للمدارس المخصصة له',
+    permissions: ROLE_DEFAULT_PERMISSIONS.accountant,
   },
 ];
 
@@ -89,12 +82,36 @@ let rolesSeeded = false;
 export async function ensureRolesExist() {
   if (rolesSeeded) return;
   for (const r of DEFAULT_ROLES) {
-    await db
-      .insert(userRoles)
-      .values(r)
-      .onConflictDoNothing({ target: userRoles.slug });
+    if (r.slug === 'movement_manager' || r.slug === 'accountant') {
+      await db
+        .insert(userRoles)
+        .values(r)
+        .onConflictDoUpdate({
+          target: userRoles.slug,
+          set: {
+            description: r.description,
+            permissions: r.permissions,
+          },
+        });
+    } else {
+      await db
+        .insert(userRoles)
+        .values(r)
+        .onConflictDoNothing({ target: userRoles.slug });
+    }
   }
   rolesSeeded = true;
+}
+
+export function buildEffectivePermissions(
+  roleSlug: string,
+  rolePermissions: unknown,
+  customPermissions: unknown
+): string[] {
+  if (roleSlug === 'super_admin') return ['*'];
+  if (Array.isArray(customPermissions)) return customPermissions;
+  if (Array.isArray(rolePermissions)) return rolePermissions as string[];
+  return [];
 }
 
 async function resolveUserContext(decoded: DecodedIdToken): Promise<{
@@ -261,6 +278,14 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
     }
   }
 
+  const effectivePermissions = buildEffectivePermissions(
+    role.slug,
+    role.permissions,
+    userRow.customPermissions
+  );
+  const assignedSchoolIds =
+    role.slug === 'super_admin' ? [] : normalizeSchoolIds(userRow.assignedSchoolIds);
+
   return {
     dbUser: {
       id: userRow.id,
@@ -271,7 +296,13 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
       roleId: userRow.roleId,
       roleSlug: role.slug,
       roleNameAr: role.nameAr,
-      permissions: Array.isArray(role.permissions) ? role.permissions : [],
+      permissions: effectivePermissions,
+      customPermissions: Array.isArray(userRow.customPermissions)
+        ? userRow.customPermissions
+        : null,
+      assignedSchoolIds,
+      staffCode: userRow.staffCode || null,
+      employeeId: userRow.employeeId ?? null,
       isActive: userRow.isActive,
     },
     driverRecord: driverRec,
@@ -388,6 +419,10 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         roleSlug: role.slug,
         roleNameAr: role.nameAr,
         permissions: Array.isArray(role.permissions) ? role.permissions : [],
+        customPermissions: null,
+        assignedSchoolIds: [],
+        staffCode: null,
+        employeeId: null,
         isActive: resolved.userRow.isActive,
       };
 
@@ -468,6 +503,10 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         roleSlug: 'supervisor',
         roleNameAr: resolved.role?.nameAr || 'المشرفة',
         permissions: ['supervisor:self_read', 'supervisor:gps_read'],
+        customPermissions: null,
+        assignedSchoolIds: [],
+        staffCode: null,
+        employeeId: null,
         isActive: resolved.userRow.isActive,
       };
 
@@ -495,6 +534,100 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     } catch (error) {
       console.error('Supervisor session verification error:', error);
       return res.status(500).json({ error: 'تعذر التحقق من جلسة المشرفة' });
+    }
+  }
+
+  // 2b. Persistent Staff Token (المحاسب / مشرف الحركة / الموظف المصرح له)
+  if (token.startsWith('stf_')) {
+    const payload = verifyStaffSessionToken(token);
+    if (!payload) {
+      return res.status(401).json({ error: 'انتهت صلاحية جلسة الموظف، يرجى تسجيل الدخول مرة أخرى' });
+    }
+
+    try {
+      const resolved = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        await ensureRolesExist();
+        const [userRow] = await db
+          .select()
+          .from(users)
+          .where(eq(users.id, payload.userId))
+          .limit(1);
+
+        if (!userRow) return null;
+
+        const [role] = await db
+          .select()
+          .from(userRoles)
+          .where(eq(userRoles.id, userRow.roleId))
+          .limit(1);
+
+        return { userRow, role };
+      });
+
+      if (!resolved) {
+        return res.status(401).json({ error: 'بيانات حساب الموظف غير متوفرة، يرجى إعادة الدخول' });
+      }
+
+      if (!resolved.userRow.isActive) {
+        return res.status(403).json({ error: 'تم إيقاف صلاحية هذا الحساب من قبل المدير العام' });
+      }
+
+      const roleSlug = resolved.role?.slug || 'accountant';
+      if (roleSlug === 'driver' || roleSlug === 'supervisor') {
+        return res.status(403).json({ error: 'تم تغيير دور هذا الحساب، يرجى تسجيل الدخول من البوابة المناسبة' });
+      }
+
+      const effectivePermissions = buildEffectivePermissions(
+        roleSlug,
+        resolved.role?.permissions,
+        resolved.userRow.customPermissions
+      );
+      const assignedSchoolIds =
+        roleSlug === 'super_admin'
+          ? []
+          : normalizeSchoolIds(resolved.userRow.assignedSchoolIds);
+
+      const dbUser: DbUserContext = {
+        id: resolved.userRow.id,
+        uid: resolved.userRow.uid,
+        email: resolved.userRow.email,
+        fullName: resolved.userRow.fullName,
+        phone: resolved.userRow.phone,
+        roleId: resolved.userRow.roleId,
+        roleSlug,
+        roleNameAr: resolved.role?.nameAr || 'موظف إدارة',
+        permissions: effectivePermissions,
+        customPermissions: Array.isArray(resolved.userRow.customPermissions)
+          ? resolved.userRow.customPermissions
+          : null,
+        assignedSchoolIds,
+        staffCode: resolved.userRow.staffCode || null,
+        employeeId: resolved.userRow.employeeId ?? null,
+        isActive: resolved.userRow.isActive,
+      };
+
+      req.dbUser = dbUser;
+
+      if (shouldRefreshSessionToken(payload.exp)) {
+        const freshToken = issueStaffSessionToken({
+          userId: resolved.userRow.id,
+          staffCode: resolved.userRow.staffCode || payload.staffCode,
+        });
+        req.refreshedSessionToken = freshToken;
+        res.setHeader('X-Refreshed-Session-Token', freshToken);
+      }
+
+      return runWithRlsContext(
+        {
+          role: dbUser.roleSlug,
+          driverId: null,
+          supervisorId: null,
+        },
+        () => next()
+      );
+    } catch (error) {
+      console.error('Staff session verification error:', error);
+      return res.status(500).json({ error: 'تعذر التحقق من جلسة الموظف' });
     }
   }
 
@@ -554,6 +687,22 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     return res.status(500).json({ error: 'تعذر تحميل بيانات الحساب من قاعدة البيانات' });
   }
 };
+
+export function isSchoolUnrestricted(user: DbUserContext | undefined): boolean {
+  if (!user) return false;
+  if (user.roleSlug === 'super_admin' || user.permissions.includes('*')) return true;
+  return !user.assignedSchoolIds || user.assignedSchoolIds.length === 0;
+}
+
+export function isSchoolAllowed(
+  user: DbUserContext | undefined,
+  schoolId: number | null | undefined
+): boolean {
+  if (!user) return false;
+  if (isSchoolUnrestricted(user)) return true;
+  if (schoolId === null || schoolId === undefined) return false;
+  return user.assignedSchoolIds.includes(Number(schoolId));
+}
 
 export function hasPermission(user: DbUserContext | undefined, permission: string): boolean {
   if (!user) return false;

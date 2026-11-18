@@ -24,20 +24,24 @@ const POLICY_SPECS: PolicySpec[] = [
     table: 'drivers',
     name: 'drivers_admin_insert',
     forCmd: 'INSERT',
-    withCheckExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin')",
+    withCheckExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')",
   },
   {
     table: 'drivers',
     name: 'drivers_admin_update',
     forCmd: 'UPDATE',
-    usingExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin')",
-    withCheckExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin')",
+    usingExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')",
+    withCheckExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')",
   },
   {
     table: 'drivers',
     name: 'drivers_admin_delete',
     forCmd: 'DELETE',
-    usingExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin')",
+    usingExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')",
   },
   {
     table: 'drivers',
@@ -51,26 +55,31 @@ const POLICY_SPECS: PolicySpec[] = [
     table: 'financial_transactions',
     name: 'ft_admin_accountant_select',
     forCmd: 'SELECT',
-    usingExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
+    usingExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')",
   },
   {
     table: 'financial_transactions',
     name: 'ft_admin_accountant_insert',
     forCmd: 'INSERT',
-    withCheckExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
+    withCheckExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')",
   },
   {
     table: 'financial_transactions',
     name: 'ft_admin_accountant_update',
     forCmd: 'UPDATE',
-    usingExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
-    withCheckExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
+    usingExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')",
+    withCheckExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')",
   },
   {
     table: 'financial_transactions',
     name: 'ft_admin_accountant_delete',
     forCmd: 'DELETE',
-    usingExpr: "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')",
+    usingExpr:
+      "current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')",
   },
   {
     table: 'financial_transactions',
@@ -143,8 +152,12 @@ export async function ensureRlsPoliciesApplied(): Promise<boolean> {
       POLICY_SPECS.some((spec) => {
         const cur = existingMap.get(`${spec.table}.${spec.name}`);
         if (!cur) return true;
-        if (spec.usingExpr && !cur.qual) return true;
-        if (spec.withCheckExpr && !cur.with_check) return true;
+        if (spec.usingExpr && (!cur.qual || (spec.usingExpr.includes('movement_manager') && !cur.qual.includes('movement_manager')))) {
+          return true;
+        }
+        if (spec.withCheckExpr && (!cur.with_check || (spec.withCheckExpr.includes('movement_manager') && !cur.with_check.includes('movement_manager')))) {
+          return true;
+        }
         return false;
       });
 

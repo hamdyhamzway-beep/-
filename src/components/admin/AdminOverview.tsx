@@ -31,6 +31,7 @@ import {
   normalizeLookupText,
   normalizeTimeInputValue,
 } from '../../lib/api';
+import { useAuth } from '../../contexts/AuthContext';
 import { useEscapeKey } from '../../lib/useEscapeKey';
 import {
   buildWhatsAppUrl,
@@ -104,6 +105,22 @@ interface DriverStatementResponse {
 export const AdminOverview: React.FC<{
   onNavigate: (tab: string, chatRoomKey?: string) => void;
 }> = ({ onNavigate }) => {
+  const { dbUser } = useAuth();
+  const perms = dbUser?.permissions || [];
+  const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || perms.includes('*');
+  const can = (perm: string) => isSuperAdmin || perms.includes('*') || perms.includes(perm);
+
+  const canDriversWrite = can('drivers:write');
+  const canAttendanceWrite = can('attendance:write');
+  const canAdvancesWrite = can('advances:write') || can('finance:write');
+  const canCoverageWrite = can('coverage:write') || can('finance:write');
+  const canFinanceWrite = can('finance:write');
+  const canFinanceRead = can('finance:read') || canFinanceWrite;
+  const canViewFinancialDetails = canFinanceRead || canAdvancesWrite || canCoverageWrite;
+  const canEmployeesAccess = can('employees:read') || can('employees:write');
+  const canSchoolsOrVehicles = can('schools:read') || can('vehicles:read');
+  const canGpsRead = can('gps:read');
+
   const now = new Date();
   const today = getLocalTodayDateString();
 
@@ -125,7 +142,7 @@ export const AdminOverview: React.FC<{
   const [selectedDriverId, setSelectedDriverId] = useState<number | null>(null);
   const [driverSectionTab, setDriverSectionTab] = useState<
     'advances' | 'coverage' | 'adjustments'
-  >('advances');
+  >(() => (canAdvancesWrite || canFinanceRead ? 'advances' : canCoverageWrite ? 'coverage' : 'adjustments'));
   const [statement, setStatement] = useState<DriverStatementResponse | null>(null);
   const [loadingStatement, setLoadingStatement] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
@@ -281,6 +298,16 @@ export const AdminOverview: React.FC<{
     },
     [month, year]
   );
+
+  useEffect(() => {
+    const allowed: Array<'advances' | 'coverage' | 'adjustments'> = [];
+    if (canAdvancesWrite || canFinanceRead) allowed.push('advances');
+    if (canCoverageWrite || canFinanceRead) allowed.push('coverage');
+    if (canFinanceRead) allowed.push('adjustments');
+    if (allowed.length > 0 && !allowed.includes(driverSectionTab)) {
+      setDriverSectionTab(allowed[0]);
+    }
+  }, [canAdvancesWrite, canCoverageWrite, canFinanceRead, driverSectionTab]);
 
   // Refresh active driver page when month or year changes
   useEffect(() => {
@@ -853,11 +880,28 @@ export const AdminOverview: React.FC<{
                 الوليد ترافيل
               </h1>
               <p className="text-xs sm:text-sm text-slate-300 mt-1">
-                صافي الربحية: <span className="font-mono font-bold text-[#C89B3C] tabular-nums">{kpis ? formatEGP(profit) : '—'}</span>
-                <span className="mx-2 text-slate-500">·</span>
-                السائقون: <span className="font-mono font-semibold text-white tabular-nums">{kpis?.totalRegisteredDrivers ?? 0}</span>
-                <span className="mx-2 text-slate-500">·</span>
-                الموظفون: <span className="font-mono font-semibold text-white tabular-nums">{kpis?.totalEmployeesCount ?? 0}</span>
+                {canFinanceRead && (
+                  <>
+                    صافي الربحية:{' '}
+                    <span className="font-mono font-bold text-[#C89B3C] tabular-nums">
+                      {kpis ? formatEGP(profit) : '—'}
+                    </span>
+                    <span className="mx-2 text-slate-500">·</span>
+                  </>
+                )}
+                السائقون:{' '}
+                <span className="font-mono font-semibold text-white tabular-nums">
+                  {kpis?.totalRegisteredDrivers ?? 0}
+                </span>
+                {canEmployeesAccess && (
+                  <>
+                    <span className="mx-2 text-slate-500">·</span>
+                    الموظفون:{' '}
+                    <span className="font-mono font-semibold text-white tabular-nums">
+                      {kpis?.totalEmployeesCount ?? 0}
+                    </span>
+                  </>
+                )}
               </p>
             </div>
           </div>
@@ -909,32 +953,38 @@ export const AdminOverview: React.FC<{
               تحديث
             </button>
 
-            <button
-              type="button"
-              onClick={() => setShowCloseMonthModal(true)}
-              className="flex items-center gap-1.5 rounded-lg border border-[#C89B3C]/60 bg-[#C89B3C]/15 hover:bg-[#C89B3C]/25 px-3 py-2 text-xs font-bold text-[#C89B3C] cursor-pointer whitespace-nowrap"
-            >
-              <CalendarCheck className="w-3.5 h-3.5" />
-              تصفية الشهر
-            </button>
+            {canFinanceWrite && (
+              <button
+                type="button"
+                onClick={() => setShowCloseMonthModal(true)}
+                className="flex items-center gap-1.5 rounded-lg border border-[#C89B3C]/60 bg-[#C89B3C]/15 hover:bg-[#C89B3C]/25 px-3 py-2 text-xs font-bold text-[#C89B3C] cursor-pointer whitespace-nowrap"
+              >
+                <CalendarCheck className="w-3.5 h-3.5" />
+                تصفية الشهر
+              </button>
+            )}
 
-            <button
-              type="button"
-              onClick={() => setShowDriversBroadcastModal(true)}
-              className="flex items-center gap-1.5 rounded-lg border border-emerald-400/50 bg-emerald-500/20 hover:bg-emerald-500/30 px-3 py-2 text-xs font-bold text-emerald-100 cursor-pointer whitespace-nowrap"
-            >
-              <RadioTower className="w-3.5 h-3.5 text-emerald-300" />
-              رسائل جماعية للسائقين
-            </button>
+            {isSuperAdmin && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowDriversBroadcastModal(true)}
+                  className="flex items-center gap-1.5 rounded-lg border border-emerald-400/50 bg-emerald-500/20 hover:bg-emerald-500/30 px-3 py-2 text-xs font-bold text-emerald-100 cursor-pointer whitespace-nowrap"
+                >
+                  <RadioTower className="w-3.5 h-3.5 text-emerald-300" />
+                  رسائل جماعية للسائقين
+                </button>
 
-            <button
-              type="button"
-              onClick={() => onNavigate('voice')}
-              className="flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer whitespace-nowrap"
-            >
-              <Mic className="w-3.5 h-3.5" />
-              أمر صوتي
-            </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('voice')}
+                  className="flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer whitespace-nowrap"
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                  أمر صوتي
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -999,13 +1049,15 @@ export const AdminOverview: React.FC<{
             <CheckCircle2 className="w-4 h-4 shrink-0" />
             <span>{actionMsg}</span>
           </div>
-          <button
-            type="button"
-            onClick={() => onNavigate('archive')}
-            className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-bold text-emerald-800 hover:bg-emerald-100 cursor-pointer shrink-0"
-          >
-            فتح قسم الأرشفة
-          </button>
+          {canDriversWrite && (
+            <button
+              type="button"
+              onClick={() => onNavigate('archive')}
+              className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-bold text-emerald-800 hover:bg-emerald-100 cursor-pointer shrink-0"
+            >
+              فتح قسم الأرشفة
+            </button>
+          )}
         </div>
       )}
 
@@ -1159,14 +1211,16 @@ export const AdminOverview: React.FC<{
 
                   {/* Direct Driver Actions */}
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={openEditDriverModal}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-4 py-2 text-xs font-bold text-white cursor-pointer"
-                    >
-                      <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      تعديل بيانات السائق
-                    </button>
+                    {canDriversWrite && (
+                      <button
+                        type="button"
+                        onClick={openEditDriverModal}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-4 py-2 text-xs font-bold text-white cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
+                        تعديل بيانات السائق
+                      </button>
+                    )}
 
                     {activeDriver.phone && (
                       <>
@@ -1189,190 +1243,235 @@ export const AdminOverview: React.FC<{
                       </>
                     )}
 
-                    <button
-                      type="button"
-                      disabled={sendingWhatsApp}
-                      onClick={handleSendWhatsApp}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#0B1F3A] bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-bold text-[#0B1F3A] disabled:opacity-50 cursor-pointer"
-                    >
-                      <Send className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      {sendingWhatsApp ? 'جاري التجهيز...' : 'إرسال كشف الحساب للواتساب (صورة)'}
-                    </button>
+                    {canViewFinancialDetails && (
+                      <button
+                        type="button"
+                        disabled={sendingWhatsApp}
+                        onClick={handleSendWhatsApp}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#0B1F3A] bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-bold text-[#0B1F3A] disabled:opacity-50 cursor-pointer"
+                      >
+                        <Send className="w-3.5 h-3.5 text-[#C89B3C]" />
+                        {sendingWhatsApp ? 'جاري التجهيز...' : 'إرسال كشف الحساب للواتساب (صورة)'}
+                      </button>
+                    )}
 
-                    <button
-                      type="button"
-                      disabled={busyAction}
-                      onClick={handleArchiveSelectedDriver}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-800 disabled:opacity-50 cursor-pointer"
-                    >
-                      <Archive className="w-3.5 h-3.5" />
-                      نقل للأرشفة
-                    </button>
+                    {canDriversWrite && (
+                      <button
+                        type="button"
+                        disabled={busyAction}
+                        onClick={handleArchiveSelectedDriver}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 px-3 py-2 text-xs font-semibold text-amber-800 disabled:opacity-50 cursor-pointer"
+                      >
+                        <Archive className="w-3.5 h-3.5" />
+                        نقل للأرشفة
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 {/* Attendance & Salary Status Strip */}
-                <div className="pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4">
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span className="font-semibold text-slate-600">حضور اليوم:</span>
-                    {[
-                      { status: 'present' as const, label: 'حاضر' },
-                      { status: 'absent' as const, label: 'غائب' },
-                      { status: 'leave' as const, label: 'إجازة' },
-                    ].map((opt) => (
-                      <button
-                        key={opt.status}
-                        type="button"
-                        disabled={busyAction}
-                        onClick={() => handleAttendance(opt.status)}
-                        className={`rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
-                          activeDriver.todayAttendance === opt.status
-                            ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
-                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
+                {(canAttendanceWrite || canFinanceRead) && (
+                  <div className="pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="font-semibold text-slate-600">حضور اليوم:</span>
+                      {canAttendanceWrite ? (
+                        [
+                          { status: 'present' as const, label: 'حاضر' },
+                          { status: 'absent' as const, label: 'غائب' },
+                          { status: 'leave' as const, label: 'إجازة' },
+                        ].map((opt) => (
+                          <button
+                            key={opt.status}
+                            type="button"
+                            disabled={busyAction}
+                            onClick={() => handleAttendance(opt.status)}
+                            className={`rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
+                              activeDriver.todayAttendance === opt.status
+                                ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))
+                      ) : (
+                        <span className="font-semibold text-[#0B1F3A]">
+                          {activeDriver.todayAttendance === 'absent'
+                            ? 'غائب'
+                            : activeDriver.todayAttendance === 'leave'
+                            ? 'إجازة'
+                            : 'حاضر'}
+                        </span>
+                      )}
+                    </div>
 
-                  <div className="flex flex-wrap items-center gap-2 text-xs">
-                    <span className="font-semibold text-slate-600">حالة صرف راتب الشهر:</span>
-                    {[
-                      { value: 'open' as const, label: 'قيد التشغيل' },
-                      { value: 'approved' as const, label: 'معتمد' },
-                      { value: 'paid' as const, label: 'تم الصرف' },
-                    ].map((st) => (
-                      <button
-                        key={st.value}
-                        type="button"
-                        disabled={busyAction}
-                        onClick={() => handleSalaryStatus(st.value)}
-                        className={`rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
-                          statement.salary.status === st.value
-                            ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
-                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        {st.label}
-                      </button>
-                    ))}
+                    {canFinanceRead && (
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-semibold text-slate-600">حالة صرف راتب الشهر:</span>
+                        {canFinanceWrite ? (
+                          [
+                            { value: 'open' as const, label: 'قيد التشغيل' },
+                            { value: 'approved' as const, label: 'معتمد' },
+                            { value: 'paid' as const, label: 'تم الصرف' },
+                          ].map((st) => (
+                            <button
+                              key={st.value}
+                              type="button"
+                              disabled={busyAction}
+                              onClick={() => handleSalaryStatus(st.value)}
+                              className={`rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
+                                statement.salary.status === st.value
+                                  ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                  : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                              }`}
+                            >
+                              {st.label}
+                            </button>
+                          ))
+                        ) : (
+                          <span className="font-bold text-[#0B1F3A]">
+                            {statement.salary.status === 'paid'
+                              ? 'تم الصرف'
+                              : statement.salary.status === 'approved'
+                              ? 'معتمد'
+                              : 'قيد التشغيل'}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </div>
+                )}
               </div>
 
-              {/* Driver License Photos Section (Admin Upload / View / Delete) */}
+              {/* Driver License Photos Section */}
               <DriverLicensesSection
                 photos={activeDriver.licensePhotos || []}
                 viewerRole="admin"
-                onSavePhotos={async (nextPhotos) => {
-                  await apiFetch(`/api/drivers/${activeDriver.id}/licenses`, {
-                    method: 'PUT',
-                    body: JSON.stringify({ licensePhotos: nextPhotos }),
-                  });
-                  await refreshAllForDriver(activeDriver.id);
-                }}
+                readOnly={!canDriversWrite}
+                onSavePhotos={
+                  canDriversWrite
+                    ? async (nextPhotos) => {
+                        await apiFetch(`/api/drivers/${activeDriver.id}/licenses`, {
+                          method: 'PUT',
+                          body: JSON.stringify({ licensePhotos: nextPhotos }),
+                        });
+                        await refreshAllForDriver(activeDriver.id);
+                      }
+                    : undefined
+                }
               />
 
               {/* Capturable Salary Statement Breakdown */}
-              <div
-                ref={statementRef}
-                className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4"
-              >
-                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                  <div>
-                    <div className="font-display text-base font-bold text-[#0B1F3A]">
-                      كشف راتب شهر {statement.period.month} / {statement.period.year} —{' '}
-                      {activeDriver.fullName}
+              {canViewFinancialDetails && (
+                <div
+                  ref={statementRef}
+                  className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4"
+                >
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <div>
+                      <div className="font-display text-base font-bold text-[#0B1F3A]">
+                        كشف راتب شهر {statement.period.month} / {statement.period.year} —{' '}
+                        {activeDriver.fullName}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        كود {activeDriver.driverCode} · {activeDriver.schoolName || '—'} · باص{' '}
+                        {activeDriver.busNumber || '—'}
+                      </div>
                     </div>
-                    <div className="text-xs text-slate-500">
-                      كود {activeDriver.driverCode} · {activeDriver.schoolName || '—'} · باص{' '}
-                      {activeDriver.busNumber || '—'}
-                    </div>
-                  </div>
-                  <div className="text-left font-mono font-bold text-lg text-[#0B1F3A] tabular-nums">
-                    {formatEGP(statement.salary.netSalary)}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="text-slate-500">الراتب الأساسي</div>
-                    <div className="mt-1 font-mono text-base font-bold text-[#0B1F3A] tabular-nums">
-                      {formatEGP(statement.salary.baseSalary)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-red-50/70 p-3">
-                    <div className="text-slate-600">إجمالي السلف</div>
-                    <div className="mt-1 font-mono text-base font-bold text-red-700 tabular-nums">
-                      − {formatEGP(statement.salary.totalAdvances)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-red-50/70 p-3">
-                    <div className="text-slate-600">خصم التغطيات</div>
-                    <div className="mt-1 font-mono text-base font-bold text-red-700 tabular-nums">
-                      − {formatEGP(statement.salary.totalCoverageDeductions)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-red-50/70 p-3">
-                    <div className="text-slate-600">خصومات أخرى</div>
-                    <div className="mt-1 font-mono text-base font-bold text-red-700 tabular-nums">
-                      − {formatEGP(statement.salary.otherDeductions)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-slate-200 bg-emerald-50/70 p-3">
-                    <div className="text-slate-600">المكافآت</div>
-                    <div className="mt-1 font-mono text-base font-bold text-emerald-700 tabular-nums">
-                      + {formatEGP(statement.salary.bonuses)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl bg-[#0B1F3A] text-white p-3">
-                    <div className="text-slate-300">صافي المستحق</div>
-                    <div className="mt-1 font-mono text-base font-bold text-[#C89B3C] tabular-nums">
+                    <div className="text-left font-mono font-bold text-lg text-[#0B1F3A] tabular-nums">
                       {formatEGP(statement.salary.netSalary)}
                     </div>
                   </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-slate-500">الراتب الأساسي</div>
+                      <div className="mt-1 font-mono text-base font-bold text-[#0B1F3A] tabular-nums">
+                        {formatEGP(statement.salary.baseSalary)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-red-50/70 p-3">
+                      <div className="text-slate-600">إجمالي السلف</div>
+                      <div className="mt-1 font-mono text-base font-bold text-red-700 tabular-nums">
+                        − {formatEGP(statement.salary.totalAdvances)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-red-50/70 p-3">
+                      <div className="text-slate-600">خصم التغطيات</div>
+                      <div className="mt-1 font-mono text-base font-bold text-red-700 tabular-nums">
+                        − {formatEGP(statement.salary.totalCoverageDeductions)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-red-50/70 p-3">
+                      <div className="text-slate-600">خصومات أخرى</div>
+                      <div className="mt-1 font-mono text-base font-bold text-red-700 tabular-nums">
+                        − {formatEGP(statement.salary.otherDeductions)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-emerald-50/70 p-3">
+                      <div className="text-slate-600">المكافآت</div>
+                      <div className="mt-1 font-mono text-base font-bold text-emerald-700 tabular-nums">
+                        + {formatEGP(statement.salary.bonuses)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl bg-[#0B1F3A] text-white p-3">
+                      <div className="text-slate-300">صافي المستحق</div>
+                      <div className="mt-1 font-mono text-base font-bold text-[#C89B3C] tabular-nums">
+                        {formatEGP(statement.salary.netSalary)}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Driver Management Sections: Advances | Coverage | Bonuses & Deductions */}
-              <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-200/70 rounded-xl w-fit">
-                {[
-                  {
-                    id: 'advances' as const,
-                    label: `السلف (${statement.advances.length})`,
-                  },
-                  {
-                    id: 'coverage' as const,
-                    label: `التغطيات (${statement.coverages.length})`,
-                  },
-                  {
-                    id: 'adjustments' as const,
-                    label: `المكافآت والخصومات والحركات (${statement.transactions.length})`,
-                  },
-                ].map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setDriverSectionTab(t.id)}
-                    className={`px-4 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
-                      driverSectionTab === t.id
-                        ? 'bg-white text-[#0B1F3A] shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
+              {canViewFinancialDetails && (
+                <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-200/70 rounded-xl w-fit">
+                  {[
+                    {
+                      id: 'advances' as const,
+                      label: `السلف (${statement.advances.length})`,
+                      visible: canAdvancesWrite || canFinanceRead,
+                    },
+                    {
+                      id: 'coverage' as const,
+                      label: `التغطيات (${statement.coverages.length})`,
+                      visible: canCoverageWrite || canFinanceRead,
+                    },
+                    {
+                      id: 'adjustments' as const,
+                      label: `المكافآت والخصومات والحركات (${statement.transactions.length})`,
+                      visible: canFinanceRead,
+                    },
+                  ]
+                    .filter((t) => t.visible)
+                    .map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setDriverSectionTab(t.id)}
+                        className={`px-4 py-2 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
+                          driverSectionTab === t.id
+                            ? 'bg-white text-[#0B1F3A] shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
+                </div>
+              )}
 
               {/* SECTION 1: ADVANCES (ADD + EDIT + DELETE) */}
-              {driverSectionTab === 'advances' && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                  <form
-                    onSubmit={handleAddAdvance}
-                    className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
-                  >
+              {canViewFinancialDetails &&
+                driverSectionTab === 'advances' &&
+                (canAdvancesWrite || canFinanceRead) && (
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    {canAdvancesWrite && (
+                      <form
+                        onSubmit={handleAddAdvance}
+                        className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
+                      >
                     <h3 className="font-display text-sm font-bold text-[#0B1F3A] flex items-center gap-2">
                       <Plus className="w-4 h-4 text-[#C89B3C]" />
                       إضافة سلفة جديدة لـ {activeDriver.fullName}
@@ -1438,139 +1537,151 @@ export const AdminOverview: React.FC<{
                       className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
                     >
                       اعتماد وتسجيل السلفة
-                    </button>
-                  </form>
+                      </button>
+                    </form>
+                    )}
 
-                  <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
-                      سلف السائق لشهر {month} / {year}
-                    </div>
-                    <div className="md:hidden divide-y divide-slate-100">
-                      {statement.advances.length === 0 ? (
-                        <div className="p-6 text-center text-xs text-slate-400">
-                          لا توجد سلف مسجلة لهذا السائق في هذا الشهر
-                        </div>
-                      ) : (
-                        statement.advances.map((a) => (
-                          <div key={a.id} className={`p-4 space-y-2 text-xs ${a.isReversed ? 'opacity-60' : ''}`}>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-mono text-slate-500">{a.date}</span>
-                              <span className={`font-mono font-bold text-red-700 ${a.isReversed ? 'line-through' : ''}`}>
-                                {formatEGP(a.amount)}
-                              </span>
-                            </div>
-                            <div className="text-slate-700">
-                              {a.reason || 'سلفة'} {a.paymentMethod ? `· ${a.paymentMethod}` : ''}
-                            </div>
-                            <div className="flex items-center gap-2 pt-1">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingAdvance(a);
-                                  setEditAdvForm({
-                                    amount: String(a.amount),
-                                    date: a.date,
-                                    paymentMethod: a.paymentMethod || '',
-                                    reason: a.reason || '',
-                                    notes: a.notes || '',
-                                  });
-                                }}
-                                className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
-                              >
-                                <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                تعديل
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setDeletingAdvance(a)}
-                                className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                                حذف
-                              </button>
-                            </div>
+                    <div
+                      className={`${
+                        canAdvancesWrite ? 'lg:col-span-8' : 'lg:col-span-12'
+                      } bg-white border border-slate-200 rounded-xl overflow-hidden`}
+                    >
+                      <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
+                        سلف السائق لشهر {month} / {year}
+                      </div>
+                      <div className="md:hidden divide-y divide-slate-100">
+                        {statement.advances.length === 0 ? (
+                          <div className="p-6 text-center text-xs text-slate-400">
+                            لا توجد سلف مسجلة لهذا السائق في هذا الشهر
                           </div>
-                        ))
-                      )}
-                    </div>
-                    <div className="hidden md:block overflow-x-auto">
-                      <table className="w-full text-right text-xs">
-                        <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
-                          <tr>
-                            <th className="py-3 px-4">التاريخ</th>
-                            <th className="py-3 px-4">السبب والطريقة</th>
-                            <th className="py-3 px-4">المبلغ</th>
-                            <th className="py-3 px-4">تعديل / حذف</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {statement.advances.length === 0 ? (
-                            <tr>
-                              <td colSpan={4} className="py-8 text-center text-slate-400">
-                                لا توجد سلف مسجلة لهذا السائق في هذا الشهر
-                              </td>
-                            </tr>
-                          ) : (
-                            statement.advances.map((a) => (
-                              <tr key={a.id} className={a.isReversed ? 'opacity-60' : ''}>
-                                <td className="py-3 px-4 font-mono tabular-nums">{a.date}</td>
-                                <td className="py-3 px-4">
-                                  <div>{a.reason || '—'}</div>
-                                  <div className="text-slate-400">{a.paymentMethod || '—'}</div>
-                                </td>
-                                <td
-                                  className={`py-3 px-4 font-mono font-bold text-red-700 tabular-nums ${
-                                    a.isReversed ? 'line-through' : ''
-                                  }`}
-                                >
+                        ) : (
+                          statement.advances.map((a) => (
+                            <div key={a.id} className={`p-4 space-y-2 text-xs ${a.isReversed ? 'opacity-60' : ''}`}>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-slate-500">{a.date}</span>
+                                <span className={`font-mono font-bold text-red-700 ${a.isReversed ? 'line-through' : ''}`}>
                                   {formatEGP(a.amount)}
-                                </td>
-                                <td className="py-3 px-4">
-                                  <div className="flex items-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingAdvance(a);
-                                        setEditAdvForm({
-                                          amount: String(a.amount),
-                                          date: a.date,
-                                          paymentMethod: a.paymentMethod || '',
-                                          reason: a.reason || '',
-                                          notes: a.notes || '',
-                                        });
-                                      }}
-                                      className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                                    >
-                                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                      تعديل
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => setDeletingAdvance(a)}
-                                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                      حذف
-                                    </button>
-                                  </div>
+                                </span>
+                              </div>
+                              <div className="text-slate-700">
+                                {a.reason || 'سلفة'} {a.paymentMethod ? `· ${a.paymentMethod}` : ''}
+                              </div>
+                              {canAdvancesWrite && (
+                                <div className="flex items-center gap-2 pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingAdvance(a);
+                                      setEditAdvForm({
+                                        amount: String(a.amount),
+                                        date: a.date,
+                                        paymentMethod: a.paymentMethod || '',
+                                        reason: a.reason || '',
+                                        notes: a.notes || '',
+                                      });
+                                    }}
+                                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletingAdvance(a)}
+                                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    حذف
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                      <div className="hidden md:block overflow-x-auto">
+                        <table className="w-full text-right text-xs">
+                          <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                            <tr>
+                              <th className="py-3 px-4">التاريخ</th>
+                              <th className="py-3 px-4">السبب والطريقة</th>
+                              <th className="py-3 px-4">المبلغ</th>
+                              {canAdvancesWrite && <th className="py-3 px-4">تعديل / حذف</th>}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {statement.advances.length === 0 ? (
+                              <tr>
+                                <td colSpan={canAdvancesWrite ? 4 : 3} className="py-8 text-center text-slate-400">
+                                  لا توجد سلف مسجلة لهذا السائق في هذا الشهر
                                 </td>
                               </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
+                            ) : (
+                              statement.advances.map((a) => (
+                                <tr key={a.id} className={a.isReversed ? 'opacity-60' : ''}>
+                                  <td className="py-3 px-4 font-mono tabular-nums">{a.date}</td>
+                                  <td className="py-3 px-4">
+                                    <div>{a.reason || '—'}</div>
+                                    <div className="text-slate-400">{a.paymentMethod || '—'}</div>
+                                  </td>
+                                  <td
+                                    className={`py-3 px-4 font-mono font-bold text-red-700 tabular-nums ${
+                                      a.isReversed ? 'line-through' : ''
+                                    }`}
+                                  >
+                                    {formatEGP(a.amount)}
+                                  </td>
+                                  {canAdvancesWrite && (
+                                    <td className="py-3 px-4">
+                                      <div className="flex items-center gap-1.5">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingAdvance(a);
+                                            setEditAdvForm({
+                                              amount: String(a.amount),
+                                              date: a.date,
+                                              paymentMethod: a.paymentMethod || '',
+                                              reason: a.reason || '',
+                                              notes: a.notes || '',
+                                            });
+                                          }}
+                                          className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                                        >
+                                          <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                          تعديل
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setDeletingAdvance(a)}
+                                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
+                                          حذف
+                                        </button>
+                                      </div>
+                                    </td>
+                                  )}
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
 
               {/* SECTION 2: COVERAGES (ADD + EDIT + DELETE) */}
-              {driverSectionTab === 'coverage' && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                  <form
-                    onSubmit={handleAddCoverage}
-                    className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
-                  >
+              {canViewFinancialDetails &&
+                driverSectionTab === 'coverage' &&
+                (canCoverageWrite || canFinanceRead) && (
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    {canCoverageWrite && (
+                      <form
+                        onSubmit={handleAddCoverage}
+                        className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
+                      >
                     <h3 className="font-display text-sm font-bold text-[#0B1F3A] flex items-center gap-2">
                       <Plus className="w-4 h-4 text-[#C89B3C]" />
                       تسجيل تغطية غياب لـ {activeDriver.fullName}
@@ -1651,314 +1762,333 @@ export const AdminOverview: React.FC<{
                       className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
                     >
                       تسجيل التغطية
-                    </button>
-                  </form>
+                      </button>
+                    </form>
+                    )}
 
-                  <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
-                      سجل تغطيات السائق لشهر {month} / {year}
-                    </div>
-                    <div className="md:hidden divide-y divide-slate-100">
-                      {statement.coverages.length === 0 ? (
-                        <div className="p-6 text-center text-xs text-slate-400">
-                          لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
-                        </div>
-                      ) : (
-                        statement.coverages.map((c) => (
-                          <div key={c.id} className={`p-4 space-y-2 text-xs ${c.isReversed ? 'opacity-60' : ''}`}>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="font-mono text-slate-500">{c.date}</span>
-                              <span className={`font-mono font-bold text-red-700 ${c.isReversed ? 'line-through' : ''}`}>
-                                خصم: {formatEGP(c.absentDriverDeduction)}
-                              </span>
-                            </div>
-                            <div className="font-semibold text-slate-800">
-                              البديل: {c.replacementDriverName || c.replacementExternalName || '—'} · تكلفة {formatEGP(c.actualReplacementCost)}
-                            </div>
-                            {c.reason && <div className="text-slate-500">{c.reason}</div>}
-                            <div className="flex items-center gap-2 pt-1">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingCoverage(c);
-                                  setEditCovForm({
-                                    replacementQuery:
-                                      c.replacementDriverId &&
-                                      c.replacementDriverName &&
-                                      c.replacementDriverName !== '—'
-                                        ? c.replacementDriverName
-                                        : c.replacementExternalName || '',
-                                    date: c.date,
-                                    actualReplacementCost: String(c.actualReplacementCost ?? 0),
-                                    absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
-                                    reason: c.reason || '',
-                                    notes: c.notes || '',
-                                  });
-                                }}
-                                className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
-                              >
-                                <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                تعديل
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setDeletingCoverage(c)}
-                                className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                                حذف
-                              </button>
-                            </div>
+                    <div
+                      className={`${
+                        canCoverageWrite ? 'lg:col-span-8' : 'lg:col-span-12'
+                      } bg-white border border-slate-200 rounded-xl overflow-hidden`}
+                    >
+                      <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
+                        سجل تغطيات السائق لشهر {month} / {year}
+                      </div>
+                      <div className="md:hidden divide-y divide-slate-100">
+                        {statement.coverages.length === 0 ? (
+                          <div className="p-6 text-center text-xs text-slate-400">
+                            لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
                           </div>
-                        ))
-                      )}
-                    </div>
-                    <div className="hidden md:block overflow-x-auto">
-                      <table className="w-full text-right text-xs">
-                        <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
-                          <tr>
-                            <th className="py-3 px-4">التاريخ</th>
-                            <th className="py-3 px-4">البديل والسبب</th>
-                            <th className="py-3 px-4">تكلفة البديل</th>
-                            <th className="py-3 px-4">خصم السائق</th>
-                            <th className="py-3 px-4">تعديل / حذف</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {statement.coverages.length === 0 ? (
+                        ) : (
+                          statement.coverages.map((c) => (
+                            <div key={c.id} className={`p-4 space-y-2 text-xs ${c.isReversed ? 'opacity-60' : ''}`}>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-slate-500">{c.date}</span>
+                                <span className={`font-mono font-bold text-red-700 ${c.isReversed ? 'line-through' : ''}`}>
+                                  خصم: {formatEGP(c.absentDriverDeduction)}
+                                </span>
+                              </div>
+                              <div className="font-semibold text-slate-800">
+                                البديل: {c.replacementDriverName || c.replacementExternalName || '—'} · تكلفة {formatEGP(c.actualReplacementCost)}
+                              </div>
+                              {c.reason && <div className="text-slate-500">{c.reason}</div>}
+                              {canCoverageWrite && (
+                                <div className="flex items-center gap-2 pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingCoverage(c);
+                                      setEditCovForm({
+                                        replacementQuery:
+                                          c.replacementDriverId &&
+                                          c.replacementDriverName &&
+                                          c.replacementDriverName !== '—'
+                                            ? c.replacementDriverName
+                                            : c.replacementExternalName || '',
+                                        date: c.date,
+                                        actualReplacementCost: String(c.actualReplacementCost ?? 0),
+                                        absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
+                                        reason: c.reason || '',
+                                        notes: c.notes || '',
+                                      });
+                                    }}
+                                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletingCoverage(c)}
+                                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    حذف
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                      <div className="hidden md:block overflow-x-auto">
+                        <table className="w-full text-right text-xs">
+                          <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
                             <tr>
-                              <td colSpan={5} className="py-8 text-center text-slate-400">
-                                لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
-                              </td>
+                              <th className="py-3 px-4">التاريخ</th>
+                              <th className="py-3 px-4">البديل والسبب</th>
+                              <th className="py-3 px-4">تكلفة البديل</th>
+                              <th className="py-3 px-4">خصم السائق</th>
+                              {canCoverageWrite && <th className="py-3 px-4">تعديل / حذف</th>}
                             </tr>
-                          ) : (
-                            statement.coverages.map((c) => (
-                              <tr key={c.id} className={c.isReversed ? 'opacity-60' : ''}>
-                                <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
-                                <td className="py-3 px-4">
-                                  <div className="font-semibold text-slate-800">
-                                    {c.replacementDriverName || c.replacementExternalName || '—'}
-                                  </div>
-                                  <div className="text-slate-400">{c.reason || '—'}</div>
-                                </td>
-                                <td className="py-3 px-4 font-mono tabular-nums">
-                                  {formatEGP(c.actualReplacementCost)}
-                                </td>
-                                <td
-                                  className={`py-3 px-4 font-mono font-bold text-red-700 tabular-nums ${
-                                    c.isReversed ? 'line-through' : ''
-                                  }`}
-                                >
-                                  {formatEGP(c.absentDriverDeduction)}
-                                </td>
-                                <td className="py-3 px-4">
-                                  <div className="flex items-center gap-1.5">
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setEditingCoverage(c);
-                                        setEditCovForm({
-                                          replacementQuery:
-                                            c.replacementDriverId &&
-                                            c.replacementDriverName &&
-                                            c.replacementDriverName !== '—'
-                                              ? c.replacementDriverName
-                                              : c.replacementExternalName || '',
-                                          date: c.date,
-                                          actualReplacementCost: String(
-                                            c.actualReplacementCost ?? 0
-                                          ),
-                                          absentDriverDeduction: String(
-                                            c.absentDriverDeduction ?? 0
-                                          ),
-                                          reason: c.reason || '',
-                                          notes: c.notes || '',
-                                        });
-                                      }}
-                                      className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                                    >
-                                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                      تعديل
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => setDeletingCoverage(c)}
-                                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                      حذف
-                                    </button>
-                                  </div>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {statement.coverages.length === 0 ? (
+                              <tr>
+                                <td colSpan={canCoverageWrite ? 5 : 4} className="py-8 text-center text-slate-400">
+                                  لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
                                 </td>
                               </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* SECTION 3: BONUSES, DEDUCTIONS & FULL MONTH TRANSACTIONS */}
-              {driverSectionTab === 'adjustments' && (
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                  <form
-                    onSubmit={handleAddAdjustment}
-                    className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
-                  >
-                    <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
-                      إضافة مكافأة أو خصم إداري
-                    </h3>
-                    <div className="grid grid-cols-2 gap-2">
-                      {[
-                        { value: 'bonus' as const, label: 'مكافأة (+)' },
-                        { value: 'other_deduction' as const, label: 'خصم (−)' },
-                      ].map((opt) => (
-                        <button
-                          key={opt.value}
-                          type="button"
-                          onClick={() => setAdjForm({ ...adjForm, type: opt.value })}
-                          className={`rounded-lg border px-3 py-2 font-semibold cursor-pointer ${
-                            adjForm.type === opt.value
-                              ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
-                              : 'border-slate-200 bg-white text-slate-700'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div>
-                      <label className="block font-semibold text-slate-700 mb-1">
-                        المبلغ (ج.م) *
-                      </label>
-                      <input
-                        type="number"
-                        required
-                        min={1}
-                        value={adjForm.amount}
-                        onChange={(e) => setAdjForm({ ...adjForm, amount: e.target.value })}
-                        placeholder="0"
-                        className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block font-semibold text-slate-700 mb-1">
-                        السبب / البيان *
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={adjForm.description}
-                        onChange={(e) => setAdjForm({ ...adjForm, description: e.target.value })}
-                        placeholder="اكتب السبب"
-                        className="w-full rounded-lg border border-slate-200 px-3 py-2"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      disabled={busyAction}
-                      className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
-                    >
-                      حفظ التسوية
-                    </button>
-                  </form>
-
-                  <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
-                    <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
-                      سجل حركات السائق لشهر {month} / {year}
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-right text-xs">
-                        <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
-                          <tr>
-                            <th className="py-3 px-4">التاريخ</th>
-                            <th className="py-3 px-4">النوع</th>
-                            <th className="py-3 px-4">البيان</th>
-                            <th className="py-3 px-4">القيمة</th>
-                            <th className="py-3 px-4">تعديل / حذف</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {statement.transactions.length === 0 ? (
-                            <tr>
-                              <td colSpan={5} className="py-8 text-center text-slate-400">
-                                لا توجد حركات مسجلة في هذا الشهر
-                              </td>
-                            </tr>
-                          ) : (
-                            statement.transactions.map((t) => {
-                              const isAdjustable =
-                                t.type === 'bonus' || t.type === 'other_deduction';
-                              return (
-                                <tr key={t.id}>
-                                  <td className="py-3 px-4 font-mono text-slate-500">
-                                    {new Date(t.createdAt).toLocaleDateString('ar-EG')}
+                            ) : (
+                              statement.coverages.map((c) => (
+                                <tr key={c.id} className={c.isReversed ? 'opacity-60' : ''}>
+                                  <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
+                                  <td className="py-3 px-4">
+                                    <div className="font-semibold text-slate-800">
+                                      {c.replacementDriverName || c.replacementExternalName || '—'}
+                                    </div>
+                                    <div className="text-slate-400">{c.reason || '—'}</div>
                                   </td>
-                                  <td className="py-3 px-4 font-semibold">
-                                    {t.type === 'advance'
-                                      ? 'سلفة'
-                                      : t.type === 'coverage_deduction'
-                                      ? 'خصم تغطية'
-                                      : t.type === 'bonus'
-                                      ? 'مكافأة'
-                                      : t.type === 'other_deduction'
-                                      ? 'خصم إداري'
-                                      : t.type}
+                                  <td className="py-3 px-4 font-mono tabular-nums">
+                                    {formatEGP(c.actualReplacementCost)}
                                   </td>
-                                  <td className="py-3 px-4">{t.description}</td>
                                   <td
-                                    className={`py-3 px-4 font-mono font-bold tabular-nums ${
-                                      t.direction === 'credit' ? 'text-emerald-700' : 'text-red-700'
+                                    className={`py-3 px-4 font-mono font-bold text-red-700 tabular-nums ${
+                                      c.isReversed ? 'line-through' : ''
                                     }`}
                                   >
-                                    {t.direction === 'credit' ? '+' : '−'} {formatEGP(t.amount)}
+                                    {formatEGP(c.absentDriverDeduction)}
                                   </td>
-                                  <td className="py-3 px-4">
-                                    {isAdjustable ? (
+                                  {canCoverageWrite && (
+                                    <td className="py-3 px-4">
                                       <div className="flex items-center gap-1.5">
                                         <button
                                           type="button"
                                           onClick={() => {
-                                            setEditingAdjustment(t);
-                                            setEditAdjForm({
-                                              type:
-                                                t.type === 'bonus' ? 'bonus' : 'other_deduction',
-                                              amount: String(t.amount),
-                                              description: t.description,
+                                            setEditingCoverage(c);
+                                            setEditCovForm({
+                                              replacementQuery:
+                                                c.replacementDriverId &&
+                                                c.replacementDriverName &&
+                                                c.replacementDriverName !== '—'
+                                                  ? c.replacementDriverName
+                                                  : c.replacementExternalName || '',
+                                              date: c.date,
+                                              actualReplacementCost: String(
+                                                c.actualReplacementCost ?? 0
+                                              ),
+                                              absentDriverDeduction: String(
+                                                c.absentDriverDeduction ?? 0
+                                              ),
+                                              reason: c.reason || '',
+                                              notes: c.notes || '',
                                             });
                                           }}
-                                          className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                                          className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
                                         >
                                           <Edit3 className="w-3 h-3 text-[#C89B3C]" />
                                           تعديل
                                         </button>
                                         <button
                                           type="button"
-                                          onClick={() => setDeletingAdjustment(t)}
-                                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                                          onClick={() => setDeletingCoverage(c)}
+                                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
                                         >
                                           <Trash2 className="w-3 h-3" />
                                           حذف
                                         </button>
                                       </div>
-                                    ) : (
-                                      <span className="text-[11px] text-slate-400">
-                                        من تبويب السلف/التغطيات
-                                      </span>
-                                    )}
-                                  </td>
+                                    </td>
+                                  )}
                                 </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
+
+              {/* SECTION 3: BONUSES, DEDUCTIONS & FULL MONTH TRANSACTIONS */}
+              {canViewFinancialDetails &&
+                driverSectionTab === 'adjustments' &&
+                canFinanceRead && (
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    {canFinanceWrite && (
+                      <form
+                        onSubmit={handleAddAdjustment}
+                        className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
+                      >
+                        <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
+                          إضافة مكافأة أو خصم إداري
+                        </h3>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[
+                            { value: 'bonus' as const, label: 'مكافأة (+)' },
+                            { value: 'other_deduction' as const, label: 'خصم (−)' },
+                          ].map((opt) => (
+                            <button
+                              key={opt.value}
+                              type="button"
+                              onClick={() => setAdjForm({ ...adjForm, type: opt.value })}
+                              className={`rounded-lg border px-3 py-2 font-semibold cursor-pointer ${
+                                adjForm.type === opt.value
+                                  ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                  : 'border-slate-200 bg-white text-slate-700'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                        <div>
+                          <label className="block font-semibold text-slate-700 mb-1">
+                            المبلغ (ج.م) *
+                          </label>
+                          <input
+                            type="number"
+                            required
+                            min={1}
+                            value={adjForm.amount}
+                            onChange={(e) => setAdjForm({ ...adjForm, amount: e.target.value })}
+                            placeholder="0"
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-semibold text-slate-700 mb-1">
+                            السبب / البيان *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={adjForm.description}
+                            onChange={(e) => setAdjForm({ ...adjForm, description: e.target.value })}
+                            placeholder="اكتب السبب"
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          disabled={busyAction}
+                          className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                        >
+                          حفظ التسوية
+                        </button>
+                      </form>
+                    )}
+
+                    <div
+                      className={`${
+                        canFinanceWrite ? 'lg:col-span-8' : 'lg:col-span-12'
+                      } bg-white border border-slate-200 rounded-xl overflow-hidden`}
+                    >
+                      <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
+                        سجل حركات السائق لشهر {month} / {year}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-right text-xs">
+                          <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                            <tr>
+                              <th className="py-3 px-4">التاريخ</th>
+                              <th className="py-3 px-4">النوع</th>
+                              <th className="py-3 px-4">البيان</th>
+                              <th className="py-3 px-4">القيمة</th>
+                              {canFinanceWrite && <th className="py-3 px-4">تعديل / حذف</th>}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {statement.transactions.length === 0 ? (
+                              <tr>
+                                <td colSpan={canFinanceWrite ? 5 : 4} className="py-8 text-center text-slate-400">
+                                  لا توجد حركات مسجلة في هذا الشهر
+                                </td>
+                              </tr>
+                            ) : (
+                              statement.transactions.map((t) => {
+                                const isAdjustable =
+                                  t.type === 'bonus' || t.type === 'other_deduction';
+                                return (
+                                  <tr key={t.id}>
+                                    <td className="py-3 px-4 font-mono text-slate-500">
+                                      {new Date(t.createdAt).toLocaleDateString('ar-EG')}
+                                    </td>
+                                    <td className="py-3 px-4 font-semibold">
+                                      {t.type === 'advance'
+                                        ? 'سلفة'
+                                        : t.type === 'coverage_deduction'
+                                        ? 'خصم تغطية'
+                                        : t.type === 'bonus'
+                                        ? 'مكافأة'
+                                        : t.type === 'other_deduction'
+                                        ? 'خصم إداري'
+                                        : t.type}
+                                    </td>
+                                    <td className="py-3 px-4">{t.description}</td>
+                                    <td
+                                      className={`py-3 px-4 font-mono font-bold tabular-nums ${
+                                        t.direction === 'credit' ? 'text-emerald-700' : 'text-red-700'
+                                      }`}
+                                    >
+                                      {t.direction === 'credit' ? '+' : '−'} {formatEGP(t.amount)}
+                                    </td>
+                                    {canFinanceWrite && (
+                                      <td className="py-3 px-4">
+                                        {isAdjustable ? (
+                                          <div className="flex items-center gap-1.5">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setEditingAdjustment(t);
+                                                setEditAdjForm({
+                                                  type:
+                                                    t.type === 'bonus' ? 'bonus' : 'other_deduction',
+                                                  amount: String(t.amount),
+                                                  description: t.description,
+                                                });
+                                              }}
+                                              className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                                            >
+                                              <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                              تعديل
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setDeletingAdjustment(t)}
+                                              className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                                            >
+                                              <Trash2 className="w-3 h-3" />
+                                              حذف
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <span className="text-[11px] text-slate-400">
+                                            من تبويب السلف/التغطيات
+                                          </span>
+                                        )}
+                                      </td>
+                                    )}
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                )}
             </>
           )}
         </div>
@@ -1969,37 +2099,41 @@ export const AdminOverview: React.FC<{
         <div className="space-y-6">
           {/* 4-Card Essential KPI Strip */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-white rounded-xl p-5 border border-slate-200">
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span>صافي الربحية الشهرية</span>
-                <TrendingUp className="w-4 h-4 text-[#C89B3C]" />
-              </div>
-              <div
-                className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
-                  profit >= 0 ? 'text-[#0B1F3A]' : 'text-red-700'
-                }`}
-              >
-                {loading || !kpis ? '—' : formatEGP(profit)}
-              </div>
-              <div className="mt-2 text-xs text-slate-500 tabular-nums">
-                عقود {kpis ? formatEGP(kpis.totalSchoolContracts) : '—'} − رواتب{' '}
-                {kpis ? formatEGP(kpis.totalMonthlySalaries) : '—'}
-              </div>
-            </div>
+            {canFinanceRead && (
+              <>
+                <div className="bg-white rounded-xl p-5 border border-slate-200">
+                  <div className="flex items-center justify-between text-xs text-slate-500">
+                    <span>صافي الربحية الشهرية</span>
+                    <TrendingUp className="w-4 h-4 text-[#C89B3C]" />
+                  </div>
+                  <div
+                    className={`mt-2 font-mono text-2xl font-bold tabular-nums ${
+                      profit >= 0 ? 'text-[#0B1F3A]' : 'text-red-700'
+                    }`}
+                  >
+                    {loading || !kpis ? '—' : formatEGP(profit)}
+                  </div>
+                  <div className="mt-2 text-xs text-slate-500 tabular-nums">
+                    عقود {kpis ? formatEGP(kpis.totalSchoolContracts) : '—'} − رواتب{' '}
+                    {kpis ? formatEGP(kpis.totalMonthlySalaries) : '—'}
+                  </div>
+                </div>
 
-            <div className="bg-white rounded-xl p-5 border border-slate-200">
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span>إجمالي الرواتب (سائقين + موظفين)</span>
-                <Wallet className="w-4 h-4 text-slate-400" />
-              </div>
-              <div className="mt-2 font-mono text-2xl font-bold text-[#0B1F3A] tabular-nums">
-                {loading || !kpis ? '—' : formatEGP(kpis.totalMonthlySalaries)}
-              </div>
-              <div className="mt-2 text-xs text-slate-500 tabular-nums">
-                سائقين {kpis ? formatEGP(kpis.totalDriverSalaries) : '—'} · موظفين{' '}
-                {kpis ? formatEGP(kpis.totalEmployeeSalaries) : '—'}
-              </div>
-            </div>
+                <div className="bg-white rounded-xl p-5 border border-slate-200">
+                  <div className="flex items-center justify-between text-xs text-slate-500">
+                    <span>إجمالي الرواتب (سائقين + موظفين)</span>
+                    <Wallet className="w-4 h-4 text-slate-400" />
+                  </div>
+                  <div className="mt-2 font-mono text-2xl font-bold text-[#0B1F3A] tabular-nums">
+                    {loading || !kpis ? '—' : formatEGP(kpis.totalMonthlySalaries)}
+                  </div>
+                  <div className="mt-2 text-xs text-slate-500 tabular-nums">
+                    سائقين {kpis ? formatEGP(kpis.totalDriverSalaries) : '—'} · موظفين{' '}
+                    {kpis ? formatEGP(kpis.totalEmployeeSalaries) : '—'}
+                  </div>
+                </div>
+              </>
+            )}
 
             <div className="bg-white rounded-xl p-5 border border-slate-200">
               <div className="flex items-center justify-between text-xs text-slate-500">
@@ -2016,22 +2150,53 @@ export const AdminOverview: React.FC<{
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => onNavigate('employees')}
-              className="bg-white hover:bg-slate-50 rounded-xl p-5 border border-slate-200 text-right transition-colors cursor-pointer"
-            >
-              <div className="flex items-center justify-between text-xs text-slate-500">
-                <span>الموظفون (غير السائقين)</span>
-                <Briefcase className="w-4 h-4 text-[#C89B3C]" />
+            {canEmployeesAccess ? (
+              <button
+                type="button"
+                onClick={() => onNavigate('employees')}
+                className="bg-white hover:bg-slate-50 rounded-xl p-5 border border-slate-200 text-right transition-colors cursor-pointer"
+              >
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>الموظفون (غير السائقين)</span>
+                  <Briefcase className="w-4 h-4 text-[#C89B3C]" />
+                </div>
+                <div className="mt-2 font-mono text-2xl font-bold text-[#0B1F3A] tabular-nums">
+                  {loading || !kpis ? '—' : `${kpis.totalEmployeesCount} موظف`}
+                </div>
+                <div className="mt-2 text-xs font-semibold text-[#0B1F3A]">
+                  اضغط لإدارة الموظفين ورواتبهم ←
+                </div>
+              </button>
+            ) : canViewFinancialDetails ? (
+              <div className="bg-white rounded-xl p-5 border border-slate-200 text-right">
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>إجمالي السلف والتغطيات</span>
+                  <Wallet className="w-4 h-4 text-[#C89B3C]" />
+                </div>
+                <div className="mt-2 font-mono text-2xl font-bold text-[#0B1F3A] tabular-nums">
+                  {loading || !kpis
+                    ? '—'
+                    : formatEGP(kpis.totalAdvances + kpis.totalCoverageDeductions)}
+                </div>
+                <div className="mt-2 text-xs text-slate-500 tabular-nums">
+                  سلف {kpis ? formatEGP(kpis.totalAdvances) : '—'} · تغطيات{' '}
+                  {kpis ? formatEGP(kpis.totalCoverageDeductions) : '—'}
+                </div>
               </div>
-              <div className="mt-2 font-mono text-2xl font-bold text-[#0B1F3A] tabular-nums">
-                {loading || !kpis ? '—' : `${kpis.totalEmployeesCount} موظف`}
+            ) : (
+              <div className="bg-white rounded-xl p-5 border border-slate-200 text-right">
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>نطاق المدارس المسموح</span>
+                  <Users className="w-4 h-4 text-[#C89B3C]" />
+                </div>
+                <div className="mt-2 font-mono text-2xl font-bold text-[#0B1F3A] tabular-nums">
+                  {loading || !data ? '—' : `${data.schools.length} مدرسة`}
+                </div>
+                <div className="mt-2 text-xs text-slate-500 tabular-nums">
+                  إجمالي السائقين المتاحين: {data?.drivers.length ?? 0}
+                </div>
               </div>
-              <div className="mt-2 text-xs font-semibold text-[#0B1F3A]">
-                اضغط لإدارة الموظفين ورواتبهم ←
-              </div>
-            </button>
+            )}
           </div>
 
           {/* Clickable Driver Directory (Instant Match Results or All Drivers) */}
@@ -2044,40 +2209,48 @@ export const AdminOverview: React.FC<{
                     : `السائقون المسجلون (${matchedDrivers.length})`}
                 </h2>
                 <p className="text-xs text-slate-500">
-                  اضغط على أي سائق لفتح صفحته وتعديل بياناته وإضافة أو تعديل السلف والتغطيات والمكافآت
+                  اضغط على أي سائق لفتح صفحته لمتابعة بياناته وتسجيل السلف والتغطيات وفق صلاحياتك
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowDriversBroadcastModal(true)}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 px-3.5 py-2 text-xs font-bold text-white cursor-pointer"
-                >
-                  <RadioTower className="w-3.5 h-3.5" />
-                  رسائل جماعية للسائقين
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onNavigate('drivers')}
-                  className="rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-3.5 py-2 text-xs font-semibold text-white cursor-pointer"
-                >
-                  إضافة سائق جديد
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onNavigate('schools')}
-                  className="rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 cursor-pointer"
-                >
-                  المدارس والعقود
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onNavigate('map')}
-                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 cursor-pointer"
-                >
-                  <MapPin className="w-3.5 h-3.5 text-[#C89B3C]" />
-                  الخريطة
-                </button>
+                {isSuperAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => setShowDriversBroadcastModal(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 px-3.5 py-2 text-xs font-bold text-white cursor-pointer"
+                  >
+                    <RadioTower className="w-3.5 h-3.5" />
+                    رسائل جماعية للسائقين
+                  </button>
+                )}
+                {canDriversWrite && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('drivers')}
+                    className="rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-3.5 py-2 text-xs font-semibold text-white cursor-pointer"
+                  >
+                    إضافة سائق جديد
+                  </button>
+                )}
+                {canSchoolsOrVehicles && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('schools')}
+                    className="rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 cursor-pointer"
+                  >
+                    المدارس والعقود
+                  </button>
+                )}
+                {canGpsRead && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('map')}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 cursor-pointer"
+                  >
+                    <MapPin className="w-3.5 h-3.5 text-[#C89B3C]" />
+                    الخريطة
+                  </button>
+                )}
               </div>
             </div>
 
@@ -2088,10 +2261,18 @@ export const AdminOverview: React.FC<{
                     <th className="py-3 px-4 font-semibold">الكود</th>
                     <th className="py-3 px-4 font-semibold">السائق والموبايل</th>
                     <th className="py-3 px-4 font-semibold">المدرسة والباص</th>
-                    <th className="py-3 px-4 font-semibold">الأساسي</th>
-                    <th className="py-3 px-4 font-semibold">السلف</th>
-                    <th className="py-3 px-4 font-semibold">التغطيات</th>
-                    <th className="py-3 px-4 font-semibold">صافي المستحق</th>
+                    {canFinanceRead && (
+                      <th className="py-3 px-4 font-semibold">الأساسي</th>
+                    )}
+                    {(canFinanceRead || canAdvancesWrite) && (
+                      <th className="py-3 px-4 font-semibold">السلف</th>
+                    )}
+                    {(canFinanceRead || canCoverageWrite) && (
+                      <th className="py-3 px-4 font-semibold">التغطيات</th>
+                    )}
+                    {canFinanceRead && (
+                      <th className="py-3 px-4 font-semibold">صافي المستحق</th>
+                    )}
                     <th className="py-3 px-4 font-semibold">فتح الصفحة</th>
                   </tr>
                 </thead>
@@ -2135,18 +2316,26 @@ export const AdminOverview: React.FC<{
                             <div className="text-slate-800">{d.schoolName || '—'}</div>
                             <div className="text-slate-500 font-mono">{d.busNumber || '—'}</div>
                           </td>
-                          <td className="py-3 px-4 font-mono tabular-nums">
-                            {formatEGP(sal?.baseSalary ?? d.monthlyAgreedSalary)}
-                          </td>
-                          <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                            {formatEGP(sal?.totalAdvances ?? 0)}
-                          </td>
-                          <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                            {formatEGP(sal?.totalCoverageDeductions ?? 0)}
-                          </td>
-                          <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
-                            {formatEGP(sal?.netSalary ?? d.monthlyAgreedSalary)}
-                          </td>
+                          {canFinanceRead && (
+                            <td className="py-3 px-4 font-mono tabular-nums">
+                              {formatEGP(sal?.baseSalary ?? d.monthlyAgreedSalary)}
+                            </td>
+                          )}
+                          {(canFinanceRead || canAdvancesWrite) && (
+                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                              {formatEGP(sal?.totalAdvances ?? 0)}
+                            </td>
+                          )}
+                          {(canFinanceRead || canCoverageWrite) && (
+                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                              {formatEGP(sal?.totalCoverageDeductions ?? 0)}
+                            </td>
+                          )}
+                          {canFinanceRead && (
+                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                              {formatEGP(sal?.netSalary ?? d.monthlyAgreedSalary)}
+                            </td>
+                          )}
                           <td className="py-3 px-4">
                             <span className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white">
                               <Users className="w-3 h-3 text-[#C89B3C]" />

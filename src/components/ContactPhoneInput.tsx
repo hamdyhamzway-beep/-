@@ -25,21 +25,26 @@ interface NavigatorWithContacts extends Navigator {
 }
 
 export function normalizePhoneNumber(raw: string): string {
-  // Remove RTL/LTR marks, spaces, parentheses, hyphens
-  let cleaned = raw
-    .replace(/[\u200e\u200f\u202a-\u202e\s\-().]/g, '')
-    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+  try {
+    if (!raw || typeof raw !== 'string') return '';
+    // Remove RTL/LTR marks, spaces, parentheses, hyphens
+    let cleaned = raw
+      .replace(/[\u200e\u200f\u202a-\u202e\s\-().]/g, '')
+      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
 
-  // Normalize Egyptian international prefixes (+201... or 00201... -> 01...)
-  if (cleaned.startsWith('+20')) {
-    cleaned = '0' + cleaned.slice(3);
-  } else if (cleaned.startsWith('0020')) {
-    cleaned = '0' + cleaned.slice(4);
-  } else if (cleaned.startsWith('201') && cleaned.length === 12) {
-    cleaned = '0' + cleaned.slice(2);
+    // Normalize Egyptian international prefixes (+201... or 00201... -> 01...)
+    if (cleaned.startsWith('+20')) {
+      cleaned = '0' + cleaned.slice(3);
+    } else if (cleaned.startsWith('0020')) {
+      cleaned = '0' + cleaned.slice(4);
+    } else if (cleaned.startsWith('201') && cleaned.length === 12) {
+      cleaned = '0' + cleaned.slice(2);
+    }
+
+    return cleaned;
+  } catch {
+    return raw || '';
   }
-
-  return cleaned;
 }
 
 function decodeQuotedPrintableUtf8(str: string): string {
@@ -61,30 +66,35 @@ function decodeQuotedPrintableUtf8(str: string): string {
 }
 
 function parseVCard(vcfText: string): ContactSelection | null {
-  const unfolded = vcfText.replace(/\r?\n[ \t]/g, '');
-  const lines = unfolded.split(/\r?\n/);
+  try {
+    if (!vcfText || typeof vcfText !== 'string' || vcfText.length > 1_000_000) return null;
+    const unfolded = vcfText.replace(/\r?\n[ \t]/g, '');
+    const lines = unfolded.split(/\r?\n/);
 
-  let name = '';
-  let phone = '';
+    let name = '';
+    let phone = '';
 
-  for (const line of lines) {
-    const colonIdx = line.indexOf(':');
-    if (colonIdx === -1) continue;
-    const prop = line.slice(0, colonIdx).toUpperCase();
-    const val = line.slice(colonIdx + 1).trim();
-    if (!val) continue;
+    for (const line of lines) {
+      const colonIdx = line.indexOf(':');
+      if (colonIdx === -1) continue;
+      const prop = line.slice(0, colonIdx).toUpperCase();
+      const val = line.slice(colonIdx + 1).trim();
+      if (!val) continue;
 
-    if (prop === 'FN' || prop.startsWith('FN;')) {
-      name = prop.includes('QUOTED-PRINTABLE') ? decodeQuotedPrintableUtf8(val) : val;
-    } else if (prop === 'TEL' || prop.startsWith('TEL;')) {
-      if (!phone) {
-        phone = normalizePhoneNumber(val);
+      if (prop === 'FN' || prop.startsWith('FN;')) {
+        name = prop.includes('QUOTED-PRINTABLE') ? decodeQuotedPrintableUtf8(val) : val;
+      } else if (prop === 'TEL' || prop.startsWith('TEL;')) {
+        if (!phone) {
+          phone = normalizePhoneNumber(val);
+        }
       }
     }
-  }
 
-  if (!phone) return null;
-  return { phone, name: name.trim() || undefined };
+    if (!phone) return null;
+    return { phone, name: name.trim() || undefined };
+  } catch {
+    return null;
+  }
 }
 
 export const ContactPhoneInput: React.FC<ContactPhoneInputProps> = ({
@@ -116,15 +126,15 @@ export const ContactPhoneInput: React.FC<ContactPhoneInputProps> = ({
     if (nav.contacts && typeof nav.contacts.select === 'function') {
       try {
         const picked = await nav.contacts.select(['name', 'tel'], { multiple: false });
-        if (!picked || picked.length === 0) return;
+        if (!picked || !Array.isArray(picked) || picked.length === 0) return;
 
         const first = picked[0];
-        const rawPhone = first.tel?.[0] || '';
+        const rawPhone = first?.tel?.[0] || '';
         const phone = normalizePhoneNumber(rawPhone);
-        const name = first.name?.[0]?.trim() || undefined;
+        const name = first?.name?.[0]?.trim() || undefined;
 
         if (!phone) {
-          setStatusMessage('جهة الاتصال المختارة لا تحتوي على رقم هاتف.');
+          setStatusMessage('جهة الاتصال المختارة لا تحتوي على رقم هاتف صالح.');
           return;
         }
 
@@ -135,16 +145,17 @@ export const ContactPhoneInput: React.FC<ContactPhoneInputProps> = ({
         if (errName === 'AbortError') return; // User closed contact picker
         if (errName === 'SecurityError' || errName === 'InvalidStateError') {
           setStatusMessage(
-            'الوصول المباشر لجهات الاتصال يتطلب فتح التطبيق كموبايل PWA أو في نافذة مستقلة (خارج إطار المعاينة)، أو يمكنك استيراد ملف جهة اتصال (.vcf).'
+            'الوصول المباشر لجهات الاتصال يتطلب فتح التطبيق كموبايل PWA أو في نافذة مستقلة، أو يمكنك استيراد ملف جهة اتصال (.vcf).'
           );
           setShowFallbackHint(true);
           return;
         }
+        setStatusMessage('تعذر الوصول إلى جهات الاتصال. يمكنك الإدخال اليدوي أو استيراد ملف .vcf.');
+        setShowFallbackHint(true);
       }
+    } else {
+      setShowFallbackHint((prev) => !prev);
     }
-
-    // Browser doesn't expose Web Contact Picker API (e.g., iOS Safari or Desktop)
-    setShowFallbackHint((prev) => !prev);
   };
 
   const handleVcfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -152,11 +163,16 @@ export const ContactPhoneInput: React.FC<ContactPhoneInputProps> = ({
     e.target.value = '';
     if (!file) return;
 
+    if (file.size > 2_097_152) {
+      setStatusMessage('حجم ملف جهة الاتصال كبير جداً (الحد الأقصى 2 ميجابايت).');
+      return;
+    }
+
     try {
       const text = await file.text();
       const parsed = parseVCard(text);
       if (!parsed) {
-        setStatusMessage('لم يتم العثور على رقم هاتف داخل ملف جهة الاتصال.');
+        setStatusMessage('لم يتم العثور على رقم هاتف صالح داخل ملف جهة الاتصال.');
         return;
       }
       applySelection(parsed);
@@ -201,7 +217,7 @@ export const ContactPhoneInput: React.FC<ContactPhoneInputProps> = ({
               <Info className="w-3.5 h-3.5 text-[#0B1F3A] shrink-0 mt-0.5" />
               <span>
                 على <strong>أندرويد (Chrome / تطبيق PWA)</strong> يفتح سجل الأسماء مباشرة. على{' '}
-                <strong>الآيفون أو الكمبيوتر</strong> يمكنك استيراد بطاقة جهة الاتصال (.vcf):
+                <strong>الآيفون أو الكمبيوتر</strong> يمكنك استيراد بطاقة جهة اتصال (.vcf):
               </span>
             </div>
             <button

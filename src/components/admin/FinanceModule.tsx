@@ -18,6 +18,7 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatEGP, getLocalTodayDateString } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
 import type {
@@ -96,13 +97,37 @@ interface FinanceOverview {
   ledger: FinancialTransaction[];
 }
 
+type FinanceTabId = 'schools' | 'salaries' | 'advances' | 'coverage' | 'ledger' | 'closing';
+
 export const FinanceModule: React.FC = () => {
+  const { dbUser } = useAuth();
+  const perms = dbUser?.permissions || [];
+  const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || perms.includes('*');
+  const can = (perm: string) => isSuperAdmin || perms.includes('*') || perms.includes(perm);
+
+  const canFinanceWrite = can('finance:write');
+  const canFinanceRead = can('finance:read') || canFinanceWrite;
+  const canAdvancesWrite = can('advances:write') || canFinanceWrite;
+  const canCoverageWrite = can('coverage:write') || canFinanceWrite;
+  const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
+
+  const allowedTabs: Array<{ id: FinanceTabId; label: string }> = [
+    ...(canFinanceRead ? [{ id: 'schools' as const, label: 'المدارس والعقود والأرباح' }] : []),
+    ...(canFinanceRead ? [{ id: 'salaries' as const, label: 'رواتب الشهر والتسويات' }] : []),
+    ...(canAdvancesWrite || canFinanceRead
+      ? [{ id: 'advances' as const, label: 'تسجيل وإدارة السلف' }]
+      : []),
+    ...(canCoverageWrite || canFinanceRead
+      ? [{ id: 'coverage' as const, label: 'تغطية الغياب' }]
+      : []),
+    ...(canFinanceRead ? [{ id: 'ledger' as const, label: 'دفتر الأستاذ المالي' }] : []),
+    ...(canFinanceWrite ? [{ id: 'closing' as const, label: 'التصفية وبداية شهر جديد' }] : []),
+  ];
+
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [year, setYear] = useState(new Date().getFullYear());
   const initialSyncedRef = useRef(false);
-  const [tab, setTab] = useState<
-    'schools' | 'salaries' | 'advances' | 'coverage' | 'ledger' | 'closing'
-  >('schools');
+  const [tab, setTab] = useState<FinanceTabId>(() => allowedTabs[0]?.id || 'advances');
   const [selectedSchoolKey, setSelectedSchoolKey] = useState<string>('all');
   const [showGrandTotalsBox, setShowGrandTotalsBox] = useState<boolean>(true);
   const [data, setData] = useState<FinanceOverview | null>(null);
@@ -219,6 +244,12 @@ export const FinanceModule: React.FC = () => {
   useEffect(() => {
     loadFinance();
   }, [loadFinance]);
+
+  useEffect(() => {
+    if (allowedTabs.length > 0 && !allowedTabs.some((t) => t.id === tab)) {
+      setTab(allowedTabs[0].id);
+    }
+  }, [tab, canFinanceRead, canFinanceWrite, canAdvancesWrite, canCoverageWrite]);
 
   useEffect(() => {
     const curNow = new Date();
@@ -613,6 +644,11 @@ export const FinanceModule: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {!isSuperAdmin && restrictedSchoolCount > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-semibold text-amber-900">
+              نطاق صلاحيتك: {restrictedSchoolCount} مدرسة محددة
+            </div>
+          )}
           <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
             <span className="text-[11px] text-slate-500">الشهر</span>
             <input
@@ -647,232 +683,252 @@ export const FinanceModule: React.FC = () => {
               className="w-16 bg-transparent font-mono text-xs font-semibold text-center focus:outline-none"
             />
           </div>
-          <button
-            type="button"
-            onClick={() => setTab('closing')}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer"
-          >
-            <CalendarCheck className="w-4 h-4" />
-            تصفية الشهر وبدء شهر جديد
-          </button>
+          {canFinanceWrite && (
+            <button
+              type="button"
+              onClick={() => setTab('closing')}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3.5 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer"
+            >
+              <CalendarCheck className="w-4 h-4" />
+              تصفية الشهر وبدء شهر جديد
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Overall School Contracts Financial Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="bg-[#0B1F3A] text-white rounded-xl p-4">
-          <div className="text-[11px] text-slate-300">إجمالي عقود المدارس الشهرية</div>
-          <div className="font-mono text-lg font-bold text-[#C89B3C] mt-1 tabular-nums">
-            {formatEGP(totalContractsValue)}
-          </div>
-          <div className="text-[11px] text-slate-300 mt-1">
-            {data?.contractsSummary?.schoolsCount ??
-              schoolContracts.filter((c) => c.schoolId !== null && c.isActive).length}{' '}
-            مدرسة متعاقدة
-          </div>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="text-[11px] text-slate-500">مجموع رواتب السائقين</div>
-          <div className="font-mono text-lg font-bold text-[#0B1F3A] mt-1 tabular-nums">
-            {formatEGP(monthTotalBase)}
-          </div>
-          <div className="text-[11px] text-slate-500 mt-1">
-            صافي الصرف: <span className="font-mono font-semibold">{formatEGP(monthTotalNet)}</span>
-          </div>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="text-[11px] text-slate-500">صافي ربح العقود (العقود − الرواتب)</div>
-          <div
-            className={`font-mono text-lg font-bold mt-1 tabular-nums ${
-              totalContractsProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
-            }`}
-          >
-            {formatEGP(totalContractsProfit)}
-          </div>
-          <div className="text-[11px] text-slate-500 mt-1">
-            هامش{' '}
-            {totalContractsValue > 0
-              ? `${Math.round((totalContractsProfit / totalContractsValue) * 1000) / 10}%`
-              : '0%'}
-          </div>
-        </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="text-[11px] text-slate-500">تصفية المدرسة الحالية</div>
-          <select
-            value={selectedSchoolKey}
-            onChange={(e) => setSelectedSchoolKey(e.target.value)}
-            aria-label="تصفية حسب المدرسة"
-            className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C]"
-          >
-            <option value="all">جميع المدارس ({schoolContracts.length})</option>
-            {schoolContracts.map((sc) => (
-              <option key={getSchoolKey(sc.schoolId)} value={getSchoolKey(sc.schoolId)}>
-                {sc.schoolName} ({sc.driversCount} سائق)
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {/* خانة الجمع الإجمالي الشامل لكل البيانات المالية */}
-      <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-        <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#0B1F3A] text-[#C89B3C] flex items-center justify-center shrink-0">
-              <Calculator className="w-4 h-4" />
+      {canFinanceRead ? (
+        <>
+          {/* Overall School Contracts Financial Strip */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-[#0B1F3A] text-white rounded-xl p-4">
+              <div className="text-[11px] text-slate-300">إجمالي عقود المدارس الشهرية</div>
+              <div className="font-mono text-lg font-bold text-[#C89B3C] mt-1 tabular-nums">
+                {formatEGP(totalContractsValue)}
+              </div>
+              <div className="text-[11px] text-slate-300 mt-1">
+                {data?.contractsSummary?.schoolsCount ??
+                  schoolContracts.filter((c) => c.schoolId !== null && c.isActive).length}{' '}
+                مدرسة متعاقدة
+              </div>
             </div>
-            <div>
-              <h2 className="font-display text-sm font-bold text-[#0B1F3A]">
-                خانة الجمع الإجمالي لكل البيانات المالية — شهر {month} / {year}
-              </h2>
-              <p className="text-[11px] text-slate-500">
-                تجميع شامل لجميع الإيرادات والرواتب والسلف والتغطيات والموظفين وملاك السيارات ودفتر الأستاذ
-              </p>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <div className="text-[11px] text-slate-500">مجموع رواتب السائقين</div>
+              <div className="font-mono text-lg font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                {formatEGP(monthTotalBase)}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                صافي الصرف: <span className="font-mono font-semibold">{formatEGP(monthTotalNet)}</span>
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <div className="text-[11px] text-slate-500">صافي ربح العقود (العقود − الرواتب)</div>
+              <div
+                className={`font-mono text-lg font-bold mt-1 tabular-nums ${
+                  totalContractsProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
+                }`}
+              >
+                {formatEGP(totalContractsProfit)}
+              </div>
+              <div className="text-[11px] text-slate-500 mt-1">
+                هامش{' '}
+                {totalContractsValue > 0
+                  ? `${Math.round((totalContractsProfit / totalContractsValue) * 1000) / 10}%`
+                  : '0%'}
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <div className="text-[11px] text-slate-500">تصفية المدرسة الحالية</div>
+              <select
+                value={selectedSchoolKey}
+                onChange={(e) => setSelectedSchoolKey(e.target.value)}
+                aria-label="تصفية حسب المدرسة"
+                className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C]"
+              >
+                <option value="all">جميع المدارس ({schoolContracts.length})</option>
+                {schoolContracts.map((sc) => (
+                  <option key={getSchoolKey(sc.schoolId)} value={getSchoolKey(sc.schoolId)}>
+                    {sc.schoolName} ({sc.driversCount} سائق)
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setShowGrandTotalsBox((v) => !v)}
-            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 px-3 py-1.5 text-xs font-semibold text-[#0B1F3A] cursor-pointer"
-          >
-            <span>{showGrandTotalsBox ? 'طي الخانة' : 'عرض الجمع الإجمالي'}</span>
-            {showGrandTotalsBox ? (
-              <ChevronUp className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5" />
+          {/* خانة الجمع الإجمالي الشامل لكل البيانات المالية */}
+          <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+            <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-[#0B1F3A] text-[#C89B3C] flex items-center justify-center shrink-0">
+                  <Calculator className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="font-display text-sm font-bold text-[#0B1F3A]">
+                    خانة الجمع الإجمالي لكل البيانات المالية — شهر {month} / {year}
+                  </h2>
+                  <p className="text-[11px] text-slate-500">
+                    تجميع شامل لجميع الإيرادات والرواتب والسلف والتغطيات والموظفين وملاك السيارات ودفتر الأستاذ
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowGrandTotalsBox((v) => !v)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 px-3 py-1.5 text-xs font-semibold text-[#0B1F3A] cursor-pointer"
+              >
+                <span>{showGrandTotalsBox ? 'طي الخانة' : 'عرض الجمع الإجمالي'}</span>
+                {showGrandTotalsBox ? (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                )}
+              </button>
+            </div>
+
+            {showGrandTotalsBox && (
+              <div className="divide-y divide-slate-200">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-y sm:divide-y-0 divide-x divide-x-reverse divide-slate-100 text-xs">
+                  <div className="p-3.5">
+                    <div className="text-slate-500">1. إجمالي عقود المدارس</div>
+                    <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                      {formatEGP(gt?.totalSchoolContracts ?? totalContractsValue)}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      {gt?.schoolsCount ?? 0} مدرسة نشطة
+                    </div>
+                  </div>
+
+                  <div className="p-3.5">
+                    <div className="text-slate-500">2. رواتب السائقين (الأساسي)</div>
+                    <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                      {formatEGP(gt?.totalDriverBaseSalaries ?? monthTotalBase)}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                      الصافي المستحق: {formatEGP(gt?.totalDriverNetSalaries ?? monthTotalNet)}
+                    </div>
+                  </div>
+
+                  <div className="p-3.5">
+                    <div className="text-slate-500">3. إجمالي السلف</div>
+                    <div className="font-mono text-sm font-bold text-red-700 mt-1 tabular-nums">
+                      {formatEGP(gt?.totalDriverAdvances ?? monthTotalAdvances)}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5 tabular-nums">
+                      مخصومة من رواتب {gt?.driversCount ?? 0} سائق
+                    </div>
+                  </div>
+
+                  <div className="p-3.5">
+                    <div className="text-slate-500">4. التغطيات (بديل / خصم)</div>
+                    <div className="font-mono text-sm font-bold text-red-700 mt-1 tabular-nums">
+                      {formatEGP(gt?.totalCoverageDriverDeductions ?? monthTotalCoverages)}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                      تكلفة البديل الفعلية: {formatEGP(gt?.totalCoverageReplacementCost ?? 0)}
+                    </div>
+                  </div>
+
+                  <div className="p-3.5">
+                    <div className="text-slate-500">5. المكافآت والخصومات</div>
+                    <div className="font-mono text-sm font-bold text-emerald-700 mt-1 tabular-nums">
+                      +{formatEGP(gt?.totalBonuses ?? monthTotalBonuses)}
+                    </div>
+                    <div className="text-[11px] text-red-700 mt-0.5 font-mono tabular-nums">
+                      خصومات أخرى: −{formatEGP(gt?.totalOtherDeductions ?? monthTotalOtherDed)}
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 border-t border-slate-100">
+                    <div className="text-slate-500">6. الموظفون (غير السائقين)</div>
+                    <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                      {formatEGP(gt?.totalEmployeeNetSalaries ?? 0)}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      {gt?.employeesCount ?? 0} موظف نشط
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 border-t border-slate-100">
+                    <div className="text-slate-500">7. مستحقات ملاك السيارات</div>
+                    <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                      {formatEGP(gt?.totalVehicleOwnerCosts ?? 0)}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      {gt?.vehiclesCount ?? 0} مركبة بالأسطول
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 border-t border-slate-100">
+                    <div className="text-slate-500">8. المنصرف vs المتبقي (سائقين)</div>
+                    <div className="font-mono text-sm font-bold text-emerald-700 mt-1 tabular-nums">
+                      صُرف: {formatEGP(gt?.totalPaidSalaries ?? 0)}
+                    </div>
+                    <div className="text-[11px] text-amber-700 font-mono mt-0.5 tabular-nums">
+                      متبقي: {formatEGP(gt?.totalUnpaidSalaries ?? 0)}
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 border-t border-slate-100">
+                    <div className="text-slate-500">9. قيود دفتر الأستاذ</div>
+                    <div className="font-mono text-xs font-bold text-emerald-700 mt-1 tabular-nums">
+                      دائن: +{formatEGP(gt?.totalLedgerCredits ?? 0)}
+                    </div>
+                    <div className="font-mono text-[11px] font-semibold text-red-700 mt-0.5 tabular-nums">
+                      مدين: −{formatEGP(gt?.totalLedgerDebits ?? 0)}
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 border-t border-slate-100 bg-[#0B1F3A] text-white">
+                    <div className="text-[11px] text-[#ebd089] font-semibold">
+                      10. الجمع الإجمالي (صافي الفائض العام)
+                    </div>
+                    <div
+                      className={`font-mono text-base font-bold mt-1 tabular-nums ${
+                        (gt?.overallNetBalance ?? totalContractsProfit) >= 0
+                          ? 'text-[#C89B3C]'
+                          : 'text-red-300'
+                      }`}
+                    >
+                      {formatEGP(gt?.overallNetBalance ?? totalContractsProfit)}
+                    </div>
+                    <div className="text-[11px] text-slate-300 mt-0.5 tabular-nums">
+                      إجمالي الرواتب الكلي: {formatEGP(gt?.totalCombinedPayroll ?? monthTotalNet)}
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
-          </button>
-        </div>
-
-        {showGrandTotalsBox && (
-          <div className="divide-y divide-slate-200">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-y sm:divide-y-0 divide-x divide-x-reverse divide-slate-100 text-xs">
-              <div className="p-3.5">
-                <div className="text-slate-500">1. إجمالي عقود المدارس</div>
-                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
-                  {formatEGP(gt?.totalSchoolContracts ?? totalContractsValue)}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-0.5">
-                  {gt?.schoolsCount ?? 0} مدرسة نشطة
-                </div>
-              </div>
-
-              <div className="p-3.5">
-                <div className="text-slate-500">2. رواتب السائقين (الأساسي)</div>
-                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
-                  {formatEGP(gt?.totalDriverBaseSalaries ?? monthTotalBase)}
-                </div>
-                <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
-                  الصافي المستحق: {formatEGP(gt?.totalDriverNetSalaries ?? monthTotalNet)}
-                </div>
-              </div>
-
-              <div className="p-3.5">
-                <div className="text-slate-500">3. إجمالي السلف</div>
-                <div className="font-mono text-sm font-bold text-red-700 mt-1 tabular-nums">
-                  {formatEGP(gt?.totalDriverAdvances ?? monthTotalAdvances)}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-0.5 tabular-nums">
-                  مخصومة من رواتب {gt?.driversCount ?? 0} سائق
-                </div>
-              </div>
-
-              <div className="p-3.5">
-                <div className="text-slate-500">4. التغطيات (بديل / خصم)</div>
-                <div className="font-mono text-sm font-bold text-red-700 mt-1 tabular-nums">
-                  {formatEGP(gt?.totalCoverageDriverDeductions ?? monthTotalCoverages)}
-                </div>
-                <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
-                  تكلفة البديل الفعلية: {formatEGP(gt?.totalCoverageReplacementCost ?? 0)}
-                </div>
-              </div>
-
-              <div className="p-3.5">
-                <div className="text-slate-500">5. المكافآت والخصومات</div>
-                <div className="font-mono text-sm font-bold text-emerald-700 mt-1 tabular-nums">
-                  +{formatEGP(gt?.totalBonuses ?? monthTotalBonuses)}
-                </div>
-                <div className="text-[11px] text-red-700 mt-0.5 font-mono tabular-nums">
-                  خصومات أخرى: −{formatEGP(gt?.totalOtherDeductions ?? monthTotalOtherDed)}
-                </div>
-              </div>
-
-              <div className="p-3.5 border-t border-slate-100">
-                <div className="text-slate-500">6. الموظفون (غير السائقين)</div>
-                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
-                  {formatEGP(gt?.totalEmployeeNetSalaries ?? 0)}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-0.5">
-                  {gt?.employeesCount ?? 0} موظف نشط
-                </div>
-              </div>
-
-              <div className="p-3.5 border-t border-slate-100">
-                <div className="text-slate-500">7. مستحقات ملاك السيارات</div>
-                <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
-                  {formatEGP(gt?.totalVehicleOwnerCosts ?? 0)}
-                </div>
-                <div className="text-[11px] text-slate-400 mt-0.5">
-                  {gt?.vehiclesCount ?? 0} مركبة بالأسطول
-                </div>
-              </div>
-
-              <div className="p-3.5 border-t border-slate-100">
-                <div className="text-slate-500">8. المنصرف vs المتبقي (سائقين)</div>
-                <div className="font-mono text-sm font-bold text-emerald-700 mt-1 tabular-nums">
-                  صُرف: {formatEGP(gt?.totalPaidSalaries ?? 0)}
-                </div>
-                <div className="text-[11px] text-amber-700 font-mono mt-0.5 tabular-nums">
-                  متبقي: {formatEGP(gt?.totalUnpaidSalaries ?? 0)}
-                </div>
-              </div>
-
-              <div className="p-3.5 border-t border-slate-100">
-                <div className="text-slate-500">9. قيود دفتر الأستاذ</div>
-                <div className="font-mono text-xs font-bold text-emerald-700 mt-1 tabular-nums">
-                  دائن: +{formatEGP(gt?.totalLedgerCredits ?? 0)}
-                </div>
-                <div className="font-mono text-[11px] font-semibold text-red-700 mt-0.5 tabular-nums">
-                  مدين: −{formatEGP(gt?.totalLedgerDebits ?? 0)}
-                </div>
-              </div>
-
-              <div className="p-3.5 border-t border-slate-100 bg-[#0B1F3A] text-white">
-                <div className="text-[11px] text-[#ebd089] font-semibold">
-                  10. الجمع الإجمالي (صافي الفائض العام)
-                </div>
-                <div
-                  className={`font-mono text-base font-bold mt-1 tabular-nums ${
-                    (gt?.overallNetBalance ?? totalContractsProfit) >= 0
-                      ? 'text-[#C89B3C]'
-                      : 'text-red-300'
-                  }`}
-                >
-                  {formatEGP(gt?.overallNetBalance ?? totalContractsProfit)}
-                </div>
-                <div className="text-[11px] text-slate-300 mt-0.5 tabular-nums">
-                  إجمالي الرواتب الكلي: {formatEGP(gt?.totalCombinedPayroll ?? monthTotalNet)}
-                </div>
-              </div>
-            </div>
+          </section>
+        </>
+      ) : (
+        <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="text-xs text-slate-600">
+            تم عرض أقسام <strong className="text-[#0B1F3A]">السلف والتغطيات</strong> الخاصة بالمدارس المصرح لك بإدارتها.
           </div>
-        )}
-      </section>
+          {schoolContracts.length > 0 && (
+            <select
+              value={selectedSchoolKey}
+              onChange={(e) => setSelectedSchoolKey(e.target.value)}
+              aria-label="تصفية حسب المدرسة"
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C]"
+            >
+              <option value="all">جميع المدارس المتاحة ({schoolContracts.length})</option>
+              {schoolContracts.map((sc) => (
+                <option key={getSchoolKey(sc.schoolId)} value={getSchoolKey(sc.schoolId)}>
+                  {sc.schoolName} ({sc.driversCount} سائق)
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-200/70 rounded-xl w-fit">
-        {[
-          { id: 'schools', label: 'المدارس والعقود والأرباح' },
-          { id: 'salaries', label: 'رواتب الشهر والتسويات' },
-          { id: 'advances', label: 'تسجيل وإدارة السلف' },
-          { id: 'coverage', label: 'تغطية الغياب' },
-          { id: 'ledger', label: 'دفتر الأستاذ المالي' },
-          { id: 'closing', label: 'التصفية وبداية شهر جديد' },
-        ].map((item) => (
+        {allowedTabs.map((item) => (
           <button
             key={item.id}
-            onClick={() => setTab(item.id as typeof tab)}
+            onClick={() => setTab(item.id)}
             className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
               tab === item.id
                 ? 'bg-white text-[#0B1F3A] shadow-xs'
@@ -1224,52 +1280,66 @@ export const FinanceModule: React.FC = () => {
                             </td>
                             <td className="py-3 px-4">
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <div className="inline-flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
-                                  {[
-                                    { value: 'open' as const, label: 'قيد التشغيل' },
-                                    { value: 'approved' as const, label: 'معتمد' },
-                                    { value: 'paid' as const, label: 'تم الصرف' },
-                                  ].map((st) => (
-                                    <button
-                                      key={st.value}
-                                      type="button"
-                                      onClick={() => handleSalaryStatus(d.id, st.value)}
-                                      className={`rounded-md px-2 py-1 text-[10px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
-                                        d.status === st.value
-                                          ? 'bg-[#0B1F3A] text-white'
-                                          : 'text-slate-600 hover:text-slate-900'
-                                      }`}
-                                    >
-                                      {st.label}
-                                    </button>
-                                  ))}
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setAdvForm((f) => ({
-                                      ...f,
-                                      driverQuery: d.driverCode || d.driverName || '',
-                                    }));
-                                    setTab('advances');
-                                  }}
-                                  className="rounded-md border border-slate-200 bg-white hover:bg-slate-100 px-2 py-1 text-[10px] font-semibold text-[#0B1F3A] cursor-pointer"
-                                >
-                                  + سلفة
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setAdjForm((f) => ({
-                                      ...f,
-                                      driverQuery: d.driverCode || d.driverName || '',
-                                    }));
-                                    setTab('salaries');
-                                  }}
-                                  className="rounded-md border border-slate-200 bg-white hover:bg-slate-100 px-2 py-1 text-[10px] font-semibold text-[#0B1F3A] cursor-pointer"
-                                >
-                                  تسوية
-                                </button>
+                                {canFinanceWrite ? (
+                                  <div className="inline-flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
+                                    {[
+                                      { value: 'open' as const, label: 'قيد التشغيل' },
+                                      { value: 'approved' as const, label: 'معتمد' },
+                                      { value: 'paid' as const, label: 'تم الصرف' },
+                                    ].map((st) => (
+                                      <button
+                                        key={st.value}
+                                        type="button"
+                                        onClick={() => handleSalaryStatus(d.id, st.value)}
+                                        className={`rounded-md px-2 py-1 text-[10px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                                          d.status === st.value
+                                            ? 'bg-[#0B1F3A] text-white'
+                                            : 'text-slate-600 hover:text-slate-900'
+                                        }`}
+                                      >
+                                        {st.label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-700">
+                                    {d.status === 'paid'
+                                      ? 'تم الصرف'
+                                      : d.status === 'approved'
+                                      ? 'معتمد'
+                                      : 'قيد التشغيل'}
+                                  </span>
+                                )}
+                                {canAdvancesWrite && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAdvForm((f) => ({
+                                        ...f,
+                                        driverQuery: d.driverCode || d.driverName || '',
+                                      }));
+                                      setTab('advances');
+                                    }}
+                                    className="rounded-md border border-slate-200 bg-white hover:bg-slate-100 px-2 py-1 text-[10px] font-semibold text-[#0B1F3A] cursor-pointer"
+                                  >
+                                    + سلفة
+                                  </button>
+                                )}
+                                {canFinanceWrite && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAdjForm((f) => ({
+                                        ...f,
+                                        driverQuery: d.driverCode || d.driverName || '',
+                                      }));
+                                      setTab('salaries');
+                                    }}
+                                    className="rounded-md border border-slate-200 bg-white hover:bg-slate-100 px-2 py-1 text-[10px] font-semibold text-[#0B1F3A] cursor-pointer"
+                                  >
+                                    تسوية
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1359,72 +1429,74 @@ export const FinanceModule: React.FC = () => {
       {tab === 'salaries' && (
         <div className="space-y-6">
           {/* Quick Bonus / Other Deduction Form */}
-          <form
-            onSubmit={handleRecordAdjustment}
-            className="bg-white border border-slate-200 rounded-xl p-5 grid grid-cols-1 sm:grid-cols-5 gap-3 items-end text-xs"
-          >
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">السائق *</label>
-              <input
-                type="text"
-                required
-                value={adjForm.driverQuery}
-                onChange={(e) => setAdjForm({ ...adjForm, driverQuery: e.target.value })}
-                placeholder="اكتب اسم أو كود السائق"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">نوع التسوية</label>
-              <div className="grid grid-cols-2 gap-1.5">
-                {[
-                  { value: 'bonus' as const, label: 'مكافأة (+)' },
-                  { value: 'other_deduction' as const, label: 'خصم (−)' },
-                ].map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => setAdjForm({ ...adjForm, type: opt.value })}
-                    className={`rounded-lg border px-2 py-2 text-xs font-semibold cursor-pointer transition-colors ${
-                      adjForm.type === opt.value
-                        ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">المبلغ (ج.م)</label>
-              <input
-                type="number"
-                required
-                min={1}
-                placeholder="اكتب المبلغ"
-                value={adjForm.amount}
-                onChange={(e) => setAdjForm({ ...adjForm, amount: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">السبب / البيان</label>
-              <input
-                required
-                value={adjForm.description}
-                onChange={(e) => setAdjForm({ ...adjForm, description: e.target.value })}
-                placeholder="اكتب سبب التسوية"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-            </div>
-            <button
-              type="submit"
-              className="rounded-lg bg-[#0B1F3A] py-2.5 px-4 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+          {canFinanceWrite && (
+            <form
+              onSubmit={handleRecordAdjustment}
+              className="bg-white border border-slate-200 rounded-xl p-5 grid grid-cols-1 sm:grid-cols-5 gap-3 items-end text-xs"
             >
-              إضافة تسوية
-            </button>
-          </form>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">السائق *</label>
+                <input
+                  type="text"
+                  required
+                  value={adjForm.driverQuery}
+                  onChange={(e) => setAdjForm({ ...adjForm, driverQuery: e.target.value })}
+                  placeholder="اكتب اسم أو كود السائق"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">نوع التسوية</label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { value: 'bonus' as const, label: 'مكافأة (+)' },
+                    { value: 'other_deduction' as const, label: 'خصم (−)' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setAdjForm({ ...adjForm, type: opt.value })}
+                      className={`rounded-lg border px-2 py-2 text-xs font-semibold cursor-pointer transition-colors ${
+                        adjForm.type === opt.value
+                          ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                          : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">المبلغ (ج.م)</label>
+                <input
+                  type="number"
+                  required
+                  min={1}
+                  placeholder="اكتب المبلغ"
+                  value={adjForm.amount}
+                  onChange={(e) => setAdjForm({ ...adjForm, amount: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">السبب / البيان</label>
+                <input
+                  required
+                  value={adjForm.description}
+                  onChange={(e) => setAdjForm({ ...adjForm, description: e.target.value })}
+                  placeholder="اكتب سبب التسوية"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+              <button
+                type="submit"
+                className="rounded-lg bg-[#0B1F3A] py-2.5 px-4 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+              >
+                إضافة تسوية
+              </button>
+            </form>
+          )}
 
           {/* Salaries Table */}
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -1502,26 +1574,36 @@ export const FinanceModule: React.FC = () => {
                           {formatEGP(s.netSalary)}
                         </td>
                         <td className="py-3 px-4">
-                          <div className="inline-flex items-center gap-1 rounded-lg bg-slate-100 p-0.5">
-                            {[
-                              { value: 'open' as const, label: 'قيد التشغيل' },
-                              { value: 'approved' as const, label: 'معتمد' },
-                              { value: 'paid' as const, label: 'تم الصرف' },
-                            ].map((st) => (
-                              <button
-                                key={st.value}
-                                type="button"
-                                onClick={() => handleSalaryStatus(s.id, st.value)}
-                                className={`rounded-md px-2 py-1 text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
-                                  s.status === st.value
-                                    ? 'bg-[#0B1F3A] text-white'
-                                    : 'text-slate-600 hover:text-slate-900'
-                                }`}
-                              >
-                                {st.label}
-                              </button>
-                            ))}
-                          </div>
+                          {canFinanceWrite ? (
+                            <div className="inline-flex items-center gap-1 rounded-lg bg-slate-100 p-0.5">
+                              {[
+                                { value: 'open' as const, label: 'قيد التشغيل' },
+                                { value: 'approved' as const, label: 'معتمد' },
+                                { value: 'paid' as const, label: 'تم الصرف' },
+                              ].map((st) => (
+                                <button
+                                  key={st.value}
+                                  type="button"
+                                  onClick={() => handleSalaryStatus(s.id, st.value)}
+                                  className={`rounded-md px-2 py-1 text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap ${
+                                    s.status === st.value
+                                      ? 'bg-[#0B1F3A] text-white'
+                                      : 'text-slate-600 hover:text-slate-900'
+                                  }`}
+                                >
+                                  {st.label}
+                                </button>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="rounded-md bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-700">
+                              {s.status === 'paid'
+                                ? 'تم الصرف'
+                                : s.status === 'approved'
+                                ? 'معتمد'
+                                : 'قيد التشغيل'}
+                            </span>
+                          )}
                         </td>
                       </tr>
                     ))
@@ -1563,87 +1645,93 @@ export const FinanceModule: React.FC = () => {
 
       {tab === 'advances' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <form
-            onSubmit={handleRecordAdvance}
-            className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3.5 text-xs h-fit"
-          >
-            <div className="flex items-center gap-2 font-display text-base font-bold text-[#0B1F3A]">
-              <Wallet className="w-4 h-4 text-[#C89B3C]" />
-              <span>تسجيل سلفة جديدة</span>
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">السائق *</label>
-              <input
-                type="text"
-                required
-                value={advForm.driverQuery}
-                onChange={(e) => setAdvForm({ ...advForm, driverQuery: e.target.value })}
-                placeholder="اكتب اسم أو كود السائق"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">المبلغ (ج.م) *</label>
-                <input
-                  type="number"
-                  required
-                  min={1}
-                  placeholder="اكتب المبلغ"
-                  value={advForm.amount}
-                  onChange={(e) => setAdvForm({ ...advForm, amount: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">التاريخ *</label>
-                <input
-                  type="date"
-                  required
-                  value={advForm.date}
-                  onChange={(e) => setAdvForm({ ...advForm, date: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">طريقة الدفع</label>
-              <input
-                type="text"
-                placeholder="اكتب طريقة الدفع"
-                value={advForm.paymentMethod}
-                onChange={(e) => setAdvForm({ ...advForm, paymentMethod: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">السبب</label>
-              <input
-                placeholder="اكتب السبب"
-                value={advForm.reason}
-                onChange={(e) => setAdvForm({ ...advForm, reason: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-            </div>
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">ملاحظات</label>
-              <textarea
-                rows={2}
-                value={advForm.notes}
-                onChange={(e) => setAdvForm({ ...advForm, notes: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-            </div>
-            <button
-              type="submit"
-              className="w-full flex items-center justify-center gap-2 rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+          {canAdvancesWrite && (
+            <form
+              onSubmit={handleRecordAdvance}
+              className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3.5 text-xs h-fit"
             >
-              <Plus className="w-4 h-4 text-[#C89B3C]" />
-              اعتماد وتسجيل السلفة
-            </button>
-          </form>
+              <div className="flex items-center gap-2 font-display text-base font-bold text-[#0B1F3A]">
+                <Wallet className="w-4 h-4 text-[#C89B3C]" />
+                <span>تسجيل سلفة جديدة</span>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">السائق *</label>
+                <input
+                  type="text"
+                  required
+                  value={advForm.driverQuery}
+                  onChange={(e) => setAdvForm({ ...advForm, driverQuery: e.target.value })}
+                  placeholder="اكتب اسم أو كود السائق"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">المبلغ (ج.م) *</label>
+                  <input
+                    type="number"
+                    required
+                    min={1}
+                    placeholder="اكتب المبلغ"
+                    value={advForm.amount}
+                    onChange={(e) => setAdvForm({ ...advForm, amount: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">التاريخ *</label>
+                  <input
+                    type="date"
+                    required
+                    value={advForm.date}
+                    onChange={(e) => setAdvForm({ ...advForm, date: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">طريقة الدفع</label>
+                <input
+                  type="text"
+                  placeholder="اكتب طريقة الدفع"
+                  value={advForm.paymentMethod}
+                  onChange={(e) => setAdvForm({ ...advForm, paymentMethod: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">السبب</label>
+                <input
+                  placeholder="اكتب السبب"
+                  value={advForm.reason}
+                  onChange={(e) => setAdvForm({ ...advForm, reason: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">ملاحظات</label>
+                <textarea
+                  rows={2}
+                  value={advForm.notes}
+                  onChange={(e) => setAdvForm({ ...advForm, notes: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full flex items-center justify-center gap-2 rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+              >
+                <Plus className="w-4 h-4 text-[#C89B3C]" />
+                اعتماد وتسجيل السلفة
+              </button>
+            </form>
+          )}
 
-          <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div
+            className={`${
+              canAdvancesWrite ? 'lg:col-span-8' : 'lg:col-span-12'
+            } bg-white border border-slate-200 rounded-xl overflow-hidden`}
+          >
             <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A] flex items-center justify-between gap-2">
               <span>
                 سجل السلف للشهر المحدد ({filteredAdvances.length})
@@ -1658,13 +1746,18 @@ export const FinanceModule: React.FC = () => {
                     <th className="py-3 px-4">السائق</th>
                     <th className="py-3 px-4">السبب والطريقة</th>
                     <th className="py-3 px-4">المبلغ</th>
-                    <th className="py-3 px-4">تعديل / حذف / إجراء</th>
+                    {(canAdvancesWrite || canFinanceWrite) && (
+                      <th className="py-3 px-4">تعديل / حذف / إجراء</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {!filteredAdvances.length ? (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-400">
+                      <td
+                        colSpan={canAdvancesWrite || canFinanceWrite ? 5 : 4}
+                        className="py-8 text-center text-slate-400"
+                      >
                         لا توجد سلف مسجلة لهذا الشهر
                       </td>
                     </tr>
@@ -1687,38 +1780,45 @@ export const FinanceModule: React.FC = () => {
                         >
                           {formatEGP(a.amount)}
                         </td>
-                        <td className="py-3 px-4">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => openEditAdvance(a)}
-                              className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                            >
-                              <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                              تعديل
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDeletingAdvance(a)}
-                              className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                              حذف
-                            </button>
-                            {a.isReversed ? (
-                              <span className="text-[11px] text-slate-500 px-1">معكوسة</span>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleReverse('advance', a.id)}
-                                className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
-                              >
-                                <RotateCcw className="w-3 h-3" />
-                                عكس
-                              </button>
-                            )}
-                          </div>
-                        </td>
+                        {(canAdvancesWrite || canFinanceWrite) && (
+                          <td className="py-3 px-4">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {canAdvancesWrite && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditAdvance(a)}
+                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletingAdvance(a)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    حذف
+                                  </button>
+                                </>
+                              )}
+                              {canFinanceWrite &&
+                                (a.isReversed ? (
+                                  <span className="text-[11px] text-slate-500 px-1">معكوسة</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleReverse('advance', a.id)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    عكس
+                                  </button>
+                                ))}
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     ))
                   )}
@@ -1732,7 +1832,9 @@ export const FinanceModule: React.FC = () => {
                       <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
                         {formatEGP(activeAdvancesSum)}
                       </td>
-                      <td className="py-3 px-4 text-[11px] text-slate-500">—</td>
+                      {(canAdvancesWrite || canFinanceWrite) && (
+                        <td className="py-3 px-4 text-[11px] text-slate-500">—</td>
+                      )}
                     </tr>
                   </tfoot>
                 )}
@@ -1744,10 +1846,11 @@ export const FinanceModule: React.FC = () => {
 
       {tab === 'coverage' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <form
-            onSubmit={handleRecordCoverage}
-            className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
-          >
+          {canCoverageWrite && (
+            <form
+              onSubmit={handleRecordCoverage}
+              className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 space-y-3 text-xs h-fit"
+            >
             <h3 className="font-display text-base font-bold text-[#0B1F3A]">
               تسجيل تغطية غياب سائق
             </h3>
@@ -1832,8 +1935,13 @@ export const FinanceModule: React.FC = () => {
               تسجيل تغطية الغياب
             </button>
           </form>
+          )}
 
-          <div className="lg:col-span-8 bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div
+            className={`${
+              canCoverageWrite ? 'lg:col-span-8' : 'lg:col-span-12'
+            } bg-white border border-slate-200 rounded-xl overflow-hidden`}
+          >
             <div className="px-5 py-4 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
               سجل التغطيات للشهر المحدد ({filteredCoverages.length})
               {selectedSchoolContract ? ` — ${selectedSchoolContract.schoolName}` : ''}
@@ -1847,13 +1955,18 @@ export const FinanceModule: React.FC = () => {
                     <th className="py-3 px-4">السائق البديل</th>
                     <th className="py-3 px-4">تكلفة البديل</th>
                     <th className="py-3 px-4">خصم الغائب</th>
-                    <th className="py-3 px-4">تعديل / حذف / إجراء</th>
+                    {(canCoverageWrite || canFinanceWrite) && (
+                      <th className="py-3 px-4">تعديل / حذف / إجراء</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {!filteredCoverages.length ? (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-400">
+                      <td
+                        colSpan={canCoverageWrite || canFinanceWrite ? 6 : 5}
+                        className="py-8 text-center text-slate-400"
+                      >
                         لا توجد تغطيات مسجلة لهذا الشهر
                       </td>
                     </tr>
@@ -1882,38 +1995,45 @@ export const FinanceModule: React.FC = () => {
                         >
                           {formatEGP(c.absentDriverDeduction)}
                         </td>
-                        <td className="py-3 px-4">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => openEditCoverage(c)}
-                              className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                            >
-                              <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                              تعديل
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setDeletingCoverage(c)}
-                              className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                              حذف
-                            </button>
-                            {c.isReversed ? (
-                              <span className="text-[11px] text-slate-500 px-1">معكوسة</span>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleReverse('coverage', c.id)}
-                                className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
-                              >
-                                <RotateCcw className="w-3 h-3" />
-                                عكس
-                              </button>
-                            )}
-                          </div>
-                        </td>
+                        {(canCoverageWrite || canFinanceWrite) && (
+                          <td className="py-3 px-4">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {canCoverageWrite && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditCoverage(c)}
+                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                    تعديل
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletingCoverage(c)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    حذف
+                                  </button>
+                                </>
+                              )}
+                              {canFinanceWrite &&
+                                (c.isReversed ? (
+                                  <span className="text-[11px] text-slate-500 px-1">معكوسة</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleReverse('coverage', c.id)}
+                                    className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    عكس
+                                  </button>
+                                ))}
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     ))
                   )}
@@ -1930,7 +2050,9 @@ export const FinanceModule: React.FC = () => {
                       <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
                         {formatEGP(activeCovDedSum)}
                       </td>
-                      <td className="py-3 px-4 text-[11px] text-slate-500">—</td>
+                      {(canCoverageWrite || canFinanceWrite) && (
+                        <td className="py-3 px-4 text-[11px] text-slate-500">—</td>
+                      )}
                     </tr>
                   </tfoot>
                 )}

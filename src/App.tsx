@@ -5,6 +5,7 @@ import {
   Briefcase,
   Bus,
   FileSpreadsheet,
+  FileText,
   LayoutDashboard,
   LogOut,
   MapPin,
@@ -35,6 +36,8 @@ import { ReportsModule } from './components/admin/ReportsModule';
 import { SettingsUsersModule } from './components/admin/SettingsUsersModule';
 import { ArchiveModule } from './components/admin/ArchiveModule';
 import { SupervisorsModule } from './components/admin/SupervisorsModule';
+import { DailyReportsModule } from './components/admin/DailyReportsModule';
+import { EmployeeDailyReportModal } from './components/employee/EmployeeDailyReportModal';
 import { DriverApp } from './components/driver/DriverApp';
 import { SupervisorApp } from './components/supervisor/SupervisorApp';
 import { ChatHubModule } from './components/chat/ChatHubModule';
@@ -47,6 +50,7 @@ type AdminTabId =
   | 'employees'
   | 'schools'
   | 'finance'
+  | 'daily_reports'
   | 'map'
   | 'chat'
   | 'voice'
@@ -72,6 +76,7 @@ const AppShell: React.FC = () => {
   );
   const [previewSupervisorId, setPreviewSupervisorId] = useState<string>('');
   const [splashElapsed, setSplashElapsed] = useState(false);
+  const [quickReportModalOpen, setQuickReportModalOpen] = useState(false);
 
   const tabHistoryRef = React.useRef<AdminTabId[]>([]);
   tabHistoryRef.current = tabHistory;
@@ -109,10 +114,16 @@ const AppShell: React.FC = () => {
   const isSuperAdmin = dbUser?.roleSlug === 'super_admin';
   const perms = dbUser?.permissions || [];
   const can = (perm: string) => isSuperAdmin || perms.includes('*') || perms.includes(perm);
+  const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
 
   const navItems: NavItem[] = useMemo(
     () => [
-      { id: 'overview', label: 'لوحة التحكم', icon: LayoutDashboard, visible: true },
+      {
+        id: 'overview',
+        label: 'لوحة التحكم',
+        icon: LayoutDashboard,
+        visible: isSuperAdmin || can('dashboard:read'),
+      },
       {
         id: 'drivers',
         label: 'إدارة السائقين',
@@ -129,7 +140,7 @@ const AppShell: React.FC = () => {
         id: 'employees',
         label: 'الموظفون (غير السائقين)',
         icon: Briefcase,
-        visible: isSuperAdmin || can('drivers:read') || can('finance:read'),
+        visible: isSuperAdmin || can('employees:read') || can('employees:write'),
       },
       {
         id: 'schools',
@@ -141,7 +152,24 @@ const AppShell: React.FC = () => {
         id: 'finance',
         label: 'المالية والمرتبات',
         icon: Wallet,
-        visible: isSuperAdmin || can('finance:read') || can('coverage:write'),
+        visible:
+          isSuperAdmin ||
+          can('finance:read') ||
+          can('finance:write') ||
+          can('advances:write') ||
+          can('coverage:write'),
+      },
+      {
+        id: 'daily_reports',
+        label: 'تقارير الموظفين اليومية',
+        icon: FileText,
+        visible:
+          isSuperAdmin ||
+          can('employees:read') ||
+          can('finance:read') ||
+          can('dashboard:read') ||
+          dbUser?.roleSlug === 'accountant' ||
+          dbUser?.roleSlug === 'movement_manager',
       },
       {
         id: 'map',
@@ -171,7 +199,12 @@ const AppShell: React.FC = () => {
         id: 'archive',
         label: 'الأرشفة',
         icon: Archive,
-        visible: isSuperAdmin || can('drivers:read'),
+        visible:
+          isSuperAdmin ||
+          can('drivers:write') ||
+          can('vehicles:write') ||
+          can('schools:write') ||
+          can('employees:write'),
       },
       {
         id: 'settings',
@@ -184,6 +217,13 @@ const AppShell: React.FC = () => {
   );
 
   const visibleNav = navItems.filter((n) => n.visible);
+
+  useEffect(() => {
+    if (!dbUser || dbUser.roleSlug === 'driver' || dbUser.roleSlug === 'supervisor') return;
+    if (visibleNav.length > 0 && !visibleNav.some((n) => n.id === activeTab)) {
+      setActiveTab(visibleNav[0].id);
+    }
+  }, [dbUser, visibleNav, activeTab]);
 
   if (loading || !splashElapsed) {
     return (
@@ -389,7 +429,10 @@ const AppShell: React.FC = () => {
           <div className="flex items-center justify-between gap-2 text-xs">
             <div className="min-w-0">
               <p className="font-bold text-white truncate">{dbUser.fullName}</p>
-              <p className="text-[11px] text-[#C89B3C] truncate">{dbUser.roleNameAr}</p>
+              <p className="text-[11px] text-[#C89B3C] truncate">
+                {dbUser.roleNameAr}
+                {restrictedSchoolCount > 0 ? ` · ${restrictedSchoolCount} مدرسة محددة` : ''}
+              </p>
             </div>
             <button
               onClick={logout}
@@ -455,6 +498,18 @@ const AppShell: React.FC = () => {
               })}
             </nav>
             <div className="relative z-10 p-4 border-t border-white/10 space-y-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setQuickReportModalOpen(true);
+                }}
+                className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#C89B3C] text-[#0B1F3A] hover:bg-[#d8ac4e] px-3 py-2.5 text-xs font-bold shadow-sm cursor-pointer"
+              >
+                <Mic className="w-4 h-4" />
+                تقديم تقرير يومي سريع
+              </button>
+
               {isSuperAdmin && (
                 <div className="space-y-2">
                   <button
@@ -522,11 +577,24 @@ const AppShell: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
+            <button
+              type="button"
+              onClick={() => setQuickReportModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-[#C89B3C] text-[#0B1F3A] hover:bg-[#d8ac4e] text-xs font-bold transition-all shadow-sm shrink-0 cursor-pointer"
+              title="تقديم تقرير يومي سريع (صوتي أو كتابي)"
+            >
+              <Mic className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">تقرير يومي سريع</span>
+            </button>
             <PWAInstallButton />
             <div className="hidden sm:flex items-center gap-2 text-xs text-slate-600 border-r border-slate-200 pr-3">
               <span className="font-semibold text-[#0B1F3A]">{dbUser.fullName}</span>
-              <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+              <span className="text-slate-400">·</span>
+              <span className="text-[11px] font-medium text-slate-700">
                 {dbUser.roleNameAr}
+                {restrictedSchoolCount > 0
+                  ? ` (نطاق الصلاحية: ${restrictedSchoolCount} مدرسة محددة)`
+                  : ''}
               </span>
             </div>
           </div>
@@ -550,6 +618,7 @@ const AppShell: React.FC = () => {
           {activeTab === 'employees' && <EmployeesModule />}
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
           {activeTab === 'finance' && <FinanceModule />}
+          {activeTab === 'daily_reports' && <DailyReportsModule />}
           {activeTab === 'map' && <LiveMapModule />}
           {activeTab === 'chat' && (
             <ChatHubModule
@@ -567,6 +636,11 @@ const AppShell: React.FC = () => {
         </main>
 
         <CompanyLegalFooter variant="light" className="mt-auto" />
+
+        <EmployeeDailyReportModal
+          isOpen={quickReportModalOpen}
+          onClose={() => setQuickReportModalOpen(false)}
+        />
       </div>
     </div>
   );

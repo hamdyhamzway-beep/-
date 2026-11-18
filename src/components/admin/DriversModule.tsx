@@ -32,6 +32,7 @@ import {
   renderStatementFallbackBlob,
   shareImageFileViaWebShare,
 } from '../../lib/whatsapp-statement';
+import { useAuth } from '../../contexts/AuthContext';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import { DriverAvatar } from '../DriverAvatar';
 import { DriverBroadcastModal } from './DriverBroadcastModal';
@@ -58,6 +59,19 @@ interface StatementResponse {
 export const DriversModule: React.FC<{
   onOpenDriversChat?: () => void;
 }> = ({ onOpenDriversChat }) => {
+  const { dbUser } = useAuth();
+  const perms = dbUser?.permissions || [];
+  const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || perms.includes('*');
+  const can = (perm: string) => isSuperAdmin || perms.includes('*') || perms.includes(perm);
+
+  const canDriversWrite = can('drivers:write');
+  const canAdvancesWrite = can('advances:write') || can('finance:write');
+  const canCoverageWrite = can('coverage:write') || can('finance:write');
+  const canFinanceWrite = can('finance:write');
+  const canFinanceRead = can('finance:read') || canFinanceWrite;
+  const canViewFinancialDetails = canFinanceRead || canAdvancesWrite || canCoverageWrite;
+  const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
+
   const [driversList, setDriversList] = useState<EnrichedDriver[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -358,17 +372,31 @@ export const DriversModule: React.FC<{
     });
   }, []);
 
+  const getAllowedStatementTab = useCallback(
+    (preferred: 'statement' | 'advances' | 'coverage' | 'adjustments') => {
+      const allowedTabs: Array<'statement' | 'advances' | 'coverage' | 'adjustments'> = [];
+      if (canViewFinancialDetails) allowedTabs.push('statement');
+      if (canAdvancesWrite || canFinanceRead) allowedTabs.push('advances');
+      if (canCoverageWrite || canFinanceRead) allowedTabs.push('coverage');
+      if (canFinanceRead) allowedTabs.push('adjustments');
+      if (allowedTabs.includes(preferred)) return preferred;
+      return allowedTabs[0] || 'statement';
+    },
+    [canViewFinancialDetails, canAdvancesWrite, canCoverageWrite, canFinanceRead]
+  );
+
   const openStatement = (
     id: number,
     initialTab: 'statement' | 'advances' | 'coverage' | 'adjustments' = 'statement'
   ) => {
+    if (!canViewFinancialDetails) return;
     clearWhatsappPreview();
     setFinanceNotice(null);
     setFinanceErr(null);
     setEditingAdvId(null);
     setEditingCovId(null);
     setEditingAdjId(null);
-    setStatementTab(initialTab);
+    setStatementTab(getAllowedStatementTab(initialTab));
     if (id === statementDriverId) {
       loadStatement(id, statementMonth, statementYear);
     } else {
@@ -607,6 +635,13 @@ export const DriversModule: React.FC<{
   }, [statementDriverId, statementMonth, statementYear, loadStatement, clearWhatsappPreview]);
 
   useEffect(() => {
+    const safeTab = getAllowedStatementTab(statementTab);
+    if (safeTab !== statementTab) {
+      setStatementTab(safeTab);
+    }
+  }, [statementTab, getAllowedStatementTab]);
+
+  useEffect(() => {
     return () => {
       if (whatsappPreview?.url) URL.revokeObjectURL(whatsappPreview.url);
     };
@@ -716,23 +751,32 @@ export const DriversModule: React.FC<{
           <p className="text-sm text-slate-500 mt-1">
             السائقون النشطون، تعديل البيانات، إدارة السلف والتغطيات لكل سائق، وكشوف الحساب الشهرية
           </p>
+          {!isSuperAdmin && restrictedSchoolCount > 0 && (
+            <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-900">
+              عرض مقيّد بنطاق {restrictedSchoolCount} مدرسة مخصصة لك
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={() => setShowBroadcastModal(true)}
-            className="flex items-center gap-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 px-4 py-2.5 text-xs font-bold text-white cursor-pointer whitespace-nowrap"
-          >
-            <RadioTower className="w-4 h-4" />
-            رسائل جماعية للسائقين
-          </button>
-          <button
-            onClick={openAdd}
-            className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
-          >
-            <Plus className="w-4 h-4 text-[#C89B3C]" />
-            إضافة سائق جديد
-          </button>
+          {isSuperAdmin && (
+            <button
+              type="button"
+              onClick={() => setShowBroadcastModal(true)}
+              className="flex items-center gap-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 px-4 py-2.5 text-xs font-bold text-white cursor-pointer whitespace-nowrap"
+            >
+              <RadioTower className="w-4 h-4" />
+              رسائل جماعية للسائقين
+            </button>
+          )}
+          {canDriversWrite && (
+            <button
+              onClick={openAdd}
+              className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
+            >
+              <Plus className="w-4 h-4 text-[#C89B3C]" />
+              إضافة سائق جديد
+            </button>
+          )}
         </div>
       </div>
 
@@ -820,54 +864,68 @@ export const DriversModule: React.FC<{
               </div>
 
               <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-2.5 text-[11px]">
-                <div>
+                <div className={canFinanceRead ? '' : 'col-span-2'}>
                   <span className="text-slate-500">المدرسة والباص: </span>
                   <span className="font-semibold text-slate-800">
                     {d.schoolName} ({d.busNumber})
                   </span>
                 </div>
-                <div className="text-left">
-                  <span className="text-slate-500">الراتب: </span>
-                  <span className="font-mono font-bold text-[#0B1F3A] tabular-nums">
-                    {formatEGP(d.monthlyAgreedSalary)}
-                  </span>
-                </div>
+                {canFinanceRead && (
+                  <div className="text-left">
+                    <span className="text-slate-500">الراتب: </span>
+                    <span className="font-mono font-bold text-[#0B1F3A] tabular-nums">
+                      {formatEGP(d.monthlyAgreedSalary)}
+                    </span>
+                  </div>
+                )}
                 <div className="col-span-2">
                   <span className="text-slate-500">خط السير: </span>
                   <span className="font-semibold text-[#0B1F3A]">{d.routeName || '—'}</span>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  onClick={() => openStatement(d.id, 'advances')}
-                  className="flex items-center justify-center gap-1.5 rounded-lg bg-[#C89B3C] px-2.5 py-2 text-xs font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer"
-                >
-                  <Wallet className="w-3.5 h-3.5" />
-                  السلف والتغطيات
-                </button>
-                <button
-                  onClick={() => openEdit(d)}
-                  className="flex items-center justify-center gap-1.5 rounded-lg bg-[#0B1F3A] px-2.5 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                >
-                  <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
-                  تعديل البيانات
-                </button>
-                <button
-                  onClick={() => openStatement(d.id, 'statement')}
-                  className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
-                >
-                  <FileText className="w-3.5 h-3.5" />
-                  كشف حساب
-                </button>
-                <button
-                  onClick={() => archiveDriver(d)}
-                  className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
-                >
-                  <Archive className="w-3.5 h-3.5" />
-                  أرشفة
-                </button>
-              </div>
+              {(canViewFinancialDetails || canDriversWrite) && (
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  {(canAdvancesWrite || canCoverageWrite || canFinanceRead) && (
+                    <button
+                      onClick={() =>
+                        openStatement(d.id, canAdvancesWrite || canFinanceRead ? 'advances' : 'coverage')
+                      }
+                      className="flex items-center justify-center gap-1.5 rounded-lg bg-[#C89B3C] px-2.5 py-2 text-xs font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer"
+                    >
+                      <Wallet className="w-3.5 h-3.5" />
+                      السلف والتغطيات
+                    </button>
+                  )}
+                  {canDriversWrite && (
+                    <button
+                      onClick={() => openEdit(d)}
+                      className="flex items-center justify-center gap-1.5 rounded-lg bg-[#0B1F3A] px-2.5 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
+                      تعديل البيانات
+                    </button>
+                  )}
+                  {canViewFinancialDetails && (
+                    <button
+                      onClick={() => openStatement(d.id, 'statement')}
+                      className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      كشف حساب
+                    </button>
+                  )}
+                  {canDriversWrite && (
+                    <button
+                      onClick={() => archiveDriver(d)}
+                      className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                    >
+                      <Archive className="w-3.5 h-3.5" />
+                      أرشفة
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ))
         )}
@@ -883,8 +941,10 @@ export const DriversModule: React.FC<{
                 <th className="py-3 px-4 font-semibold">بيانات السائق</th>
                 <th className="py-3 px-4 font-semibold">المدرسة والخط</th>
                 <th className="py-3 px-4 font-semibold">الباص والمالك</th>
-                <th className="py-3 px-4 font-semibold">الراتب المتفق عليه</th>
-                <th className="py-3 px-4 font-semibold">الإجراءات</th>
+                {canFinanceRead && <th className="py-3 px-4 font-semibold">الراتب المتفق عليه</th>}
+                {(canViewFinancialDetails || canDriversWrite) && (
+                  <th className="py-3 px-4 font-semibold">الإجراءات</th>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -928,52 +988,71 @@ export const DriversModule: React.FC<{
                       </div>
                       <div className="text-slate-500 mt-0.5">المالك: {d.vehicleOwnerName}</div>
                     </td>
-                    <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
-                      {formatEGP(d.monthlyAgreedSalary)}
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <button
-                          onClick={() => openStatement(d.id, 'advances')}
-                          className="flex items-center gap-1 rounded-md bg-[#C89B3C] px-2.5 py-1.5 text-[11px] font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer whitespace-nowrap"
-                          title="إضافة وتعديل السلف والتغطيات"
-                        >
-                          <Wallet className="w-3.5 h-3.5" />
-                          السلف والتغطيات
-                        </button>
-                        <button
-                          onClick={() => openEdit(d)}
-                          className="flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
-                          title="تعديل الاسم والبيانات والصورة"
-                        >
-                          <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
-                          تعديل
-                        </button>
-                        <button
-                          onClick={() => openStatement(d.id, 'statement')}
-                          className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer whitespace-nowrap"
-                        >
-                          <FileText className="w-3.5 h-3.5" />
-                          كشف حساب
-                        </button>
-                        <button
-                          onClick={() => archiveDriver(d)}
-                          className="flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
-                          title="نقل إلى الأرشفة"
-                        >
-                          <Archive className="w-3.5 h-3.5" />
-                          أرشفة
-                        </button>
-                        <button
-                          onClick={() => openDeleteModal(d)}
-                          className="flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer whitespace-nowrap"
-                          title="حذف السائق"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          حذف
-                        </button>
-                      </div>
-                    </td>
+                    {canFinanceRead && (
+                      <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
+                        {formatEGP(d.monthlyAgreedSalary)}
+                      </td>
+                    )}
+                    {(canViewFinancialDetails || canDriversWrite) && (
+                      <td className="py-3.5 px-4">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {(canAdvancesWrite || canCoverageWrite || canFinanceRead) && (
+                            <button
+                              onClick={() =>
+                                openStatement(
+                                  d.id,
+                                  canAdvancesWrite || canFinanceRead ? 'advances' : 'coverage'
+                                )
+                              }
+                              className="flex items-center gap-1 rounded-md bg-[#C89B3C] px-2.5 py-1.5 text-[11px] font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer whitespace-nowrap"
+                              title="إضافة وتعديل السلف والتغطيات"
+                            >
+                              <Wallet className="w-3.5 h-3.5" />
+                              السلف والتغطيات
+                            </button>
+                          )}
+                          {canDriversWrite && (
+                            <button
+                              onClick={() => openEdit(d)}
+                              className="flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
+                              title="تعديل الاسم والبيانات والصورة"
+                            >
+                              <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
+                              تعديل
+                            </button>
+                          )}
+                          {canViewFinancialDetails && (
+                            <button
+                              onClick={() => openStatement(d.id, 'statement')}
+                              className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer whitespace-nowrap"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                              كشف حساب
+                            </button>
+                          )}
+                          {canDriversWrite && (
+                            <>
+                              <button
+                                onClick={() => archiveDriver(d)}
+                                className="flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
+                                title="نقل إلى الأرشفة"
+                              >
+                                <Archive className="w-3.5 h-3.5" />
+                                أرشفة
+                              </button>
+                              <button
+                                onClick={() => openDeleteModal(d)}
+                                className="flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer whitespace-nowrap"
+                                title="حذف السائق"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                حذف
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))
               )}
@@ -1382,19 +1461,33 @@ export const DriversModule: React.FC<{
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5">
                 <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-200/70 rounded-lg">
                   {[
-                    { id: 'statement' as const, label: 'كشف الحساب' },
-                    {
-                      id: 'advances' as const,
-                      label: `تعديل وإضافة السلف (${statementData?.advances.length ?? 0})`,
-                    },
-                    {
-                      id: 'coverage' as const,
-                      label: `تعديل وإضافة التغطيات (${statementData?.coverages.length ?? 0})`,
-                    },
-                    {
-                      id: 'adjustments' as const,
-                      label: 'المكافآت والخصومات',
-                    },
+                    ...(canViewFinancialDetails
+                      ? [{ id: 'statement' as const, label: 'كشف الحساب' }]
+                      : []),
+                    ...(canAdvancesWrite || canFinanceRead
+                      ? [
+                          {
+                            id: 'advances' as const,
+                            label: `${canAdvancesWrite ? 'تعديل وإضافة ' : ''}السلف (${statementData?.advances.length ?? 0})`,
+                          },
+                        ]
+                      : []),
+                    ...(canCoverageWrite || canFinanceRead
+                      ? [
+                          {
+                            id: 'coverage' as const,
+                            label: `${canCoverageWrite ? 'تعديل وإضافة ' : ''}التغطيات (${statementData?.coverages.length ?? 0})`,
+                          },
+                        ]
+                      : []),
+                    ...(canFinanceRead
+                      ? [
+                          {
+                            id: 'adjustments' as const,
+                            label: 'المكافآت والخصومات',
+                          },
+                        ]
+                      : []),
                   ].map((t) => (
                     <button
                       key={t.id}
@@ -1652,49 +1745,53 @@ export const DriversModule: React.FC<{
                   {/* TAB 2: DRIVER ADVANCES (ADD + EDIT + DELETE) */}
                   {statementTab === 'advances' && (
                     <div className="space-y-4">
-                      <form
-                        onSubmit={handleAddDriverAdvance}
-                        className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
-                      >
-                        <div className="font-bold text-[#0B1F3A]">إضافة سلفة جديدة</div>
-                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-                          <input
-                            type="number"
-                            required
-                            min={1}
-                            value={newAdv.amount}
-                            onChange={(e) => setNewAdv({ ...newAdv, amount: e.target.value })}
-                            placeholder="المبلغ (ج.م) *"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                          />
-                          <input
-                            type="date"
-                            required
-                            value={newAdv.date}
-                            onChange={(e) => setNewAdv({ ...newAdv, date: e.target.value })}
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                          />
-                          <input
-                            value={newAdv.paymentMethod}
-                            onChange={(e) => setNewAdv({ ...newAdv, paymentMethod: e.target.value })}
-                            placeholder="طريقة الدفع"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
-                          />
-                          <input
-                            value={newAdv.reason}
-                            onChange={(e) => setNewAdv({ ...newAdv, reason: e.target.value })}
-                            placeholder="السبب"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
-                          />
-                        </div>
-                        <button
-                          type="submit"
-                          disabled={financeBusy}
-                          className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                      {canAdvancesWrite && (
+                        <form
+                          onSubmit={handleAddDriverAdvance}
+                          className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
                         >
-                          تسجيل السلفة
-                        </button>
-                      </form>
+                          <div className="font-bold text-[#0B1F3A]">إضافة سلفة جديدة</div>
+                          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                            <input
+                              type="number"
+                              required
+                              min={1}
+                              value={newAdv.amount}
+                              onChange={(e) => setNewAdv({ ...newAdv, amount: e.target.value })}
+                              placeholder="المبلغ (ج.م) *"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                            />
+                            <input
+                              type="date"
+                              required
+                              value={newAdv.date}
+                              onChange={(e) => setNewAdv({ ...newAdv, date: e.target.value })}
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                            />
+                            <input
+                              value={newAdv.paymentMethod}
+                              onChange={(e) =>
+                                setNewAdv({ ...newAdv, paymentMethod: e.target.value })
+                              }
+                              placeholder="طريقة الدفع"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            />
+                            <input
+                              value={newAdv.reason}
+                              onChange={(e) => setNewAdv({ ...newAdv, reason: e.target.value })}
+                              placeholder="السبب"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={financeBusy}
+                            className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                          >
+                            تسجيل السلفة
+                          </button>
+                        </form>
+                      )}
 
                       <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
                         {statementData.advances.length === 0 ? (
@@ -1778,34 +1875,36 @@ export const DriversModule: React.FC<{
                                     {a.paymentMethod || '—'}
                                   </div>
                                 </div>
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingAdvId(a.id);
-                                      setEditAdv({
-                                        amount: String(a.amount),
-                                        date: a.date,
-                                        paymentMethod: a.paymentMethod || '',
-                                        reason: a.reason || '',
-                                        notes: a.notes || '',
-                                      });
-                                    }}
-                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                    تعديل
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={financeBusy}
-                                    onClick={() => handleDeleteDriverAdvance(a.id)}
-                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                    حذف
-                                  </button>
-                                </div>
+                                {canAdvancesWrite && (
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingAdvId(a.id);
+                                        setEditAdv({
+                                          amount: String(a.amount),
+                                          date: a.date,
+                                          paymentMethod: a.paymentMethod || '',
+                                          reason: a.reason || '',
+                                          notes: a.notes || '',
+                                        });
+                                      }}
+                                      className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                    >
+                                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                      تعديل
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={financeBusy}
+                                      onClick={() => handleDeleteDriverAdvance(a.id)}
+                                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      حذف
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             )
                           )
@@ -1817,64 +1916,66 @@ export const DriversModule: React.FC<{
                   {/* TAB 3: DRIVER COVERAGES (ADD + EDIT + DELETE) */}
                   {statementTab === 'coverage' && (
                     <div className="space-y-4">
-                      <form
-                        onSubmit={handleAddDriverCoverage}
-                        className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
-                      >
-                        <div className="font-bold text-[#0B1F3A]">إضافة تغطية غياب جديدة</div>
-                        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
-                          <input
-                            value={newCov.replacementQuery}
-                            onChange={(e) =>
-                              setNewCov({ ...newCov, replacementQuery: e.target.value })
-                            }
-                            placeholder="السائق البديل"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
-                          />
-                          <input
-                            type="date"
-                            required
-                            value={newCov.date}
-                            onChange={(e) => setNewCov({ ...newCov, date: e.target.value })}
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                          />
-                          <input
-                            type="number"
-                            required
-                            min={0}
-                            value={newCov.actualReplacementCost}
-                            onChange={(e) =>
-                              setNewCov({ ...newCov, actualReplacementCost: e.target.value })
-                            }
-                            placeholder="تكلفة البديل *"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                          />
-                          <input
-                            type="number"
-                            required
-                            min={0}
-                            value={newCov.absentDriverDeduction}
-                            onChange={(e) =>
-                              setNewCov({ ...newCov, absentDriverDeduction: e.target.value })
-                            }
-                            placeholder="خصم السائق *"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                          />
-                          <input
-                            value={newCov.reason}
-                            onChange={(e) => setNewCov({ ...newCov, reason: e.target.value })}
-                            placeholder="السبب"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2"
-                          />
-                        </div>
-                        <button
-                          type="submit"
-                          disabled={financeBusy}
-                          className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                      {canCoverageWrite && (
+                        <form
+                          onSubmit={handleAddDriverCoverage}
+                          className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
                         >
-                          تسجيل التغطية
-                        </button>
-                      </form>
+                          <div className="font-bold text-[#0B1F3A]">إضافة تغطية غياب جديدة</div>
+                          <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                            <input
+                              value={newCov.replacementQuery}
+                              onChange={(e) =>
+                                setNewCov({ ...newCov, replacementQuery: e.target.value })
+                              }
+                              placeholder="السائق البديل"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            />
+                            <input
+                              type="date"
+                              required
+                              value={newCov.date}
+                              onChange={(e) => setNewCov({ ...newCov, date: e.target.value })}
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                            />
+                            <input
+                              type="number"
+                              required
+                              min={0}
+                              value={newCov.actualReplacementCost}
+                              onChange={(e) =>
+                                setNewCov({ ...newCov, actualReplacementCost: e.target.value })
+                              }
+                              placeholder="تكلفة البديل *"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                            />
+                            <input
+                              type="number"
+                              required
+                              min={0}
+                              value={newCov.absentDriverDeduction}
+                              onChange={(e) =>
+                                setNewCov({ ...newCov, absentDriverDeduction: e.target.value })
+                              }
+                              placeholder="خصم السائق *"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                            />
+                            <input
+                              value={newCov.reason}
+                              onChange={(e) => setNewCov({ ...newCov, reason: e.target.value })}
+                              placeholder="السبب"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={financeBusy}
+                            className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                          >
+                            تسجيل التغطية
+                          </button>
+                        </form>
+                      )}
 
                       <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
                         {statementData.coverages.length === 0 ? (
@@ -1979,38 +2080,40 @@ export const DriversModule: React.FC<{
                                     {formatEGP(c.actualReplacementCost)} · {c.reason || '—'}
                                   </div>
                                 </div>
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingCovId(c.id);
-                                      setEditCov({
-                                        replacementQuery:
-                                          c.replacementDriverName && c.replacementDriverName !== '—'
-                                            ? c.replacementDriverName
-                                            : c.replacementExternalName || '',
-                                        date: c.date,
-                                        actualReplacementCost: String(c.actualReplacementCost ?? 0),
-                                        absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
-                                        reason: c.reason || '',
-                                        notes: c.notes || '',
-                                      });
-                                    }}
-                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                    تعديل
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={financeBusy}
-                                    onClick={() => handleDeleteDriverCoverage(c.id)}
-                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                    حذف
-                                  </button>
-                                </div>
+                                {canCoverageWrite && (
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCovId(c.id);
+                                        setEditCov({
+                                          replacementQuery:
+                                            c.replacementDriverName && c.replacementDriverName !== '—'
+                                              ? c.replacementDriverName
+                                              : c.replacementExternalName || '',
+                                          date: c.date,
+                                          actualReplacementCost: String(c.actualReplacementCost ?? 0),
+                                          absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
+                                          reason: c.reason || '',
+                                          notes: c.notes || '',
+                                        });
+                                      }}
+                                      className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                    >
+                                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                      تعديل
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={financeBusy}
+                                      onClick={() => handleDeleteDriverCoverage(c.id)}
+                                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      حذف
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             )
                           )
@@ -2022,56 +2125,60 @@ export const DriversModule: React.FC<{
                   {/* TAB 4: BONUSES & OTHER DEDUCTIONS */}
                   {statementTab === 'adjustments' && (
                     <div className="space-y-4">
-                      <form
-                        onSubmit={handleAddDriverAdjustment}
-                        className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
-                      >
-                        <div className="font-bold text-[#0B1F3A]">إضافة مكافأة أو خصم إداري</div>
-                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-                          <div className="grid grid-cols-2 gap-1.5">
-                            {[
-                              { value: 'bonus' as const, label: 'مكافأة (+)' },
-                              { value: 'other_deduction' as const, label: 'خصم (−)' },
-                            ].map((opt) => (
-                              <button
-                                key={opt.value}
-                                type="button"
-                                onClick={() => setNewAdj({ ...newAdj, type: opt.value })}
-                                className={`rounded-lg border px-2 py-2 font-semibold cursor-pointer ${
-                                  newAdj.type === opt.value
-                                    ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
-                                    : 'border-slate-200 bg-white text-slate-700'
-                                }`}
-                              >
-                                {opt.label}
-                              </button>
-                            ))}
-                          </div>
-                          <input
-                            type="number"
-                            required
-                            min={1}
-                            value={newAdj.amount}
-                            onChange={(e) => setNewAdj({ ...newAdj, amount: e.target.value })}
-                            placeholder="المبلغ (ج.م) *"
-                            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                          />
-                          <input
-                            required
-                            value={newAdj.description}
-                            onChange={(e) => setNewAdj({ ...newAdj, description: e.target.value })}
-                            placeholder="السبب / البيان *"
-                            className="sm:col-span-2 rounded-lg border border-slate-200 bg-white px-3 py-2"
-                          />
-                        </div>
-                        <button
-                          type="submit"
-                          disabled={financeBusy}
-                          className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                      {canFinanceWrite && (
+                        <form
+                          onSubmit={handleAddDriverAdjustment}
+                          className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
                         >
-                          حفظ التسوية
-                        </button>
-                      </form>
+                          <div className="font-bold text-[#0B1F3A]">إضافة مكافأة أو خصم إداري</div>
+                          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                            <div className="grid grid-cols-2 gap-1.5">
+                              {[
+                                { value: 'bonus' as const, label: 'مكافأة (+)' },
+                                { value: 'other_deduction' as const, label: 'خصم (−)' },
+                              ].map((opt) => (
+                                <button
+                                  key={opt.value}
+                                  type="button"
+                                  onClick={() => setNewAdj({ ...newAdj, type: opt.value })}
+                                  className={`rounded-lg border px-2 py-2 font-semibold cursor-pointer ${
+                                    newAdj.type === opt.value
+                                      ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                                      : 'border-slate-200 bg-white text-slate-700'
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              ))}
+                            </div>
+                            <input
+                              type="number"
+                              required
+                              min={1}
+                              value={newAdj.amount}
+                              onChange={(e) => setNewAdj({ ...newAdj, amount: e.target.value })}
+                              placeholder="المبلغ (ج.م) *"
+                              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                            />
+                            <input
+                              required
+                              value={newAdj.description}
+                              onChange={(e) =>
+                                setNewAdj({ ...newAdj, description: e.target.value })
+                              }
+                              placeholder="السبب / البيان *"
+                              className="sm:col-span-2 rounded-lg border border-slate-200 bg-white px-3 py-2"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={financeBusy}
+                            className="rounded-lg bg-[#0B1F3A] px-4 py-2 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                          >
+                            حفظ التسوية
+                          </button>
+                        </form>
+                      )}
 
                       <div className="border border-slate-200 rounded-xl divide-y divide-slate-100">
                         {statementData.transactions
@@ -2154,32 +2261,34 @@ export const DriversModule: React.FC<{
                                   </div>
                                   <div className="text-slate-500 mt-0.5">{t.description}</div>
                                 </div>
-                                <div className="flex items-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingAdjId(t.id);
-                                      setEditAdj({
-                                        type: t.type === 'bonus' ? 'bonus' : 'other_deduction',
-                                        amount: String(t.amount),
-                                        description: t.description,
-                                      });
-                                    }}
-                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                    تعديل
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={financeBusy}
-                                    onClick={() => handleDeleteDriverAdj(t.id)}
-                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                    حذف
-                                  </button>
-                                </div>
+                                {canFinanceWrite && (
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingAdjId(t.id);
+                                        setEditAdj({
+                                          type: t.type === 'bonus' ? 'bonus' : 'other_deduction',
+                                          amount: String(t.amount),
+                                          description: t.description,
+                                        });
+                                      }}
+                                      className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                    >
+                                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                      تعديل
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={financeBusy}
+                                      onClick={() => handleDeleteDriverAdj(t.id)}
+                                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      حذف
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             )
                           )}

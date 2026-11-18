@@ -19,8 +19,17 @@ export interface SupervisorSessionPayload {
   exp: number;
 }
 
+export interface StaffSessionPayload {
+  typ: 'staff_session';
+  userId: number;
+  staffCode: string;
+  iat: number;
+  exp: number;
+}
+
 const DRIVER_PREFIX = 'drv_';
 const SUPERVISOR_PREFIX = 'sup_';
+const STAFF_PREFIX = 'stf_';
 const DEFAULT_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 days persistent session for installed app
 const REFRESH_THRESHOLD_MS = 150 * 24 * 60 * 60 * 1000; // Sliding refresh if <150 days remain
 
@@ -199,6 +208,35 @@ export function verifySupervisorSessionToken(token: string): SupervisorSessionPa
     parsed.typ !== 'supervisor_session' ||
     typeof parsed.userId !== 'number' ||
     typeof parsed.supervisorId !== 'number' ||
+    typeof parsed.exp !== 'number' ||
+    parsed.exp <= Date.now()
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+export function issueStaffSessionToken(input: {
+  userId: number;
+  staffCode: string;
+}): string {
+  const now = Date.now();
+  const payload: StaffSessionPayload = {
+    typ: 'staff_session',
+    userId: input.userId,
+    staffCode: input.staffCode,
+    iat: now,
+    exp: now + DEFAULT_TTL_MS,
+  };
+  return signPayload(STAFF_PREFIX, payload);
+}
+
+export function verifyStaffSessionToken(token: string): StaffSessionPayload | null {
+  const parsed = verifySignedPayload<StaffSessionPayload>(token, STAFF_PREFIX);
+  if (
+    !parsed ||
+    parsed.typ !== 'staff_session' ||
+    typeof parsed.userId !== 'number' ||
     typeof parsed.exp !== 'number' ||
     parsed.exp <= Date.now()
   ) {

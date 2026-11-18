@@ -13,6 +13,7 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatArabicTripTime, formatEGP, normalizeTimeInputValue } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
 import { ContactPhoneInput } from '../ContactPhoneInput';
@@ -21,7 +22,31 @@ import type { FleetVehicle, RouteItem, SchoolItem, VehicleOwner } from '../../ty
 type SubTabId = 'schools' | 'vehicles' | 'owners' | 'routes';
 
 export const SchoolsVehiclesModule: React.FC = () => {
-  const [tab, setTab] = useState<SubTabId>('schools');
+  const { dbUser } = useAuth();
+  const perms = dbUser?.permissions || [];
+  const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || perms.includes('*');
+  const can = (perm: string) => isSuperAdmin || perms.includes('*') || perms.includes(perm);
+
+  const canSchoolsWrite = can('schools:write');
+  const canSchoolsRead = can('schools:read') || canSchoolsWrite;
+  const canVehiclesWrite = can('vehicles:write');
+  const canVehiclesRead = can('vehicles:read') || canVehiclesWrite;
+  const canRoutesWrite = can('routes:write');
+  const canFinanceRead = can('finance:read') || can('finance:write');
+  const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
+
+  const allowedSubTabs: Array<{ id: SubTabId; label: string; icon: typeof Building2 }> = [
+    ...(canSchoolsRead ? [{ id: 'schools' as const, label: 'المدارس والعقود', icon: Building2 }] : []),
+    ...(canVehiclesRead ? [{ id: 'vehicles' as const, label: 'المركبات والباصات', icon: Bus }] : []),
+    ...(canVehiclesRead || canSchoolsRead
+      ? [{ id: 'owners' as const, label: 'ملاك الباصات', icon: User }]
+      : []),
+    ...(canSchoolsRead || canRoutesWrite
+      ? [{ id: 'routes' as const, label: 'خطوط السير', icon: Route }]
+      : []),
+  ];
+
+  const [tab, setTab] = useState<SubTabId>(() => allowedSubTabs[0]?.id || 'schools');
   const [tabHistory, setTabHistory] = useState<Array<{ tab: SubTabId; schoolId: number | 'all' }>>([]);
   const [selectedSchoolId, setSelectedSchoolId] = useState<number | 'all'>('all');
   const [billingPeriod, setBillingPeriod] = useState<{ month: number; year: number } | null>(null);
@@ -99,13 +124,23 @@ export const SchoolsVehiclesModule: React.FC = () => {
     setError(null);
     try {
       const [sRes, vRes, oRes] = await Promise.all([
-        apiFetch<{
-          schools: SchoolItem[];
-          routes: RouteItem[];
-          billingPeriod?: { month: number; year: number };
-        }>('/api/schools'),
-        apiFetch<{ vehicles: FleetVehicle[] }>('/api/vehicles'),
-        apiFetch<{ owners: VehicleOwner[] }>('/api/owners'),
+        canSchoolsRead
+          ? apiFetch<{
+              schools: SchoolItem[];
+              routes: RouteItem[];
+              billingPeriod?: { month: number; year: number };
+            }>('/api/schools')
+          : Promise.resolve({
+              schools: [] as SchoolItem[],
+              routes: [] as RouteItem[],
+              billingPeriod: undefined as { month: number; year: number } | undefined,
+            }),
+        canVehiclesRead
+          ? apiFetch<{ vehicles: FleetVehicle[] }>('/api/vehicles')
+          : Promise.resolve({ vehicles: [] as FleetVehicle[] }),
+        canVehiclesRead || canSchoolsRead
+          ? apiFetch<{ owners: VehicleOwner[] }>('/api/owners')
+          : Promise.resolve({ owners: [] as VehicleOwner[] }),
       ]);
       setSchoolsList(sRes.schools);
       setRoutesList(sRes.routes);
@@ -117,11 +152,17 @@ export const SchoolsVehiclesModule: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [canSchoolsRead, canVehiclesRead]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (allowedSubTabs.length > 0 && !allowedSubTabs.some((t) => t.id === tab)) {
+      setTab(allowedSubTabs[0].id);
+    }
+  }, [tab, canSchoolsRead, canVehiclesRead, canRoutesWrite]);
 
   const navigateSubView = (nextTab: SubTabId, nextSchoolId: number | 'all' = selectedSchoolId) => {
     if (nextTab === tab && nextSchoolId === selectedSchoolId) return;
@@ -443,6 +484,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {!isSuperAdmin && restrictedSchoolCount > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-semibold text-amber-900">
+              نطاق صلاحيتك: {restrictedSchoolCount} مدرسة محددة
+            </div>
+          )}
           {(tabHistory.length > 0 || (tab === 'schools' && selectedSchoolObj)) && (
             <button
               type="button"
@@ -453,7 +499,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
               رجوع للقائمة السابقة
             </button>
           )}
-          {tab === 'schools' && (
+          {tab === 'schools' && canSchoolsWrite && (
             <button
               onClick={openAddSchool}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
@@ -462,7 +508,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
               إضافة مدرسة
             </button>
           )}
-          {tab === 'vehicles' && (
+          {tab === 'vehicles' && canVehiclesWrite && (
             <button
               onClick={openAddVehicle}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
@@ -471,7 +517,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
               إضافة مركبة
             </button>
           )}
-          {tab === 'owners' && (
+          {tab === 'owners' && canVehiclesWrite && (
             <button
               onClick={openAddOwner}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
@@ -480,7 +526,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
               إضافة مالك باص
             </button>
           )}
-          {tab === 'routes' && (
+          {tab === 'routes' && canRoutesWrite && (
             <button
               onClick={openAddRoute}
               className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
@@ -494,17 +540,12 @@ export const SchoolsVehiclesModule: React.FC = () => {
 
       {/* Sub-navigation tabs */}
       <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-200/70 rounded-xl w-fit">
-        {[
-          { id: 'schools', label: 'المدارس والعقود', icon: Building2 },
-          { id: 'vehicles', label: 'المركبات والباصات', icon: Bus },
-          { id: 'owners', label: 'ملاك الباصات', icon: User },
-          { id: 'routes', label: 'خطوط السير', icon: Route },
-        ].map((item) => {
+        {allowedSubTabs.map((item) => {
           const Icon = item.icon;
           return (
             <button
               key={item.id}
-              onClick={() => navigateSubView(item.id as SubTabId, item.id === 'schools' ? selectedSchoolId : 'all')}
+              onClick={() => navigateSubView(item.id, item.id === 'schools' ? selectedSchoolId : 'all')}
               className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
                 tab === item.id
                   ? 'bg-white text-[#0B1F3A] shadow-xs'
@@ -606,56 +647,60 @@ export const SchoolsVehiclesModule: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => openEditSchool(selectedSchoolObj)}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
-                    >
-                      <Edit3 className="w-3.5 h-3.5" />
-                      تعديل العقد
-                    </button>
-                  </div>
+                  {canSchoolsWrite && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openEditSchool(selectedSchoolObj)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        تعديل العقد
+                      </button>
+                    </div>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-4 border-t border-slate-100">
-                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
-                    <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
-                    <div className="font-mono text-lg font-bold text-[#0B1F3A] mt-1 tabular-nums">
-                      {formatEGP(selectedSchoolObj.monthlyContractValue)}
+                {canFinanceRead && (
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-4 border-t border-slate-100">
+                    <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
+                      <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
+                      <div className="font-mono text-lg font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                        {formatEGP(selectedSchoolObj.monthlyContractValue)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
+                      <div className="text-[11px] text-slate-500">
+                        رواتب سائقين المدرسة ({selectedSchoolObj.driverCount ?? 0})
+                      </div>
+                      <div className="font-mono text-lg font-bold text-red-700 mt-1 tabular-nums">
+                        {formatEGP(selectedSchoolObj.totalDriverSalaries ?? 0)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
+                      <div className="text-[11px] text-slate-500">
+                        تكلفة ملاك الباصات ({selectedSchoolObj.vehicleCount ?? 0})
+                      </div>
+                      <div className="font-mono text-lg font-bold text-slate-800 mt-1 tabular-nums">
+                        {formatEGP(selectedSchoolObj.ownerCost ?? 0)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-3.5">
+                      <div className="text-[11px] text-emerald-800 font-semibold">
+                        صافي ربح المدرسة الشهري
+                      </div>
+                      <div
+                        className={`font-mono text-lg font-bold mt-1 tabular-nums ${
+                          (selectedSchoolObj.estimatedProfit ?? 0) >= 0
+                            ? 'text-emerald-700'
+                            : 'text-red-700'
+                        }`}
+                      >
+                        {formatEGP(selectedSchoolObj.estimatedProfit ?? 0)}
+                      </div>
                     </div>
                   </div>
-                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
-                    <div className="text-[11px] text-slate-500">
-                      رواتب سائقين المدرسة ({selectedSchoolObj.driverCount ?? 0})
-                    </div>
-                    <div className="font-mono text-lg font-bold text-red-700 mt-1 tabular-nums">
-                      {formatEGP(selectedSchoolObj.totalDriverSalaries ?? 0)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
-                    <div className="text-[11px] text-slate-500">
-                      تكلفة ملاك الباصات ({selectedSchoolObj.vehicleCount ?? 0})
-                    </div>
-                    <div className="font-mono text-lg font-bold text-slate-800 mt-1 tabular-nums">
-                      {formatEGP(selectedSchoolObj.ownerCost ?? 0)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-3.5">
-                    <div className="text-[11px] text-emerald-800 font-semibold">
-                      صافي ربح المدرسة الشهري
-                    </div>
-                    <div
-                      className={`font-mono text-lg font-bold mt-1 tabular-nums ${
-                        (selectedSchoolObj.estimatedProfit ?? 0) >= 0
-                          ? 'text-emerald-700'
-                          : 'text-red-700'
-                      }`}
-                    >
-                      {formatEGP(selectedSchoolObj.estimatedProfit ?? 0)}
-                    </div>
-                  </div>
-                </div>
+                )}
 
                 {(selectedSchoolObj.contractStartDate || selectedSchoolObj.contractEndDate) && (
                   <div className="text-[11px] text-slate-500 font-mono tabular-nums">
@@ -671,15 +716,17 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <Users className="w-4 h-4 text-[#C89B3C]" />
                     <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
-                      سائقو {selectedSchoolObj.name} ورواتبهم ({(selectedSchoolObj.drivers || []).length})
+                      سائقو {selectedSchoolObj.name} ({(selectedSchoolObj.drivers || []).length})
                     </h3>
                   </div>
-                  <div className="text-xs font-mono text-slate-600 tabular-nums">
-                    صافي مستحقات السائقين بعد السلف والتسويات:{' '}
-                    <strong className="text-[#0B1F3A]">
-                      {formatEGP(selectedSchoolObj.totalNetDriverSalaries ?? 0)}
-                    </strong>
-                  </div>
+                  {canFinanceRead && (
+                    <div className="text-xs font-mono text-slate-600 tabular-nums">
+                      صافي مستحقات السائقين بعد السلف والتسويات:{' '}
+                      <strong className="text-[#0B1F3A]">
+                        {formatEGP(selectedSchoolObj.totalNetDriverSalaries ?? 0)}
+                      </strong>
+                    </div>
+                  )}
                 </div>
 
                 <div className="overflow-x-auto">
@@ -689,16 +736,20 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         <th className="py-3 px-4 font-semibold">الكود</th>
                         <th className="py-3 px-4 font-semibold">السائق والموبايل</th>
                         <th className="py-3 px-4 font-semibold">الباص وخط السير</th>
-                        <th className="py-3 px-4 font-semibold">الراتب الأساسي</th>
-                        <th className="py-3 px-4 font-semibold">السلف / التغطيات</th>
-                        <th className="py-3 px-4 font-semibold">مكافآت / خصومات</th>
-                        <th className="py-3 px-4 font-semibold">صافي المستحق</th>
+                        {canFinanceRead && (
+                          <>
+                            <th className="py-3 px-4 font-semibold">الراتب الأساسي</th>
+                            <th className="py-3 px-4 font-semibold">السلف / التغطيات</th>
+                            <th className="py-3 px-4 font-semibold">مكافآت / خصومات</th>
+                            <th className="py-3 px-4 font-semibold">صافي المستحق</th>
+                          </>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {(selectedSchoolObj.drivers || []).length === 0 ? (
                         <tr>
-                          <td colSpan={7} className="py-8 text-center text-slate-400">
+                          <td colSpan={canFinanceRead ? 7 : 3} className="py-8 text-center text-slate-400">
                             لا يوجد سائقون معينون لهذه المدرسة حالياً
                           </td>
                         </tr>
@@ -720,20 +771,24 @@ export const SchoolsVehiclesModule: React.FC = () => {
                               </div>
                               <div className="text-slate-500">{drv.routeName || '—'}</div>
                             </td>
-                            <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
-                              {formatEGP(drv.baseSalary)}
-                            </td>
-                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                              {formatEGP(drv.totalAdvances + drv.totalCoverageDeductions)}
-                            </td>
-                            <td className="py-3 px-4 font-mono tabular-nums">
-                              <span className="text-emerald-700">+{formatEGP(drv.bonuses)}</span>
-                              {' / '}
-                              <span className="text-red-700">−{formatEGP(drv.otherDeductions)}</span>
-                            </td>
-                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
-                              {formatEGP(drv.netSalary)}
-                            </td>
+                            {canFinanceRead && (
+                              <>
+                                <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
+                                  {formatEGP(drv.baseSalary)}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                                  {formatEGP(drv.totalAdvances + drv.totalCoverageDeductions)}
+                                </td>
+                                <td className="py-3 px-4 font-mono tabular-nums">
+                                  <span className="text-emerald-700">+{formatEGP(drv.bonuses)}</span>
+                                  {' / '}
+                                  <span className="text-red-700">−{formatEGP(drv.otherDeductions)}</span>
+                                </td>
+                                <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                                  {formatEGP(drv.netSalary)}
+                                </td>
+                              </>
+                            )}
                           </tr>
                         ))
                       )}
@@ -757,14 +812,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         <th className="py-3 px-4 font-semibold">رقم الباص</th>
                         <th className="py-3 px-4 font-semibold">اللوحة والنوع</th>
                         <th className="py-3 px-4 font-semibold">المالك</th>
-                        <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
+                        {canFinanceRead && (
+                          <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
+                        )}
                         <th className="py-3 px-4 font-semibold">السائق</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {(selectedSchoolObj.vehicles || []).length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="py-8 text-center text-slate-400">
+                          <td colSpan={canFinanceRead ? 5 : 4} className="py-8 text-center text-slate-400">
                             لا توجد مركبات مربوطة بهذه المدرسة حالياً
                           </td>
                         </tr>
@@ -782,9 +839,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
                               <div className="text-slate-800">{v.ownerName}</div>
                               <div className="font-mono text-slate-500">{v.ownerPhone}</div>
                             </td>
-                            <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
-                              {formatEGP(v.monthlyOwnerCost)}
-                            </td>
+                            {canFinanceRead && (
+                              <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
+                                {formatEGP(v.monthlyOwnerCost)}
+                              </td>
+                            )}
                             <td className="py-3 px-4 text-slate-700">{v.driverName}</td>
                           </tr>
                         ))
@@ -807,43 +866,49 @@ export const SchoolsVehiclesModule: React.FC = () => {
                       </div>
                       <div className="text-xs text-slate-500 mt-0.5">{s.address}</div>
                     </div>
-                    <div className="text-left shrink-0">
-                      <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
-                      <div className="font-mono text-base font-bold text-[#0B1F3A] tabular-nums">
-                        {formatEGP(s.monthlyContractValue)}
+                    {canFinanceRead && (
+                      <div className="text-left shrink-0">
+                        <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
+                        <div className="font-mono text-base font-bold text-[#0B1F3A] tabular-nums">
+                          {formatEGP(s.monthlyContractValue)}
+                        </div>
                       </div>
-                    </div>
+                    )}
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 border-t border-slate-100 pt-3 text-xs">
+                  <div className={`grid ${canFinanceRead ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-1'} gap-3 border-t border-slate-100 pt-3 text-xs`}>
                     <div>
                       <div className="text-slate-500">السائقون / الباصات</div>
                       <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
                         {s.driverCount ?? 0} سائق · {s.vehicleCount ?? 0} باص
                       </div>
                     </div>
-                    <div>
-                      <div className="text-slate-500">رواتب السائقين</div>
-                      <div className="font-mono font-semibold text-red-700 mt-0.5 tabular-nums">
-                        {formatEGP(s.totalDriverSalaries ?? 0)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-slate-500">تكلفة الملاك</div>
-                      <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
-                        {formatEGP(s.ownerCost ?? 0)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-slate-500">صافي ربح المدرسة</div>
-                      <div
-                        className={`font-mono font-bold mt-0.5 tabular-nums ${
-                          (s.estimatedProfit ?? 0) >= 0 ? 'text-emerald-700' : 'text-red-700'
-                        }`}
-                      >
-                        {formatEGP(s.estimatedProfit ?? 0)}
-                      </div>
-                    </div>
+                    {canFinanceRead && (
+                      <>
+                        <div>
+                          <div className="text-slate-500">رواتب السائقين</div>
+                          <div className="font-mono font-semibold text-red-700 mt-0.5 tabular-nums">
+                            {formatEGP(s.totalDriverSalaries ?? 0)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">تكلفة الملاك</div>
+                          <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
+                            {formatEGP(s.ownerCost ?? 0)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">صافي ربح المدرسة</div>
+                          <div
+                            className={`font-mono font-bold mt-0.5 tabular-nums ${
+                              (s.estimatedProfit ?? 0) >= 0 ? 'text-emerald-700' : 'text-red-700'
+                            }`}
+                          >
+                            {formatEGP(s.estimatedProfit ?? 0)}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   {/* Quick preview of this school's drivers & salaries */}
@@ -851,7 +916,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                     <div className="rounded-lg bg-slate-50 border border-slate-100 p-3 space-y-1.5">
                       <div className="text-[11px] font-bold text-slate-600 flex items-center gap-1.5">
                         <Wallet className="w-3.5 h-3.5 text-[#C89B3C]" />
-                        <span>سائقو المدرسة ورواتبهم:</span>
+                        <span>{canFinanceRead ? 'سائقو المدرسة ورواتبهم:' : 'سائقو المدرسة:'}</span>
                       </div>
                       <div className="divide-y divide-slate-200/60 text-[11px]">
                         {(s.drivers || []).slice(0, 4).map((drv) => (
@@ -859,9 +924,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
                             <span className="font-semibold text-slate-800 truncate">
                               {drv.fullName} ({drv.busNumber || '—'})
                             </span>
-                            <span className="font-mono font-bold text-[#0B1F3A] tabular-nums shrink-0">
-                              أساسي {formatEGP(drv.baseSalary)} · صافي {formatEGP(drv.netSalary)}
-                            </span>
+                            {canFinanceRead && (
+                              <span className="font-mono font-bold text-[#0B1F3A] tabular-nums shrink-0">
+                                أساسي {formatEGP(drv.baseSalary)} · صافي {formatEGP(drv.netSalary)}
+                              </span>
+                            )}
                           </div>
                         ))}
                         {(s.drivers || []).length > 4 && (
@@ -884,15 +951,17 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
                       >
                         <Users className="w-3 h-3 text-[#C89B3C]" />
-                        عرض العقد والسائقين والربح
+                        {canFinanceRead ? 'عرض العقد والسائقين والربح' : 'عرض السائقين والمركبات'}
                       </button>
-                      <button
-                        onClick={() => openEditSchool(s)}
-                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
-                      >
-                        <Edit3 className="w-3 h-3" />
-                        تعديل
-                      </button>
+                      {canSchoolsWrite && (
+                        <button
+                          onClick={() => openEditSchool(s)}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          تعديل
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -909,10 +978,12 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   <th className="py-3 px-4 font-semibold">رقم الباص</th>
                   <th className="py-3 px-4 font-semibold">رقم اللوحة والنوع</th>
                   <th className="py-3 px-4 font-semibold">مالك المركبة</th>
-                  <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
+                  {canFinanceRead && (
+                    <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
+                  )}
                   <th className="py-3 px-4 font-semibold">المدرسة والسائق</th>
                   <th className="py-3 px-4 font-semibold">حالة التشغيل و GPS</th>
-                  <th className="py-3 px-4 font-semibold">تعديل</th>
+                  {canVehiclesWrite && <th className="py-3 px-4 font-semibold">تعديل</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -927,9 +998,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
                       <div className="text-slate-800">{v.ownerName}</div>
                       <div className="text-slate-500 font-mono">{v.ownerPhone}</div>
                     </td>
-                    <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
-                      {formatEGP(v.monthlyOwnerCost)}
-                    </td>
+                    {canFinanceRead && (
+                      <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
+                        {formatEGP(v.monthlyOwnerCost)}
+                      </td>
+                    )}
                     <td className="py-3.5 px-4">
                       <div className="text-slate-800">{v.schoolName}</div>
                       <div className="text-slate-500">
@@ -952,15 +1025,17 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         {v.isOnline ? 'GPS متصل مباشر' : 'GPS غير متصل'}
                       </div>
                     </td>
-                    <td className="py-3.5 px-4">
-                      <button
-                        onClick={() => openEditVehicle(v)}
-                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
-                      >
-                        <Edit3 className="w-3 h-3" />
-                        تعديل
-                      </button>
-                    </td>
+                    {canVehiclesWrite && (
+                      <td className="py-3.5 px-4">
+                        <button
+                          onClick={() => openEditVehicle(v)}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          تعديل
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -999,24 +1074,26 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   {o.notes && <p className="mt-2 text-xs text-slate-500">{o.notes}</p>}
                 </div>
 
-                <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
-                  <button
-                    type="button"
-                    onClick={() => openEditOwner(o)}
-                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
-                  >
-                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                    تعديل
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDeletingOwner(o)}
-                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    حذف
-                  </button>
-                </div>
+                {canVehiclesWrite && (
+                  <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => openEditOwner(o)}
+                      className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                    >
+                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                      تعديل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeletingOwner(o)}
+                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      حذف
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -1027,13 +1104,15 @@ export const SchoolsVehiclesModule: React.FC = () => {
             <span className="font-bold text-xs text-[#0B1F3A]">
               خطوط السير المسجلة ({routesList.length})
             </span>
-            <button
-              onClick={openAddRoute}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-            >
-              <Plus className="w-3.5 h-3.5 text-[#C89B3C]" />
-              إضافة خط سير جديد
-            </button>
+            {canRoutesWrite && (
+              <button
+                onClick={openAddRoute}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5 text-[#C89B3C]" />
+                إضافة خط سير جديد
+              </button>
+            )}
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-right text-xs">
@@ -1044,7 +1123,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   <th className="py-3 px-4 font-semibold">نقطة بداية الرحلة</th>
                   <th className="py-3 px-4 font-semibold">بداية ونهاية الرحلة بالوقت</th>
                   <th className="py-3 px-4 font-semibold">المسافة التقديرية</th>
-                  <th className="py-3 px-4 font-semibold">الإجراءات</th>
+                  {canRoutesWrite && <th className="py-3 px-4 font-semibold">الإجراءات</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -1071,24 +1150,26 @@ export const SchoolsVehiclesModule: React.FC = () => {
                       <td className="py-3 px-4 font-mono tabular-nums text-slate-700">
                         {r.estimatedDistanceKm} كم
                       </td>
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            onClick={() => openEditRoute(r)}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
-                          >
-                            <Edit3 className="w-3 h-3" />
-                            تعديل
-                          </button>
-                          <button
-                            onClick={() => handleDeleteRoute(r.id)}
-                            className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                            حذف
-                          </button>
-                        </div>
-                      </td>
+                      {canRoutesWrite && (
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => openEditRoute(r)}
+                              className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                              تعديل
+                            </button>
+                            <button
+                              onClick={() => handleDeleteRoute(r.id)}
+                              className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              حذف
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}

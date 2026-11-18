@@ -1,11 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Archive, Briefcase, Edit3, Plus, Search, Trash2, X } from 'lucide-react';
+import { Archive, Briefcase, Edit3, Plus, Search, Shield, Trash2, X } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatEGP, normalizeLookupText } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
 import { ContactPhoneInput } from '../ContactPhoneInput';
+import {
+  StaffAccessModal,
+  type StaffEmployeeOption,
+  type StaffRoleOption,
+  type StaffSchoolOption,
+  type StaffUserEditable,
+} from './StaffAccessModal';
 import type { EmployeeRecord } from '../../types';
 
 export const EmployeesModule: React.FC = () => {
+  const { dbUser } = useAuth();
+  const perms = dbUser?.permissions || [];
+  const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || perms.includes('*');
+  const canWriteEmployees = isSuperAdmin || perms.includes('employees:write');
+
   const [employeesList, setEmployeesList] = useState<EmployeeRecord[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -15,6 +28,13 @@ export const EmployeesModule: React.FC = () => {
   const [editing, setEditing] = useState<EmployeeRecord | null>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Super Admin Staff Access Grant / Edit state
+  const [staffRoles, setStaffRoles] = useState<StaffRoleOption[]>([]);
+  const [staffSchools, setStaffSchools] = useState<StaffSchoolOption[]>([]);
+  const [accessModalOpen, setAccessModalOpen] = useState(false);
+  const [accessTargetEmployee, setAccessTargetEmployee] = useState<StaffEmployeeOption | null>(null);
+  const [accessInitialUser, setAccessInitialUser] = useState<StaffUserEditable | null>(null);
 
   const [formState, setFormState] = useState({
     employeeCode: '',
@@ -41,18 +61,58 @@ export const EmployeesModule: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch<{ employees: EmployeeRecord[] }>('/api/employees');
+      const [res, usersMeta] = await Promise.all([
+        apiFetch<{ employees: EmployeeRecord[] }>('/api/employees'),
+        isSuperAdmin
+          ? apiFetch<{ roles: StaffRoleOption[]; schools: StaffSchoolOption[] }>('/api/users').catch(
+              () => null
+            )
+          : Promise.resolve(null),
+      ]);
       setEmployeesList(res.employees);
+      if (usersMeta) {
+        setStaffRoles(usersMeta.roles || []);
+        setStaffSchools(usersMeta.schools || []);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات الموظفين');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isSuperAdmin]);
 
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+
+  const openGrantAccess = (emp: EmployeeRecord) => {
+    setAccessTargetEmployee({
+      id: emp.id,
+      fullName: emp.fullName,
+      jobTitle: emp.jobTitle,
+      phone: emp.phone,
+      employeeCode: emp.employeeCode,
+    });
+    if (emp.linkedUser) {
+      setAccessInitialUser({
+        id: emp.linkedUser.id,
+        fullName: emp.fullName,
+        email: emp.linkedUser.email,
+        phone: emp.phone,
+        roleId: emp.linkedUser.roleId,
+        roleSlug: emp.linkedUser.roleSlug,
+        assignedSchoolIds: emp.linkedUser.assignedSchoolIds || [],
+        customPermissions: emp.linkedUser.customPermissions ?? null,
+        effectivePermissions: emp.linkedUser.permissions || [],
+        staffCode: emp.linkedUser.staffCode,
+        employeeId: emp.id,
+        isActive: emp.linkedUser.isActive,
+      });
+    } else {
+      setAccessInitialUser(null);
+    }
+    setAccessModalOpen(true);
+  };
 
   const openAdd = () => {
     setEditing(null);
@@ -174,13 +234,15 @@ export const EmployeesModule: React.FC = () => {
             المشرفات، الإداريون، المحاسبون، موظفو الحركة، والفنيون — وتُحسب رواتبهم تلقائياً ضمن إجمالي الرواتب والربحية
           </p>
         </div>
-        <button
-          onClick={openAdd}
-          className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap shrink-0"
-        >
-          <Plus className="w-4 h-4 text-[#C89B3C]" />
-          إضافة موظف جديد
-        </button>
+        {canWriteEmployees && (
+          <button
+            onClick={openAdd}
+            className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Plus className="w-4 h-4 text-[#C89B3C]" />
+            إضافة موظف جديد
+          </button>
+        )}
       </div>
 
       {/* Summary Strip */}
@@ -257,20 +319,27 @@ export const EmployeesModule: React.FC = () => {
                 <th className="py-3 px-4 font-semibold">خصومات / سلف</th>
                 <th className="py-3 px-4 font-semibold">صافي الراتب</th>
                 <th className="py-3 px-4 font-semibold">الحالة</th>
-                <th className="py-3 px-4 font-semibold">الإجراءات</th>
+                {isSuperAdmin && <th className="py-3 px-4 font-semibold">صلاحية التطبيق</th>}
+                {canWriteEmployees && <th className="py-3 px-4 font-semibold">الإجراءات</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center text-slate-400">
+                  <td
+                    colSpan={7 + (isSuperAdmin ? 1 : 0) + (canWriteEmployees ? 1 : 0)}
+                    className="py-10 text-center text-slate-400"
+                  >
                     جاري التحميل...
                   </td>
                 </tr>
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center text-slate-400">
-                    لا يوجد موظفون مسجلون حالياً — اضغط «إضافة موظف جديد» لتسجيل أول موظف
+                  <td
+                    colSpan={7 + (isSuperAdmin ? 1 : 0) + (canWriteEmployees ? 1 : 0)}
+                    className="py-10 text-center text-slate-400"
+                  >
+                    لا يوجد موظفون مسجلون حالياً
                   </td>
                 </tr>
               ) : (
@@ -304,32 +373,72 @@ export const EmployeesModule: React.FC = () => {
                     <td className="py-3.5 px-4">
                       <span className="font-semibold text-emerald-700">نشط</span>
                     </td>
-                    <td className="py-3.5 px-4">
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => openEdit(emp)}
-                          className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                        >
-                          <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                          تعديل
-                        </button>
-                        <button
-                          onClick={() => handleArchiveEmployee(emp)}
-                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-                          title="نقل إلى الأرشفة"
-                        >
-                          <Archive className="w-3 h-3 text-amber-600" />
-                          أرشفة
-                        </button>
-                        <button
-                          onClick={() => setDeleteTarget(emp)}
-                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                          حذف
-                        </button>
-                      </div>
-                    </td>
+                    {isSuperAdmin && (
+                      <td className="py-3.5 px-4">
+                        <div className="space-y-1">
+                          {emp.linkedUser ? (
+                            <div className="text-[11px] leading-snug">
+                              <div className="font-bold text-[#0B1F3A]">
+                                {emp.linkedUser.roleNameAr} ·{' '}
+                                <span
+                                  className={
+                                    emp.linkedUser.isActive
+                                      ? 'text-emerald-700'
+                                      : 'text-red-700'
+                                  }
+                                >
+                                  {emp.linkedUser.isActive ? 'مفعل' : 'موقوف'}
+                                </span>
+                              </div>
+                              <div className="text-slate-500 font-mono tabular-nums">
+                                {emp.linkedUser.staffCode || '—'} ·{' '}
+                                {emp.linkedUser.assignedSchoolIds.length === 0
+                                  ? 'جميع المدارس'
+                                  : `${emp.linkedUser.assignedSchoolIds.length} مدرسة`}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="text-[11px] text-slate-400">بدون حساب دخول</div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => openGrantAccess(emp)}
+                            className="inline-flex items-center gap-1 rounded-md border border-[#C89B3C]/60 bg-amber-50 hover:bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-[#0B1F3A] cursor-pointer whitespace-nowrap"
+                          >
+                            <Shield className="w-3 h-3 text-[#C89B3C]" />
+                            {emp.linkedUser ? 'تعديل الصلاحيات' : 'منح صلاحية التطبيق'}
+                          </button>
+                        </div>
+                      </td>
+                    )}
+                    {canWriteEmployees && (
+                      <td className="py-3.5 px-4">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => openEdit(emp)}
+                            className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                          >
+                            <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                            تعديل
+                          </button>
+                          <button
+                            onClick={() => handleArchiveEmployee(emp)}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                            title="نقل إلى الأرشفة"
+                          >
+                            <Archive className="w-3 h-3 text-amber-600" />
+                            أرشفة
+                          </button>
+                          <button
+                            onClick={() => setDeleteTarget(emp)}
+                            className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            حذف
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))
               )}
@@ -530,6 +639,22 @@ export const EmployeesModule: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      {/* Grant / Edit App Permissions Modal */}
+      {isSuperAdmin && (
+        <StaffAccessModal
+          open={accessModalOpen}
+          onClose={() => {
+            setAccessModalOpen(false);
+            setAccessTargetEmployee(null);
+            setAccessInitialUser(null);
+          }}
+          onSaved={loadAll}
+          roles={staffRoles}
+          schools={staffSchools}
+          lockedEmployee={accessTargetEmployee}
+          initialUser={accessInitialUser}
+        />
       )}
     </div>
   );

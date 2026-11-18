@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  BookOpen,
   ChevronLeft,
   ChevronRight,
   Pause,
@@ -14,84 +13,17 @@ import {
   speakArabicText,
   stopArabicSpeech,
 } from '../lib/background-notifications';
+import spiritualEntriesData from '../data/spiritualLibrary.json';
 
 interface SpiritualEntry {
+  id: number;
   verse: string;
   surah: string;
   hadith: string;
   hadithSource: string;
 }
 
-const MORNING_SPIRITUAL_ENTRIES: SpiritualEntry[] = [
-  {
-    verse: '﴿سُبْحَانَ الَّذِي سَخَّرَ لَنَا هَٰذَا وَمَا كُنَّا لَهُ مُقْرِنِينَ ۝ وَإِنَّا إِلَىٰ رَبِّنَا لَمُنقَلِبُونَ﴾',
-    surah: 'سورة الزخرف · الآية ١٣–١٤',
-    hadith: '«اللَّهُمَّ بَارِكْ لأُمَّتِي فِي بُكُورِهَا»',
-    hadithSource: 'حديث صحيح · رواه الترمذي وأبو داود',
-  },
-  {
-    verse: '﴿فَإِذَا عَزَمْتَ فَتَوَكَّلْ عَلَى اللَّهِ إِنَّ اللَّهَ يُحِبُّ الْمُتَوَكِّلِينَ﴾',
-    surah: 'سورة آل عمران · الآية ١٥٩',
-    hadith: '«مَنْ سَلَكَ طَرِيقًا يَلْتَمِسُ فِيهِ عِلْمًا سَهَّلَ اللَّهُ لَهُ بِهِ طَرِيقًا إِلَى الْجَنَّةِ»',
-    hadithSource: 'رواه مسلم',
-  },
-  {
-    verse: '﴿وَقُل رَّبِّ أَدْخِلْنِي مُدْخَلَ صِدْقٍ وَأَخْرِجْنِي مُخْرَجَ صِدْقٍ وَاجْعَل لِّي مِن لَّدُنكَ سُلْطَانًا نَّصِيرًا﴾',
-    surah: 'سورة الإسراء · الآية ٨٠',
-    hadith: '«مَا أَكَلَ أَحَدٌ طَعَامًا قَطُّ خَيْرًا مِنْ أَنْ يَأْكُلَ مِنْ عَمَلِ يَدِهِ»',
-    hadithSource: 'رواه البخاري',
-  },
-  {
-    verse: '﴿وَمَن يَتَّقِ اللَّهَ يَجْعَل لَّهُ مَخْرَجًا ۝ وَيَرْزُقْهُ مِنْ حَيْثُ لَا يَحْتَسِبُ﴾',
-    surah: 'سورة الطلاق · الآية ٢–٣',
-    hadith: '«إِنَّ اللَّهَ يُحِبُّ إِذَا عَمِلَ أَحَدُكُمْ عَمَلًا أَنْ يُتْقِنَهُ»',
-    hadithSource: 'حديث حسن · رواه البيهقي وأبو يعلى',
-  },
-  {
-    verse: '﴿إِنَّ خَيْرَ مَنِ اسْتَأْجَرْتَ الْقَوِيُّ الْأَمِينُ﴾',
-    surah: 'سورة القصص · الآية ٢٦',
-    hadith: '«كُلُّكُمْ رَاعٍ وَكُلُّكُمْ مَسْئُولٌ عَنْ رَعِيَّتِهِ»',
-    hadithSource: 'متفق عليه · رواه البخاري ومسلم',
-  },
-  {
-    verse: '﴿وَقُلِ اعْمَلُوا فَسَيَرَى اللَّهُ عَمَلَكُمْ وَرَسُولُهُ وَالْمُؤْمِنُونَ﴾',
-    surah: 'سورة التوبة · الآية ١٠٥',
-    hadith: '«إِنَّ الرِّفْقَ لَا يَكُونُ فِي شَيْءٍ إِلَّا زَانَهُ، وَلَا يُنْزَعُ مِنْ شَيْءٍ إِلَّا شَانَهُ»',
-    hadithSource: 'رواه مسلم',
-  },
-  {
-    verse: '﴿أَلَا بِذِكْرِ اللَّهِ تَطْمَئِنُّ الْقُلُوبُ﴾',
-    surah: 'سورة الرعد · الآية ٢٨',
-    hadith: '«مَن صَلَّى البَرْدَيْنِ دَخَلَ الجَنَّةَ»',
-    hadithSource: 'متفق عليه · رواه البخاري ومسلم',
-  },
-  {
-    verse: '﴿رَبَّنَا آتِنَا مِن لَّدُنكَ رَحْمَةً وَهَيِّئْ لَنَا مِنْ أَمْرِنَا رَشَدًا﴾',
-    surah: 'سورة الكهف · الآية ١٠',
-    hadith: '«خَيْرُ النَّاسِ أَنْفَعُهُمْ لِلنَّاسِ»',
-    hadithSource: 'حديث حسن · رواه الطبراني',
-  },
-  {
-    verse: '﴿وَاصْبِرْ فَإِنَّ اللَّهَ لَا يُضِيعُ أَجْرَ الْمُحْسِنِينَ﴾',
-    surah: 'سورة هود · الآية ١١٥',
-    hadith: '«احْفَظِ اللَّهَ يَحْفَظْكَ، احْفَظِ اللَّهَ تَجِدْهُ تُجَاهَكَ»',
-    hadithSource: 'حديث حسن صحيح · رواه الترمذي',
-  },
-  {
-    verse: '﴿فَاذْكُرُونِي أَذْكُرْكُمْ وَاشْكُرُوا لِي وَلَا تَكْفُرُونِ﴾',
-    surah: 'سورة البقرة · الآية ١٥٢',
-    hadith: '«التَّاجِرُ الصَّدُوقُ الأَمِينُ مَعَ النَّبِيِّينَ وَالصِّدِّيقِينَ وَالشُّهَدَاءِ»',
-    hadithSource: 'رواه الترمذي',
-  },
-];
-
-const MORNING_START_HOUR = 4; // 04:00 AM
-const MORNING_END_HOUR = 12; // 12:00 PM
-
-function isMorningHours(date: Date = new Date()): boolean {
-  const hour = date.getHours();
-  return hour >= MORNING_START_HOUR && hour < MORNING_END_HOUR;
-}
+const MORNING_SPIRITUAL_ENTRIES: SpiritualEntry[] = spiritualEntriesData;
 
 function getDayOfYear(date: Date = new Date()): number {
   const start = new Date(date.getFullYear(), 0, 0);
@@ -104,8 +36,6 @@ export const MorningSpiritualRibbon: React.FC<{
   className?: string;
 }> = ({ compact = false, className = '' }) => {
   const [nowDate, setNowDate] = useState<Date>(() => new Date());
-  const isMorning = isMorningHours(nowDate);
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const [autoCycle, setAutoCycle] = useState(true);
   const [speaking, setSpeaking] = useState(false);
 
@@ -115,7 +45,7 @@ export const MorningSpiritualRibbon: React.FC<{
   );
   const [offset, setOffset] = useState(0);
 
-  // Re-evaluate local time every minute so morning banner blooms open automatically at 04:00 AM
+  // Re-evaluate date daily
   useEffect(() => {
     const timer = window.setInterval(() => {
       setNowDate(new Date());
@@ -123,16 +53,14 @@ export const MorningSpiritualRibbon: React.FC<{
     return () => window.clearInterval(timer);
   }, []);
 
-  // Automatically cycle verses & hadiths smoothly when expanded
-  const isExpanded = manualOpen !== null ? manualOpen : isMorning;
-
+  // Automatically cycle verses & hadiths smoothly
   useEffect(() => {
-    if (!isExpanded || !autoCycle) return;
+    if (!autoCycle) return;
     const timer = window.setInterval(() => {
       setOffset((prev) => prev + 1);
     }, 45_000);
     return () => window.clearInterval(timer);
-  }, [isExpanded, autoCycle]);
+  }, [autoCycle]);
 
   useEffect(() => {
     return () => {
@@ -173,37 +101,11 @@ export const MorningSpiritualRibbon: React.FC<{
     setOffset((prev) => (prev + 1) % MORNING_SPIRITUAL_ENTRIES.length);
   };
 
-  if (!isExpanded) {
-    return (
-      <div
-        className={`flex items-center justify-between gap-3 rounded-xl border border-[#C89B3C]/30 bg-white/85 px-4 py-2.5 text-xs ${className}`}
-      >
-        <div className="flex items-center gap-2 min-w-0 text-slate-700">
-          <BookOpen className="w-4 h-4 text-[#C89B3C] shrink-0" />
-          <span className="font-semibold text-[#0B1F3A] truncate">
-            نفحات الصباح · آيات قرآنية وأحاديث نبوية
-          </span>
-          <span className="hidden sm:inline text-slate-400">·</span>
-          <span className="hidden sm:inline text-slate-500 truncate">
-            تظهر تلقائياً في ساعات الصباح (٤:٠٠ ص – ١٢:٠٠ م)
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={() => setManualOpen(true)}
-          className="text-xs font-bold text-[#0B1F3A] hover:text-[#C89B3C] whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          عرض الآن
-        </button>
-      </div>
-    );
-  }
-
   return (
     <section
       aria-label="آيات قرآنية وأحاديث نبوية صباحية"
-      className={`rounded-2xl border border-[#C89B3C]/35 bg-gradient-to-l from-[#fffdf7] via-white to-[#f8fafc] ${
-        compact ? 'p-4' : 'p-5'
+      className={`rounded-2xl border border-[#C89B3C]/35 bg-gradient-to-l from-[#fffdf7] via-white to-[#f8fafc] shadow-sm ${
+        compact ? 'p-3.5 sm:p-4' : 'p-4 sm:p-5'
       } transition-opacity duration-300 ${className}`}
     >
       {/* Clean Header Bar */}
@@ -211,13 +113,13 @@ export const MorningSpiritualRibbon: React.FC<{
         <div className="flex items-center gap-2 min-w-0">
           <Sun className="w-4 h-4 text-[#C89B3C] shrink-0" />
           <h2 className="font-display text-sm font-bold text-[#0B1F3A]">
-            {isMorning ? 'إشراقة الصباح · آية وحديث' : 'نفحات الذكر · آية وحديث'}
+            نفحات الصباح · آية وحديث متجدد
           </h2>
           <span className="text-slate-300 hidden sm:inline" aria-hidden="true">
             ·
           </span>
           <span className="text-[11px] text-slate-500 hidden sm:inline">
-            بداية مباركة ليوم العمل
+            مكتبة متجددة يومياً تبريكاً لبيئة العمل
           </span>
         </div>
 
@@ -269,17 +171,6 @@ export const MorningSpiritualRibbon: React.FC<{
             className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-600 hover:text-[#0B1F3A] cursor-pointer"
           >
             <ChevronLeft className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              stopArabicSpeech();
-              setSpeaking(false);
-              setManualOpen(false);
-            }}
-            className="px-2 py-1 text-[11px] font-semibold text-slate-500 hover:text-[#0B1F3A] cursor-pointer"
-          >
-            طيّ
           </button>
         </div>
       </div>

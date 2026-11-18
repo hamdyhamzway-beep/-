@@ -8,6 +8,10 @@ export interface DbUser {
   roleSlug: 'super_admin' | 'driver' | 'supervisor' | 'movement_manager' | 'accountant' | string;
   roleNameAr: string;
   permissions: string[];
+  customPermissions?: string[] | null;
+  assignedSchoolIds: number[];
+  staffCode?: string | null;
+  employeeId?: number | null;
   isActive: boolean;
 }
 
@@ -248,6 +252,19 @@ export interface NotificationItem {
   createdAt: string;
 }
 
+export interface EmployeeLinkedUserSummary {
+  id: number;
+  email: string;
+  roleId: number;
+  roleSlug: string;
+  roleNameAr: string;
+  staffCode: string;
+  assignedSchoolIds: number[];
+  customPermissions: string[] | null;
+  permissions: string[];
+  isActive: boolean;
+}
+
 export interface EmployeeRecord {
   id: number;
   employeeCode: string;
@@ -261,6 +278,7 @@ export interface EmployeeRecord {
   employmentStartDate: string;
   status: 'active' | 'inactive' | string;
   notes: string | null;
+  linkedUser?: EmployeeLinkedUserSummary | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -455,3 +473,39 @@ export interface FinanceGrandTotals {
   contractsProfitAfterDrivers: number;
   overallNetBalance: number;
 }
+
+export interface DailyReportAttachment {
+  id: string;
+  name: string;
+  url: string;
+  type: string;
+  category?: 'invoice' | 'maintenance' | 'fuel' | 'receipt' | 'other';
+  categoryLabel?: string;
+  sizeKb?: number;
+  createdAt?: string;
+}
+
+export interface DailyReportRecord {
+  id: number;
+  userId: number | null;
+  employeeId: number | null;
+  employeeName: string;
+  employeeRoleOrTitle: string;
+  reportDate: string; // YYYY-MM-DD
+  rawContent: string;
+  audioDataUrl?: string | null;
+  audioDurationSec?: number;
+  reportType: 'operations' | 'financial' | 'mixed' | 'urgent';
+  targetAudience: 'both' | 'accountant' | 'manager';
+  financialAmount: number;
+  extractedTasks: string[];
+  attachments?: DailyReportAttachment[];
+  category: string;
+  status: 'submitted' | 'reviewed_by_accountant' | 'reviewed_by_manager' | 'approved';
+  accountantNotes?: string;
+  managerNotes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+

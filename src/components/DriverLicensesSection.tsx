@@ -17,6 +17,7 @@ import type { DriverLicensePhoto } from '../types';
 interface DriverLicensesSectionProps {
   photos: DriverLicensePhoto[];
   viewerRole: 'admin' | 'driver';
+  readOnly?: boolean;
   /** Form-controlled update (for Add/Edit Driver modal) */
   onChange?: (nextPhotos: DriverLicensePhoto[]) => void;
   /** Immediate persistence callback (for standalone card in Driver App & Admin Driver Workspace) */
@@ -92,6 +93,7 @@ async function compressLicenseImage(file: File): Promise<string> {
 export const DriverLicensesSection: React.FC<DriverLicensesSectionProps> = ({
   photos,
   viewerRole,
+  readOnly = false,
   onChange,
   onSavePhotos,
   compact = false,
@@ -203,15 +205,17 @@ export const DriverLicensesSection: React.FC<DriverLicensesSectionProps> = ({
           </div>
         </div>
 
-        <button
-          type="button"
-          disabled={busy || photos.length >= 10}
-          onClick={() => setShowAddExtra((v) => !v)}
-          className="inline-flex items-center gap-1.5 rounded-xl border border-[#C89B3C]/60 bg-amber-50/70 hover:bg-amber-100/80 px-3 py-2 text-xs font-bold text-[#0B1F3A] disabled:opacity-50 cursor-pointer"
-        >
-          <Plus className="w-3.5 h-3.5 text-[#C89B3C]" />
-          إضافة صورة رخصة أخرى
-        </button>
+        {!readOnly && (
+          <button
+            type="button"
+            disabled={busy || photos.length >= 10}
+            onClick={() => setShowAddExtra((v) => !v)}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-[#C89B3C]/60 bg-amber-50/70 hover:bg-amber-100/80 px-3 py-2 text-xs font-bold text-[#0B1F3A] disabled:opacity-50 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5 text-[#C89B3C]" />
+            إضافة صورة رخصة أخرى
+          </button>
+        )}
       </div>
 
       {errorMsg && (
@@ -350,58 +354,64 @@ export const DriverLicensesSection: React.FC<DriverLicensesSectionProps> = ({
                       <Eye className="w-3.5 h-3.5 text-[#0B1F3A]" />
                       عرض
                     </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => triggerUpload(slot.id, slot.label, 'gallery')}
-                      className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-2.5 py-1.5 text-[11px] font-semibold text-white disabled:opacity-50 cursor-pointer"
-                    >
-                      <ImagePlus className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      تغيير
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => triggerUpload(slot.id, slot.label, 'camera')}
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 disabled:opacity-50 cursor-pointer"
-                    >
-                      <Camera className="w-3.5 h-3.5" />
-                      كاميرا
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => handleDeletePhoto(existing.id, existing.label)}
-                      className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 disabled:opacity-50 cursor-pointer mr-auto"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      حذف
-                    </button>
+                    {!readOnly && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => triggerUpload(slot.id, slot.label, 'gallery')}
+                          className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-2.5 py-1.5 text-[11px] font-semibold text-white disabled:opacity-50 cursor-pointer"
+                        >
+                          <ImagePlus className="w-3.5 h-3.5 text-[#C89B3C]" />
+                          تغيير
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => triggerUpload(slot.id, slot.label, 'camera')}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 disabled:opacity-50 cursor-pointer"
+                        >
+                          <Camera className="w-3.5 h-3.5" />
+                          كاميرا
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleDeletePhoto(existing.id, existing.label)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 disabled:opacity-50 cursor-pointer mr-auto"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          حذف
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               ) : (
                 <div className="rounded-xl border border-dashed border-slate-300 bg-white p-4 flex flex-col items-center justify-center gap-2.5 text-center min-h-[136px]">
                   <p className="text-[11px] text-slate-500">لم يتم رفع صورة بعد</p>
-                  <div className="flex flex-wrap items-center justify-center gap-2">
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => triggerUpload(slot.id, slot.label, 'gallery')}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-3 py-2 text-[11px] font-bold text-white disabled:opacity-50 cursor-pointer"
-                    >
-                      <ImagePlus className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      رفع من الجهاز
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => triggerUpload(slot.id, slot.label, 'camera')}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 px-3 py-2 text-[11px] font-semibold text-[#0B1F3A] disabled:opacity-50 cursor-pointer"
-                    >
-                      <Camera className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      تصوير
-                    </button>
-                  </div>
+                  {!readOnly && (
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => triggerUpload(slot.id, slot.label, 'gallery')}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-3 py-2 text-[11px] font-bold text-white disabled:opacity-50 cursor-pointer"
+                      >
+                        <ImagePlus className="w-3.5 h-3.5 text-[#C89B3C]" />
+                        رفع من الجهاز
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => triggerUpload(slot.id, slot.label, 'camera')}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 px-3 py-2 text-[11px] font-semibold text-[#0B1F3A] disabled:opacity-50 cursor-pointer"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-[#C89B3C]" />
+                        تصوير
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -453,24 +463,28 @@ export const DriverLicensesSection: React.FC<DriverLicensesSectionProps> = ({
                 <Eye className="w-3.5 h-3.5 text-[#0B1F3A]" />
                 عرض
               </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => triggerUpload(photo.id, photo.label, 'gallery')}
-                className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-2.5 py-1.5 text-[11px] font-semibold text-white disabled:opacity-50 cursor-pointer"
-              >
-                <ImagePlus className="w-3.5 h-3.5 text-[#C89B3C]" />
-                تغيير
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => handleDeletePhoto(photo.id, photo.label)}
-                className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 disabled:opacity-50 cursor-pointer mr-auto"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                حذف
-              </button>
+              {!readOnly && (
+                <>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => triggerUpload(photo.id, photo.label, 'gallery')}
+                    className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-2.5 py-1.5 text-[11px] font-semibold text-white disabled:opacity-50 cursor-pointer"
+                  >
+                    <ImagePlus className="w-3.5 h-3.5 text-[#C89B3C]" />
+                    تغيير
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => handleDeletePhoto(photo.id, photo.label)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 disabled:opacity-50 cursor-pointer mr-auto"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    حذف
+                  </button>
+                </>
+              )}
             </div>
           </div>
         ))}

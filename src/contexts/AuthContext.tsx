@@ -40,6 +40,7 @@ interface AuthContextValue {
   loginWithGoogle: () => Promise<void>;
   loginDriverWithPhoneCode: (identifier: string, driverCode: string) => Promise<void>;
   loginSupervisorWithPhoneCode: (identifier: string, supervisorCode: string) => Promise<void>;
+  loginStaffWithCode: (identifier: string, staffCode: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -354,6 +355,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const loginStaffWithCode = async (identifier: string, staffCode: string) => {
+    setAuthError(null);
+    manualLoginInProgressRef.current = true;
+    try {
+      const res = await fetch('/api/auth/staff-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier, staffCode }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = data.error || 'فشل تسجيل دخول الموظف';
+        setAuthError(msg);
+        throw new Error(msg);
+      }
+
+      setDriverSessionToken(data.token);
+      if (auth.currentUser) {
+        await signOut(auth).catch(() => undefined);
+      }
+      setFirebaseUser(null);
+      setIsCodeSession(true);
+      setDbUser(data.user);
+      setDriverRecord(null);
+      setSupervisorRecord(null);
+      setAuthError(null);
+      await saveCachedSession({
+        dbUser: data.user,
+        driverRecord: null,
+        supervisorRecord: null,
+      });
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'تعذر تسجيل الدخول ببيانات الموظف والكود';
+      setAuthError(msg);
+      throw err;
+    } finally {
+      manualLoginInProgressRef.current = false;
+    }
+  };
+
   const logout = async () => {
     await clearSessionState();
     if (auth.currentUser) {
@@ -378,6 +420,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loginWithGoogle,
         loginDriverWithPhoneCode,
         loginSupervisorWithPhoneCode,
+        loginStaffWithCode,
         logout,
         refreshProfile: async () => {
           await fetchDbProfile(Boolean(getDriverSessionToken()));

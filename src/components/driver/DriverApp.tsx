@@ -9,6 +9,7 @@ import {
   CheckCheck,
   Clock,
   Compass,
+  FileText,
   Gauge,
   Home,
   LogOut,
@@ -27,6 +28,7 @@ import {
   Wallet,
   Wifi,
   WifiOff,
+  Wrench,
   X,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
@@ -77,6 +79,9 @@ import { CompanyLegalFooter } from '../CompanyLegalFooter';
 import { DriverAvatar } from '../DriverAvatar';
 import { DriverLicensesSection } from '../DriverLicensesSection';
 import { MorningSpiritualRibbon } from '../MorningSpiritualRibbon';
+import { SpeedometerGauge } from './SpeedometerGauge';
+import { DriverMaintenanceVoiceModule } from './DriverMaintenanceVoiceModule';
+import { EmployeeDailyReportModal } from '../employee/EmployeeDailyReportModal';
 import { PWAInstallButton } from '../PWAInstall';
 import { SplashScreen } from '../SplashScreen';
 import splashScreenImg from '../../assets/images/alwaleed_splash_screen_1794752422708.jpg';
@@ -114,7 +119,7 @@ interface DriverAppResponse {
   };
 }
 
-type DriverTab = 'home' | 'finance' | 'chat' | 'location' | 'notifications';
+type DriverTab = 'home' | 'finance' | 'chat' | 'location' | 'notifications' | 'maintenance';
 
 const ARABIC_MONTHS = [
   'يناير',
@@ -1683,6 +1688,11 @@ export const DriverApp: React.FC<{
               </div>
             )}
 
+            {/* TAB: MAINTENANCE & VOICE ASSISTANT */}
+            {activeTab === 'maintenance' && (
+              <DriverMaintenanceVoiceModule busNumber={driver.busNumber} schoolName={driver.schoolName} />
+            )}
+
             {/* TAB 3: LOCATION, HIGH-PRECISION SPEED & SCHEDULE */}
             {activeTab === 'location' && (
               <div className="space-y-4">
@@ -1715,34 +1725,25 @@ export const DriverApp: React.FC<{
                     </span>
                   </div>
 
-                  {/* High-Precision Speedometer & Accuracy Readout */}
-                  <div className="rounded-2xl bg-[#0B1F3A] text-white p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 rounded-xl bg-white/10 text-[#C89B3C] flex items-center justify-center shrink-0">
-                        <Gauge className="w-6 h-6" />
-                      </div>
-                      <div>
-                        <p className="text-xs text-slate-300">السرعة اللحظية عالية الدقة</p>
-                        <div className="flex items-baseline gap-2 mt-0.5">
-                          <span className="text-3xl font-bold font-mono text-[#C89B3C] tabular-nums">
-                            {Math.round(displayedSpeed)}
-                          </span>
-                          <span className="text-xs text-slate-300">كم / ساعة</span>
-                        </div>
-                      </div>
+                  {/* Visual Speedometer Gauge */}
+                  <SpeedometerGauge currentSpeed={displayedSpeed} speedLimit={80} maxSpeed={Math.round(displayedSpeed)} />
+
+                  {/* GPS Accuracy & Network Status Readout */}
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs tabular-nums text-slate-700">
+                    <div className="flex items-center gap-2">
+                      {isOnline ? (
+                        <Wifi className="w-4 h-4 text-emerald-600" />
+                      ) : (
+                        <WifiOff className="w-4 h-4 text-amber-600" />
+                      )}
+                      <span className="font-semibold">
+                        {isOnline ? 'إنترنت نشط (بث فوري عبر الشبكة)' : 'تخزين محلي مؤقت لحين عودة الشبكة'}
+                      </span>
                     </div>
 
-                    <div className="text-xs space-y-1 border-t sm:border-t-0 sm:border-r border-white/15 pt-3 sm:pt-0 sm:pr-4 tabular-nums">
-                      <div className="flex items-center gap-2 text-slate-200">
-                        {isOnline ? (
-                          <Wifi className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : (
-                          <WifiOff className="w-3.5 h-3.5 text-amber-400" />
-                        )}
-                        <span>{isOnline ? 'إنترنت نشط (بث فوري)' : 'تخزين محلي لحين عودة الشبكة'}</span>
-                      </div>
-                      <div className="text-slate-300">
-                        دقة GPS:{' '}
+                    <div className="flex flex-wrap items-center gap-3 text-slate-500">
+                      <span>
+                        دقة التحديد:{' '}
                         {liveAccuracyM !== null
                           ? `±${liveAccuracyM} متر`
                           : latestGps?.accuracyMeters
@@ -1753,8 +1754,8 @@ export const DriverApp: React.FC<{
                           : speedSource === 'haversine'
                           ? ' · حساب المسافة/الزمن'
                           : ''}
-                      </div>
-                      <div className="text-[#ebd089]">{scheduleStatus.statusLabelAr}</div>
+                      </span>
+                      <span className="text-[#C89B3C] font-semibold">· {scheduleStatus.statusLabelAr}</span>
                     </div>
                   </div>
 
@@ -2096,7 +2097,7 @@ export const DriverApp: React.FC<{
 
       {/* Bottom Thumb-Zone Navigation Bar */}
       <nav className="fixed bottom-0 inset-x-0 z-30 h-16 bg-white border-t border-slate-200">
-        <div className="max-w-3xl mx-auto h-full grid grid-cols-5">
+        <div className="max-w-3xl mx-auto h-full grid grid-cols-6">
           <button
             onClick={() => navigateTab('home')}
             className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
@@ -2135,6 +2136,16 @@ export const DriverApp: React.FC<{
           >
             <MapPin className={`w-5 h-5 ${activeTab === 'location' ? 'text-[#C89B3C]' : ''}`} />
             <span>الموقع</span>
+          </button>
+
+          <button
+            onClick={() => navigateTab('maintenance')}
+            className={`min-h-[44px] flex flex-col items-center justify-center gap-1 text-xs font-semibold transition-colors cursor-pointer ${
+              activeTab === 'maintenance' ? 'text-[#0B1F3A]' : 'text-slate-400 hover:text-slate-600'
+            }`}
+          >
+            <Wrench className={`w-5 h-5 ${activeTab === 'maintenance' ? 'text-[#C89B3C]' : ''}`} />
+            <span>الصيانة</span>
           </button>
 
           <button

@@ -10,6 +10,7 @@ import {
   attendance,
   auditLogs,
   coverageRecords,
+  dailyReports,
   driverAssignments,
   drivers,
   employees,
@@ -31,9 +32,12 @@ import {
 } from './src/db/schema.ts';
 import {
   type AuthRequest,
+  buildEffectivePermissions,
   ensureRolesExist,
   ensureSeedOwnerUserId,
   hasPermission,
+  isSchoolAllowed,
+  isSchoolUnrestricted,
   requireAdminOrStaff,
   requireAnyPermission,
   requireAuth,
@@ -41,12 +45,17 @@ import {
 } from './src/middleware/auth.ts';
 import {
   issueDriverSessionToken,
+  issueStaffSessionToken,
   issueSupervisorSessionToken,
   normalizeArabicDigits,
   normalizeArabicName,
   normalizeDriverCode,
   normalizeEgyptPhone,
 } from './src/lib/driver-session.ts';
+import {
+  normalizePermissionsList,
+  normalizeSchoolIds,
+} from './src/lib/permissions.ts';
 import { ensureRlsPoliciesApplied } from './src/db/apply-rls-policies.ts';
 import { runWithRlsContext } from './src/db/rls-context.ts';
 import {
@@ -768,6 +777,152 @@ async function startServer() {
     }
   });
 
+  // 0c. Staff Code Login (المحاسب / مشرف الحركة / الموظف المصرح له بالكود)
+  app.post('/api/auth/staff-login', async (req, res) => {
+    const clientIp = req.ip || 'unknown';
+    const rateKey = `stf:${clientIp}`;
+    const nowMs = Date.now();
+    const attempt = codeLoginAttempts[rateKey];
+    if (attempt && attempt.resetAt > nowMs && attempt.count >= 15) {
+      return res.status(429).json({
+        error: 'تم تجاوز الحد المسموح لمحاولات الدخول. يرجى المحاولة بعد 10 دقائق.',
+      });
+    }
+
+    const recordFailedAttempt = () => {
+      pruneExpiredLoginAttempts(nowMs);
+      const cur = codeLoginAttempts[rateKey];
+      if (!cur || cur.resetAt <= nowMs) {
+        codeLoginAttempts[rateKey] = { count: 1, resetAt: nowMs + 10 * 60 * 1000 };
+      } else {
+        cur.count += 1;
+      }
+    };
+
+    try {
+      const rawIdentifier = String(
+        req.body?.identifier ?? req.body?.phone ?? req.body?.name ?? req.body?.email ?? ''
+      ).trim();
+      const normCode = normalizeDriverCode(req.body?.staffCode ?? req.body?.code);
+      const normPhone = normalizeEgyptPhone(rawIdentifier);
+      const rawPhoneDigits = normalizeArabicDigits(rawIdentifier).replace(/\D/g, '');
+      const normInputName = normalizeArabicName(rawIdentifier);
+      const normInputEmail = rawIdentifier.toLowerCase();
+
+      if (!normCode || !rawIdentifier) {
+        return res.status(400).json({
+          error: 'يرجى إدخال الاسم أو رقم الموبايل أو البريد الإلكتروني مع كود الموظف',
+        });
+      }
+
+      const result = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        await ensureRolesExist();
+        const allUsers = await db.select().from(users);
+        const allRoles = await db.select().from(userRoles);
+        const roleById: Record<number, typeof userRoles.$inferSelect> = {};
+        for (const r of allRoles) roleById[r.id] = r;
+
+        const staffUser = allUsers.find((u) => {
+          const role = roleById[u.roleId];
+          if (!role || role.slug === 'driver' || role.slug === 'supervisor') return false;
+          const storedCode = normalizeDriverCode(u.staffCode || '').toLowerCase();
+          if (!storedCode || storedCode !== normCode.toLowerCase()) return false;
+
+          const storedPhoneNorm = normalizeEgyptPhone(u.phone || '');
+          const storedPhoneDigits = normalizeArabicDigits(u.phone || '').replace(/\D/g, '');
+          const phoneMatches =
+            (Boolean(normPhone) && storedPhoneNorm === normPhone) ||
+            (rawPhoneDigits.length >= 8 &&
+              (storedPhoneDigits === rawPhoneDigits ||
+                storedPhoneDigits.endsWith(rawPhoneDigits) ||
+                rawPhoneDigits.endsWith(storedPhoneDigits)));
+
+          const emailMatches =
+            normInputEmail.includes('@') && u.email.toLowerCase() === normInputEmail;
+          const normStoredName = normalizeArabicName(u.fullName);
+          const nameMatches =
+            normInputName.length >= 2 &&
+            (normStoredName === normInputName || normStoredName.includes(normInputName));
+
+          return phoneMatches || emailMatches || nameMatches;
+        });
+
+        if (!staffUser) {
+          return {
+            status: 401 as const,
+            error: 'بيانات الموظف أو كود الدخول غير صحيح، يرجى التأكد من المدير العام',
+          };
+        }
+
+        if (!staffUser.isActive) {
+          return {
+            status: 403 as const,
+            error: 'تم إيقاف صلاحية هذا الحساب من قبل المدير العام',
+          };
+        }
+
+        const role = roleById[staffUser.roleId];
+        const effectivePermissions = buildEffectivePermissions(
+          role.slug,
+          role.permissions,
+          staffUser.customPermissions
+        );
+        const assignedSchoolIds =
+          role.slug === 'super_admin' ? [] : normalizeSchoolIds(staffUser.assignedSchoolIds);
+
+        const token = issueStaffSessionToken({
+          userId: staffUser.id,
+          staffCode: staffUser.staffCode || normCode,
+        });
+
+        await db.insert(auditLogs).values({
+          actorUserId: staffUser.id,
+          action: 'STAFF_CODE_LOGIN',
+          entityType: 'users',
+          entityId: String(staffUser.id),
+          afterJson: { staffCode: staffUser.staffCode, roleSlug: role.slug },
+          ipAddress: clientIp,
+        });
+
+        return {
+          status: 200 as const,
+          payload: {
+            token,
+            user: {
+              id: staffUser.id,
+              uid: staffUser.uid,
+              email: staffUser.email,
+              fullName: staffUser.fullName,
+              phone: staffUser.phone,
+              roleId: staffUser.roleId,
+              roleSlug: role.slug,
+              roleNameAr: role.nameAr,
+              permissions: effectivePermissions,
+              customPermissions: Array.isArray(staffUser.customPermissions)
+                ? staffUser.customPermissions
+                : null,
+              assignedSchoolIds,
+              staffCode: staffUser.staffCode || null,
+              employeeId: staffUser.employeeId ?? null,
+              isActive: staffUser.isActive,
+            },
+          },
+        };
+      });
+
+      if (result.status !== 200) {
+        if (result.status === 401) recordFailedAttempt();
+        return res.status(result.status).json({ error: result.error });
+      }
+
+      delete codeLoginAttempts[rateKey];
+      return res.json(result.payload);
+    } catch (error) {
+      console.error('Staff login error:', error);
+      return res.status(500).json({ error: 'تعذر تسجيل دخول الموظف، يرجى المحاولة لاحقاً' });
+    }
+  });
+
   // 1. Current Authenticated User & Bootstrap
   app.get('/api/me', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -822,8 +977,14 @@ async function startServer() {
           db.select().from(employees).orderBy(employees.fullName),
         ]);
 
-      let enrichedDrivers = allEnrichedDrivers.filter((d) => d.accountStatus === 'active');
-      let fleet = rawFleet.filter((v) => v.operationalStatus !== 'inactive');
+      const unrestrictedSchools = isSchoolUnrestricted(req.dbUser);
+      let enrichedDrivers = allEnrichedDrivers.filter(
+        (d) => d.accountStatus === 'active' && isSchoolAllowed(req.dbUser, d.schoolId)
+      );
+      let fleet = rawFleet.filter(
+        (v) => v.operationalStatus !== 'inactive' && isSchoolAllowed(req.dbUser, v.schoolId)
+      );
+      const scopedSchools = allSchools.filter((s) => isSchoolAllowed(req.dbUser, s.id));
 
       const attByDriver: Record<number, typeof attendance.$inferSelect> = {};
       for (const a of todayAttendance) attByDriver[a.driverId] = a;
@@ -924,14 +1085,19 @@ async function startServer() {
         }
       }
 
-      const activeEmployees = rawEmployees.filter((e) => e.status === 'active');
+      const canReadEmployees =
+        unrestrictedSchools &&
+        (req.dbUser?.roleSlug === 'super_admin' || hasPermission(req.dbUser, 'employees:read'));
+      const activeEmployees = canReadEmployees
+        ? rawEmployees.filter((e) => e.status === 'active')
+        : [];
 
       // School contract revenue vs total payroll (drivers + non-driver employees)
       const relevantSchools = schoolFilter
-        ? allSchools.filter((s) => s.id === schoolFilter && s.isActive)
+        ? scopedSchools.filter((s) => s.id === schoolFilter && s.isActive)
         : schoolQuery
-        ? allSchools.filter((s) => s.isActive && s.name.toLowerCase().includes(schoolQuery))
-        : allSchools.filter((s) => s.isActive);
+        ? scopedSchools.filter((s) => s.isActive && s.name.toLowerCase().includes(schoolQuery))
+        : scopedSchools.filter((s) => s.isActive);
       const totalSchoolContracts = relevantSchools.reduce(
         (sum, s) => sum + Number(s.monthlyContractValue || 0),
         0
@@ -1064,7 +1230,7 @@ async function startServer() {
           };
         }),
         fleet,
-        schools: allSchools,
+        schools: scopedSchools,
         recentNotifications,
       });
     } catch (error) {
@@ -1073,11 +1239,22 @@ async function startServer() {
     }
   });
 
+  async function getDriverCurrentSchoolId(driverId: number): Promise<number | null> {
+    const [assign] = await db
+      .select({ schoolId: driverAssignments.schoolId })
+      .from(driverAssignments)
+      .where(and(eq(driverAssignments.driverId, driverId), eq(driverAssignments.isCurrent, true)))
+      .limit(1);
+    return assign?.schoolId ?? null;
+  }
+
   // 3. Drivers Management (Active by default — archived drivers live in /api/archive)
   app.get('/api/drivers', requireAuth, requireAdminOrStaff, requirePermission('drivers:read'), async (req: AuthRequest, res) => {
     try {
       const includeArchived = req.query.includeArchived === 'true';
-      const all = await getEnrichedDrivers();
+      const all = (await getEnrichedDrivers()).filter((d) =>
+        isSchoolAllowed(req.dbUser, d.schoolId)
+      );
       const list = includeArchived ? all : all.filter((d) => d.accountStatus === 'active');
       res.json({ drivers: list });
     } catch (error) {
@@ -1325,6 +1502,23 @@ async function startServer() {
         const normalizedCode = normalizeDriverCode(driverCode);
         const normalizedPhone = normalizeEgyptPhone(phone) || String(phone).trim();
 
+        if (!isSchoolUnrestricted(req.dbUser)) {
+          let targetSchoolId: number | null = schoolId ? Number(schoolId) : null;
+          if (!targetSchoolId && schoolName && !PLACEHOLDER_ASSIGNMENTS.has(String(schoolName).trim())) {
+            const [sRow] = await db
+              .select({ id: schools.id })
+              .from(schools)
+              .where(eq(schools.name, String(schoolName).trim()))
+              .limit(1);
+            targetSchoolId = sRow?.id ?? null;
+          }
+          if (!targetSchoolId || !isSchoolAllowed(req.dbUser, targetSchoolId)) {
+            return res.status(403).json({
+              error: 'لا يمكنك إضافة سائق خارج المدارس المعينة لك',
+            });
+          }
+        }
+
         const existingCode = await db
           .select({ id: drivers.id })
           .from(drivers)
@@ -1402,6 +1596,13 @@ async function startServer() {
       const driverId = Number(req.params.id);
       const [existing] = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
       if (!existing) return res.status(404).json({ error: 'السائق غير موجود' });
+
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const currentSchoolId = await getDriverCurrentSchoolId(driverId);
+        if (!isSchoolAllowed(req.dbUser, currentSchoolId)) {
+          return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
+        }
+      }
 
       const {
         driverCode,
@@ -1570,6 +1771,13 @@ async function startServer() {
           return res.status(404).json({ error: 'السائق غير موجود' });
         }
 
+        if (!isSchoolUnrestricted(req.dbUser)) {
+          const currentSchoolId = await getDriverCurrentSchoolId(driverId);
+          if (!isSchoolAllowed(req.dbUser, currentSchoolId)) {
+            return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
+
         const [ftRef, advRef, covRef] = await Promise.all([
           db
             .select({ id: financialTransactions.id })
@@ -1634,12 +1842,16 @@ async function startServer() {
   app.get('/api/drivers/:id/statement', requireAuth, async (req: AuthRequest, res) => {
     try {
       const driverId = Number(req.params.id);
-      // Security: a driver can ONLY read their own statement; staff must hold finance:read
+      // Security: a driver can ONLY read their own statement; staff must hold finance:read or advances/coverage write
       if (req.dbUser?.roleSlug === 'driver') {
         if (req.driverRecord?.id !== driverId) {
           return res.status(403).json({ error: 'غير مصرح لك بعرض كشف حساب سائق آخر' });
         }
-      } else if (!hasPermission(req.dbUser, 'finance:read')) {
+      } else if (
+        !hasPermission(req.dbUser, 'finance:read') &&
+        !hasPermission(req.dbUser, 'advances:write') &&
+        !hasPermission(req.dbUser, 'coverage:write')
+      ) {
         return res.status(403).json({ error: 'ليس لديك صلاحية الاطلاع على الكشوف المالية' });
       }
 
@@ -1650,6 +1862,10 @@ async function startServer() {
       const allDrivers = await getEnrichedDrivers();
       const driver = allDrivers.find((d) => d.id === driverId);
       if (!driver) return res.status(404).json({ error: 'السائق غير موجود' });
+
+      if (req.dbUser?.roleSlug !== 'driver' && !isSchoolAllowed(req.dbUser, driver.schoolId)) {
+        return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
+      }
 
       const salary = await getOrRecalculateDriverSalaryForRead(db, driverId, month, year);
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
@@ -1726,10 +1942,10 @@ async function startServer() {
   });
 
   // 4. Schools, Vehicle Owners, Vehicles & Routes
-  app.get('/api/schools', requireAuth, requireAdminOrStaff, requirePermission('schools:read'), async (_req: AuthRequest, res) => {
+  app.get('/api/schools', requireAuth, requireAdminOrStaff, requirePermission('schools:read'), async (req: AuthRequest, res) => {
     try {
       const activePeriod = await getActiveBillingPeriod();
-      const [allSchools, allRoutes, enrichedDrivers, fleet, periodSalaries] = await Promise.all([
+      const [rawAllSchools, rawAllRoutes, enrichedDrivers, fleet, periodSalaries] = await Promise.all([
         db.select().from(schools).orderBy(schools.name),
         db.select().from(routes).orderBy(routes.name),
         getEnrichedDrivers(),
@@ -1739,6 +1955,9 @@ async function startServer() {
           .from(salaries)
           .where(and(eq(salaries.month, activePeriod.month), eq(salaries.year, activePeriod.year))),
       ]);
+
+      const allSchools = rawAllSchools.filter((s) => isSchoolAllowed(req.dbUser, s.id));
+      const allRoutes = rawAllRoutes.filter((r) => isSchoolAllowed(req.dbUser, r.schoolId));
 
       const salaryByDriver: Record<number, typeof salaries.$inferSelect> = {};
       for (const sal of periodSalaries) {
@@ -1809,6 +2028,9 @@ async function startServer() {
 
   app.post('/api/schools', requireAuth, requireAdminOrStaff, requirePermission('schools:write'), async (req: AuthRequest, res) => {
     try {
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        return res.status(403).json({ error: 'إضافة مدارس جديدة متاح لصلاحية جميع المدارس فقط' });
+      }
       const {
         name,
         contactName,
@@ -1897,6 +2119,9 @@ async function startServer() {
   app.patch('/api/schools/:id', requireAuth, requireAdminOrStaff, requirePermission('schools:write'), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
+      if (!isSchoolAllowed(req.dbUser, id)) {
+        return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+      }
       const [existing] = await db.select().from(schools).where(eq(schools.id, id)).limit(1);
       if (!existing) return res.status(404).json({ error: 'المدرسة غير موجودة' });
 
@@ -2058,9 +2283,11 @@ async function startServer() {
     }
   });
 
-  app.get('/api/vehicles', requireAuth, requireAdminOrStaff, requirePermission('vehicles:read'), async (_req: AuthRequest, res) => {
+  app.get('/api/vehicles', requireAuth, requireAdminOrStaff, requirePermission('vehicles:read'), async (req: AuthRequest, res) => {
     try {
-      const fleet = await getFleetWithLatestGps();
+      const fleet = (await getFleetWithLatestGps()).filter((v) =>
+        isSchoolAllowed(req.dbUser, v.schoolId)
+      );
       const owners = await db.select().from(vehicleOwners).orderBy(vehicleOwners.fullName);
       res.json({ vehicles: fleet, owners });
     } catch (error) {
@@ -2125,6 +2352,17 @@ async function startServer() {
       const [existing] = await db.select().from(vehicles).where(eq(vehicles.id, id)).limit(1);
       if (!existing) return res.status(404).json({ error: 'المركبة غير موجودة' });
 
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [assign] = await db
+          .select({ schoolId: driverAssignments.schoolId })
+          .from(driverAssignments)
+          .where(and(eq(driverAssignments.vehicleId, id), eq(driverAssignments.isCurrent, true)))
+          .limit(1);
+        if (!assign || !isSchoolAllowed(req.dbUser, assign.schoolId)) {
+          return res.status(403).json({ error: 'هذه المركبة خارج نطاق المدارس المصرح لك بها' });
+        }
+      }
+
       const {
         busNumber,
         registrationNumber,
@@ -2174,6 +2412,20 @@ async function startServer() {
       if (!name) {
         return res.status(400).json({ error: 'اسم الخط مطلوب' });
       }
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        let targetSchoolId: number | null = schoolId ? Number(schoolId) : null;
+        if (!targetSchoolId && schoolName) {
+          const [sRow] = await db
+            .select({ id: schools.id })
+            .from(schools)
+            .where(eq(schools.name, String(schoolName).trim()))
+            .limit(1);
+          targetSchoolId = sRow?.id ?? null;
+        }
+        if (!targetSchoolId || !isSchoolAllowed(req.dbUser, targetSchoolId)) {
+          return res.status(403).json({ error: 'لا يمكنك إضافة خط سير خارج المدارس المعينة لك' });
+        }
+      }
       const route = await db.transaction(async (tx) => {
         const resolvedSchoolId = await resolveSchoolIdForDriver(tx, { schoolId, schoolName });
         const [r] = await tx
@@ -2202,6 +2454,9 @@ async function startServer() {
       const id = Number(req.params.id);
       const [existing] = await db.select().from(routes).where(eq(routes.id, id)).limit(1);
       if (!existing) return res.status(404).json({ error: 'خط السير غير موجود' });
+      if (!isSchoolAllowed(req.dbUser, existing.schoolId)) {
+        return res.status(403).json({ error: 'خط السير خارج نطاق المدارس المصرح لك بها' });
+      }
 
       const { name, schoolId, schoolName, pickupArea, dropoffArea, pickupTime, dropoffTime, estimatedDistanceKm } =
         req.body;
@@ -2242,6 +2497,9 @@ async function startServer() {
       const id = Number(req.params.id);
       const [existing] = await db.select().from(routes).where(eq(routes.id, id)).limit(1);
       if (!existing) return res.status(404).json({ error: 'خط السير غير موجود' });
+      if (!isSchoolAllowed(req.dbUser, existing.schoolId)) {
+        return res.status(403).json({ error: 'خط السير خارج نطاق المدارس المصرح لك بها' });
+      }
 
       await db.transaction(async (tx) => {
         await tx.update(driverAssignments).set({ routeId: null }).where(eq(driverAssignments.routeId, id));
@@ -2256,90 +2514,131 @@ async function startServer() {
   });
 
   // 5. Financial Management (Advances, Coverages, Adjustments, Reversals, Statements)
-  app.get('/api/finance/overview', requireAuth, requireAdminOrStaff, requirePermission('finance:read'), async (req: AuthRequest, res) => {
-    try {
-      const activePeriod = await getActiveBillingPeriod();
-      const month = Number(req.query.month) || activePeriod.month;
-      const year = Number(req.query.year) || activePeriod.year;
-      const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
+  app.get(
+    '/api/finance/overview',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'advances:write', 'coverage:write', 'finance:write']),
+    async (req: AuthRequest, res) => {
+      try {
+        const activePeriod = await getActiveBillingPeriod();
+        const month = Number(req.query.month) || activePeriod.month;
+        const year = Number(req.query.year) || activePeriod.year;
+        const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
+        const unrestricted = isSchoolUnrestricted(req.dbUser);
 
-      const closingsHistory = await getMonthlyClosingsHistory();
-      const currentClosing =
-        closingsHistory.find((c) => c.month === month && c.year === year) || null;
+        const closingsHistory = await getMonthlyClosingsHistory();
+        const currentClosing =
+          closingsHistory.find((c) => c.month === month && c.year === year) || null;
 
-      const allDrivers = await getEnrichedDrivers();
-      const activeDrivers = allDrivers.filter((d) => d.accountStatus === 'active');
-      const activeDriverIds = new Set(activeDrivers.map((d) => d.id));
+        const allDrivers = await getEnrichedDrivers();
+        const scopedDrivers = allDrivers.filter((d) => isSchoolAllowed(req.dbUser, d.schoolId));
+        const activeDrivers = scopedDrivers.filter((d) => d.accountStatus === 'active');
+        const activeDriverIds = new Set(activeDrivers.map((d) => d.id));
+        const scopedDriverIds = new Set(scopedDrivers.map((d) => d.id));
 
-      if (!currentClosing) {
-        for (const d of activeDrivers) {
-          await recalculateDriverSalary(db, d.id, month, year);
+        if (!currentClosing) {
+          for (const d of activeDrivers) {
+            await recalculateDriverSalary(db, d.id, month, year);
+          }
         }
-      }
 
-      const [rawMonthSalaries, monthAdvances, monthCoverages, monthLedger, allSchools, allEmployees, allVehicles] = await Promise.all([
-        db
-          .select()
-          .from(salaries)
-          .where(and(eq(salaries.month, month), eq(salaries.year, year))),
-        db
-          .select()
-          .from(advances)
-          .where(sql`${advances.date} LIKE ${monthPrefix + '%'}`)
-          .orderBy(desc(advances.date), desc(advances.id)),
-        db
-          .select()
-          .from(coverageRecords)
-          .where(sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`)
-          .orderBy(desc(coverageRecords.date), desc(coverageRecords.id)),
-        db
-          .select()
-          .from(financialTransactions)
-          .where(and(eq(financialTransactions.month, month), eq(financialTransactions.year, year)))
-          .orderBy(desc(financialTransactions.createdAt)),
-        db.select().from(schools).orderBy(schools.name),
-        db.select().from(employees),
-        db.select().from(vehicles),
-      ]);
+        const [
+          rawMonthSalaries,
+          rawMonthAdvances,
+          rawMonthCoverages,
+          rawMonthLedger,
+          rawAllSchools,
+          rawAllEmployees,
+          rawAllVehicles,
+        ] = await Promise.all([
+          db
+            .select()
+            .from(salaries)
+            .where(and(eq(salaries.month, month), eq(salaries.year, year))),
+          db
+            .select()
+            .from(advances)
+            .where(sql`${advances.date} LIKE ${monthPrefix + '%'}`)
+            .orderBy(desc(advances.date), desc(advances.id)),
+          db
+            .select()
+            .from(coverageRecords)
+            .where(sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`)
+            .orderBy(desc(coverageRecords.date), desc(coverageRecords.id)),
+          db
+            .select()
+            .from(financialTransactions)
+            .where(and(eq(financialTransactions.month, month), eq(financialTransactions.year, year)))
+            .orderBy(desc(financialTransactions.createdAt)),
+          db.select().from(schools).orderBy(schools.name),
+          db.select().from(employees),
+          db.select().from(vehicles),
+        ]);
 
-      // If the month is already closed, keep ALL recorded salaries for that ended month intact;
-      // otherwise show active drivers for the open month.
-      const monthSalaries = currentClosing
-        ? rawMonthSalaries
-        : rawMonthSalaries.filter((s) => activeDriverIds.has(s.driverId));
+        const allSchools = rawAllSchools.filter((s) => isSchoolAllowed(req.dbUser, s.id));
+        const monthAdvances = unrestricted
+          ? rawMonthAdvances
+          : rawMonthAdvances.filter((a) => scopedDriverIds.has(a.driverId));
+        const monthCoverages = unrestricted
+          ? rawMonthCoverages
+          : rawMonthCoverages.filter(
+              (c) =>
+                scopedDriverIds.has(c.absentDriverId) ||
+                (c.schoolId != null && isSchoolAllowed(req.dbUser, c.schoolId))
+            );
+        const monthLedger = unrestricted
+          ? rawMonthLedger
+          : rawMonthLedger.filter((t) => scopedDriverIds.has(t.driverId));
+        const allEmployees = unrestricted ? rawAllEmployees : [];
 
-      const driverMap: Record<number, (typeof allDrivers)[number]> = {};
-      for (const d of allDrivers) driverMap[d.id] = d;
+        const fleetForScope = await getFleetWithLatestGps();
+        const scopedVehicleIds = new Set(
+          fleetForScope.filter((v) => isSchoolAllowed(req.dbUser, v.schoolId)).map((v) => v.id)
+        );
+        const allVehicles = unrestricted
+          ? rawAllVehicles
+          : rawAllVehicles.filter((v) => scopedVehicleIds.has(v.id));
 
-      const enrichedSalaries = monthSalaries.map((s) => {
-        const drv = driverMap[s.driverId];
-        return {
-          ...s,
-          baseSalary: Number(s.baseSalary),
-          totalAdvances: Number(s.totalAdvances),
-          totalCoverageDeductions: Number(s.totalCoverageDeductions),
-          otherDeductions: Number(s.otherDeductions),
-          bonuses: Number(s.bonuses),
-          netSalary: Number(s.netSalary),
-          driverName: drv?.fullName || '—',
-          driverCode: drv?.driverCode || '—',
-          schoolId: drv?.schoolId ?? null,
-          schoolName: drv?.schoolName || 'غير معين',
-          busNumber: drv?.busNumber || '—',
-          routeName: drv?.routeName || '—',
-        };
-      });
+        // If the month is already closed, keep ALL recorded salaries for that ended month intact;
+        // otherwise show active drivers for the open month.
+        const monthSalaries = (currentClosing
+          ? rawMonthSalaries
+          : rawMonthSalaries.filter((s) => activeDriverIds.has(s.driverId))
+        ).filter((s) => unrestricted || scopedDriverIds.has(s.driverId));
 
-      const schoolById: Record<number, (typeof allSchools)[number]> = {};
-      for (const sc of allSchools) schoolById[sc.id] = sc;
+        const driverMap: Record<number, (typeof allDrivers)[number]> = {};
+        for (const d of allDrivers) driverMap[d.id] = d;
 
-      const salariesBySchoolKey = new Map<string, typeof enrichedSalaries>();
-      for (const sal of enrichedSalaries) {
-        const key = sal.schoolId ? String(sal.schoolId) : 'unassigned';
-        const list = salariesBySchoolKey.get(key) || [];
-        list.push(sal);
-        salariesBySchoolKey.set(key, list);
-      }
+        const enrichedSalaries = monthSalaries.map((s) => {
+          const drv = driverMap[s.driverId];
+          return {
+            ...s,
+            baseSalary: Number(s.baseSalary),
+            totalAdvances: Number(s.totalAdvances),
+            totalCoverageDeductions: Number(s.totalCoverageDeductions),
+            otherDeductions: Number(s.otherDeductions),
+            bonuses: Number(s.bonuses),
+            netSalary: Number(s.netSalary),
+            driverName: drv?.fullName || '—',
+            driverCode: drv?.driverCode || '—',
+            schoolId: drv?.schoolId ?? null,
+            schoolName: drv?.schoolName || 'غير معين',
+            busNumber: drv?.busNumber || '—',
+            routeName: drv?.routeName || '—',
+          };
+        });
+
+        const schoolById: Record<number, (typeof allSchools)[number]> = {};
+        for (const sc of allSchools) schoolById[sc.id] = sc;
+
+        const salariesBySchoolKey = new Map<string, typeof enrichedSalaries>();
+        for (const sal of enrichedSalaries) {
+          const key = sal.schoolId ? String(sal.schoolId) : 'unassigned';
+          const list = salariesBySchoolKey.get(key) || [];
+          list.push(sal);
+          salariesBySchoolKey.set(key, list);
+        }
 
       const schoolContracts = allSchools.map((sc) => {
         const scDrivers = salariesBySchoolKey.get(String(sc.id)) || [];
@@ -2559,12 +2858,16 @@ async function startServer() {
     }
   });
 
-  app.post('/api/finance/advances', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+  app.post('/api/finance/advances', requireAuth, requireAdminOrStaff, requireAnyPermission(['finance:write', 'advances:write']), async (req: AuthRequest, res) => {
     try {
       const { driverId, driverQuery, amount, date, reason, paymentMethod, notes, idempotencyKey } = req.body;
       const resolvedDriver = await resolveDriverByIdOrQuery({ driverId, driverQuery });
       if (!resolvedDriver || !amount || !date) {
         return res.status(400).json({ error: 'يرجى كتابة اسم أو كود سائق مسجل والمبلغ والتاريخ' });
+      }
+      const drvSchoolId = await getDriverCurrentSchoolId(resolvedDriver.id);
+      if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+        return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
       }
       const result = await recordAdvanceTransaction({
         driverId: resolvedDriver.id,
@@ -2629,6 +2932,10 @@ async function startServer() {
         if (!nextSchoolId) nextSchoolId = assign?.schoolId ?? null;
       }
 
+      if (!isSchoolAllowed(req.dbUser, nextSchoolId)) {
+        return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
+      }
+
       const executeCoverage = () =>
         recordCoverageTransaction({
           absentDriverId: resolvedAbsent.id,
@@ -2668,6 +2975,10 @@ async function startServer() {
       if (type !== 'bonus' && type !== 'other_deduction') {
         return res.status(400).json({ error: 'نوع التسوية غير صحيح' });
       }
+      const drvSchoolId = await getDriverCurrentSchoolId(resolvedDriver.id);
+      if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+        return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
+      }
       const result = await recordAdjustmentTransaction({
         driverId: resolvedDriver.id,
         month: Number(month) || new Date().getMonth() + 1,
@@ -2692,6 +3003,19 @@ async function startServer() {
       if (!id || !amount || (type !== 'bonus' && type !== 'other_deduction')) {
         return res.status(400).json({ error: 'بيانات تعديل التسوية غير مكتملة' });
       }
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [ft] = await db
+          .select({ driverId: financialTransactions.driverId })
+          .from(financialTransactions)
+          .where(eq(financialTransactions.id, id))
+          .limit(1);
+        if (ft) {
+          const drvSchoolId = await getDriverCurrentSchoolId(ft.driverId);
+          if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+            return res.status(403).json({ error: 'هذه الحركة تابعة لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
+      }
       const result = await updateAdjustmentTransaction({
         id,
         type,
@@ -2711,6 +3035,19 @@ async function startServer() {
     try {
       const id = Number(req.params.id);
       if (!id) return res.status(400).json({ error: 'معرف التسوية غير صالح' });
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [ft] = await db
+          .select({ driverId: financialTransactions.driverId })
+          .from(financialTransactions)
+          .where(eq(financialTransactions.id, id))
+          .limit(1);
+        if (ft) {
+          const drvSchoolId = await getDriverCurrentSchoolId(ft.driverId);
+          if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+            return res.status(403).json({ error: 'هذه الحركة تابعة لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
+      }
       const result = await deleteAdjustmentTransaction({
         id,
         recordedByUserId: req.dbUser!.id,
@@ -2723,12 +3060,25 @@ async function startServer() {
     }
   });
 
-  app.patch('/api/finance/advances/:id', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+  app.patch('/api/finance/advances/:id', requireAuth, requireAdminOrStaff, requireAnyPermission(['finance:write', 'advances:write']), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
       const { amount, date, reason, paymentMethod, notes } = req.body;
       if (!id || !amount || !date) {
         return res.status(400).json({ error: 'بيانات تعديل السلفة غير مكتملة' });
+      }
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [advRow] = await db
+          .select({ driverId: advances.driverId })
+          .from(advances)
+          .where(eq(advances.id, id))
+          .limit(1);
+        if (advRow) {
+          const drvSchoolId = await getDriverCurrentSchoolId(advRow.driverId);
+          if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+            return res.status(403).json({ error: 'هذه السلفة تابعة لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
       }
       const result = await updateAdvanceTransaction({
         id,
@@ -2747,10 +3097,23 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/finance/advances/:id', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
+  app.delete('/api/finance/advances/:id', requireAuth, requireAdminOrStaff, requireAnyPermission(['finance:write', 'advances:write']), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
       if (!id) return res.status(400).json({ error: 'معرف السلفة غير صالح' });
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [advRow] = await db
+          .select({ driverId: advances.driverId })
+          .from(advances)
+          .where(eq(advances.id, id))
+          .limit(1);
+        if (advRow) {
+          const drvSchoolId = await getDriverCurrentSchoolId(advRow.driverId);
+          if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+            return res.status(403).json({ error: 'هذه السلفة تابعة لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
+      }
       const result = await deleteAdvanceTransaction({
         id,
         recordedByUserId: req.dbUser!.id,
@@ -2778,6 +3141,19 @@ async function startServer() {
       } = req.body;
       if (!id || !date) {
         return res.status(400).json({ error: 'بيانات تعديل التغطية غير مكتملة' });
+      }
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [covRow] = await db
+          .select({ absentDriverId: coverageRecords.absentDriverId, schoolId: coverageRecords.schoolId })
+          .from(coverageRecords)
+          .where(eq(coverageRecords.id, id))
+          .limit(1);
+        if (covRow) {
+          const targetSchoolId = covRow.schoolId ?? (await getDriverCurrentSchoolId(covRow.absentDriverId));
+          if (!isSchoolAllowed(req.dbUser, targetSchoolId)) {
+            return res.status(403).json({ error: 'هذه التغطية تابعة لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
       }
       const repText = String(replacementQuery ?? replacementExternalName ?? '').trim();
       const resolvedRep = replacementDriverId
@@ -2816,6 +3192,19 @@ async function startServer() {
     try {
       const id = Number(req.params.id);
       if (!id) return res.status(400).json({ error: 'معرف التغطية غير صالح' });
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [covRow] = await db
+          .select({ absentDriverId: coverageRecords.absentDriverId, schoolId: coverageRecords.schoolId })
+          .from(coverageRecords)
+          .where(eq(coverageRecords.id, id))
+          .limit(1);
+        if (covRow) {
+          const targetSchoolId = covRow.schoolId ?? (await getDriverCurrentSchoolId(covRow.absentDriverId));
+          if (!isSchoolAllowed(req.dbUser, targetSchoolId)) {
+            return res.status(403).json({ error: 'هذه التغطية تابعة لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
+      }
       const executeDelete = () =>
         deleteCoverageTransaction({
           id,
@@ -2841,6 +3230,33 @@ async function startServer() {
       if ((targetType !== 'advance' && targetType !== 'coverage') || !targetId) {
         return res.status(400).json({ error: 'بيانات العكس غير مكتملة' });
       }
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        if (targetType === 'advance') {
+          const [advRow] = await db
+            .select({ driverId: advances.driverId })
+            .from(advances)
+            .where(eq(advances.id, Number(targetId)))
+            .limit(1);
+          if (advRow) {
+            const sId = await getDriverCurrentSchoolId(advRow.driverId);
+            if (!isSchoolAllowed(req.dbUser, sId)) {
+              return res.status(403).json({ error: 'هذه الحركة خارج نطاق المدارس المصرح لك بها' });
+            }
+          }
+        } else {
+          const [covRow] = await db
+            .select({ absentDriverId: coverageRecords.absentDriverId, schoolId: coverageRecords.schoolId })
+            .from(coverageRecords)
+            .where(eq(coverageRecords.id, Number(targetId)))
+            .limit(1);
+          if (covRow) {
+            const sId = covRow.schoolId ?? (await getDriverCurrentSchoolId(covRow.absentDriverId));
+            if (!isSchoolAllowed(req.dbUser, sId)) {
+              return res.status(403).json({ error: 'هذه الحركة خارج نطاق المدارس المصرح لك بها' });
+            }
+          }
+        }
+      }
       const result = await reverseFinancialRecord({
         targetType,
         targetId: Number(targetId),
@@ -2856,20 +3272,57 @@ async function startServer() {
   });
 
   // 5b. Non-Driver Employees Management (الموظفون غير السائقين - نشطون فقط)
-  app.get('/api/employees', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+  app.get('/api/employees', requireAuth, requireAdminOrStaff, requireAnyPermission(['employees:read', 'employees:write', 'finance:read', 'dashboard:read']), async (req: AuthRequest, res) => {
     try {
       const includeArchived = req.query.includeArchived === 'true';
-      const rows = await db.select().from(employees).orderBy(employees.fullName);
+      const [rows, allUsers, allRoles] = await Promise.all([
+        db.select().from(employees).orderBy(employees.fullName),
+        req.dbUser?.roleSlug === 'super_admin' ? db.select().from(users) : Promise.resolve([]),
+        req.dbUser?.roleSlug === 'super_admin' ? db.select().from(userRoles) : Promise.resolve([]),
+      ]);
+
+      const roleById: Record<number, typeof userRoles.$inferSelect> = {};
+      for (const r of allRoles) roleById[r.id] = r;
+
+      const userByEmployeeId: Record<number, typeof users.$inferSelect> = {};
+      for (const u of allUsers) {
+        if (u.employeeId) userByEmployeeId[u.employeeId] = u;
+      }
+
       const visible = includeArchived ? rows : rows.filter((e) => e.status === 'active');
       res.json({
-        employees: visible.map((e) => ({
-          ...e,
-          monthlySalary: Number(e.monthlySalary || 0),
-          bonuses: Number(e.bonuses || 0),
-          deductions: Number(e.deductions || 0),
-          netSalary:
-            Number(e.monthlySalary || 0) + Number(e.bonuses || 0) - Number(e.deductions || 0),
-        })),
+        employees: visible.map((e) => {
+          const linked = userByEmployeeId[e.id];
+          const linkedRole = linked ? roleById[linked.roleId] : undefined;
+          return {
+            ...e,
+            monthlySalary: Number(e.monthlySalary || 0),
+            bonuses: Number(e.bonuses || 0),
+            deductions: Number(e.deductions || 0),
+            netSalary:
+              Number(e.monthlySalary || 0) + Number(e.bonuses || 0) - Number(e.deductions || 0),
+            linkedUser: linked
+              ? {
+                  id: linked.id,
+                  email: linked.email,
+                  roleId: linked.roleId,
+                  roleSlug: linkedRole?.slug || 'accountant',
+                  roleNameAr: linkedRole?.nameAr || 'موظف',
+                  staffCode: linked.staffCode || '',
+                  assignedSchoolIds: normalizeSchoolIds(linked.assignedSchoolIds),
+                  customPermissions: Array.isArray(linked.customPermissions)
+                    ? linked.customPermissions
+                    : null,
+                  permissions: buildEffectivePermissions(
+                    linkedRole?.slug || 'accountant',
+                    linkedRole?.permissions,
+                    linked.customPermissions
+                  ),
+                  isActive: linked.isActive,
+                }
+              : null,
+          };
+        }),
       });
     } catch (error) {
       console.error('Get employees error:', error);
@@ -2878,12 +3331,18 @@ async function startServer() {
   });
 
   // 5c. Dedicated Archive Management (الأرشفة)
-  app.get('/api/archive', requireAuth, requireAdminOrStaff, async (_req: AuthRequest, res) => {
+  app.get('/api/archive', requireAuth, requireAdminOrStaff, requireAnyPermission(['drivers:write', 'vehicles:write', 'schools:write', 'employees:write']), async (req: AuthRequest, res) => {
     try {
+      const unrestricted = isSchoolUnrestricted(req.dbUser);
       const allDrivers = await getEnrichedDrivers();
-      const archivedDrivers = allDrivers.filter((d) => d.accountStatus !== 'active');
+      const archivedDrivers = allDrivers.filter(
+        (d) => d.accountStatus !== 'active' && isSchoolAllowed(req.dbUser, d.schoolId)
+      );
 
-      const allEmployees = await db.select().from(employees).orderBy(employees.fullName);
+      const allEmployees =
+        unrestricted && (hasPermission(req.dbUser, 'employees:read') || hasPermission(req.dbUser, 'employees:write'))
+          ? await db.select().from(employees).orderBy(employees.fullName)
+          : [];
       const archivedEmployees = allEmployees
         .filter((e) => e.status !== 'active')
         .map((e) => ({
@@ -2896,10 +3355,14 @@ async function startServer() {
         }));
 
       const allVehicles = await getFleetWithLatestGps();
-      const archivedVehicles = allVehicles.filter((v) => v.operationalStatus === 'inactive');
+      const archivedVehicles = allVehicles.filter(
+        (v) => v.operationalStatus === 'inactive' && isSchoolAllowed(req.dbUser, v.schoolId)
+      );
 
       const allSchools = await db.select().from(schools).orderBy(schools.name);
-      const archivedSchools = allSchools.filter((s) => !s.isActive);
+      const archivedSchools = allSchools.filter(
+        (s) => !s.isActive && isSchoolAllowed(req.dbUser, s.id)
+      );
 
       res.json({
         drivers: archivedDrivers,
@@ -2916,6 +3379,12 @@ async function startServer() {
   app.post('/api/archive/drivers/:id/restore', requireAuth, requireAdminOrStaff, requirePermission('drivers:write'), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const sId = await getDriverCurrentSchoolId(id);
+        if (!isSchoolAllowed(req.dbUser, sId)) {
+          return res.status(403).json({ error: 'هذا السائق خارج نطاق المدارس المصرح لك بها' });
+        }
+      }
       const [updated] = await db
         .update(drivers)
         .set({ accountStatus: 'active' })
@@ -2937,7 +3406,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/archive/employees/:id/restore', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+  app.post('/api/archive/employees/:id/restore', requireAuth, requireAdminOrStaff, requirePermission('employees:write'), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
       const [updated] = await db
@@ -2970,6 +3439,9 @@ async function startServer() {
   app.post('/api/archive/schools/:id/restore', requireAuth, requireAdminOrStaff, requirePermission('schools:write'), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
+      if (!isSchoolAllowed(req.dbUser, id)) {
+        return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+      }
       const [updated] = await db
         .update(schools)
         .set({ isActive: true })
@@ -2982,7 +3454,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/employees', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+  app.post('/api/employees', requireAuth, requireAdminOrStaff, requirePermission('employees:write'), async (req: AuthRequest, res) => {
     try {
       const {
         employeeCode,
@@ -3043,7 +3515,7 @@ async function startServer() {
     }
   });
 
-  app.patch('/api/employees/:id', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+  app.patch('/api/employees/:id', requireAuth, requireAdminOrStaff, requirePermission('employees:write'), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
       const [existing] = await db.select().from(employees).where(eq(employees.id, id)).limit(1);
@@ -3107,7 +3579,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/employees/:id', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+  app.delete('/api/employees/:id', requireAuth, requireAdminOrStaff, requirePermission('employees:write'), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
       const [existing] = await db.select().from(employees).where(eq(employees.id, id)).limit(1);
@@ -3128,12 +3600,264 @@ async function startServer() {
     }
   });
 
+  // ==========================================
+  // EMPLOYEE DAILY REPORTS (صوتية وكتابية للمحاسب والمدير)
+  // ==========================================
+  app.get('/api/daily-reports', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const { reportDate, targetAudience, status } = req.query;
+      const user = req.dbUser!;
+      const isManager = user.roleSlug === 'super_admin' || user.permissions.includes('*');
+      const isAccountant = user.roleSlug === 'accountant' || user.permissions.includes('finance:read');
+      const isMovementMgr = user.roleSlug === 'movement_manager';
+
+      const conditions: any[] = [];
+
+      // If regular employee without admin/accountant role, scope to their reports only
+      if (!isManager && !isAccountant && !isMovementMgr) {
+        conditions.push(eq(dailyReports.userId, user.id));
+      } else if (isAccountant && !isManager) {
+        // Accountant sees reports targeted to accountant or both, or financial reports
+        conditions.push(
+          or(
+            eq(dailyReports.targetAudience, 'accountant'),
+            eq(dailyReports.targetAudience, 'both'),
+            eq(dailyReports.reportType, 'financial'),
+            eq(dailyReports.reportType, 'mixed'),
+            eq(dailyReports.userId, user.id)
+          )
+        );
+      }
+
+      if (reportDate && typeof reportDate === 'string') {
+        conditions.push(eq(dailyReports.reportDate, reportDate));
+      }
+      if (targetAudience && typeof targetAudience === 'string' && targetAudience !== 'all') {
+        conditions.push(eq(dailyReports.targetAudience, targetAudience));
+      }
+      if (status && typeof status === 'string' && status !== 'all') {
+        conditions.push(eq(dailyReports.status, status));
+      }
+
+      const rows =
+        conditions.length > 0
+          ? await db
+              .select()
+              .from(dailyReports)
+              .where(and(...conditions))
+              .orderBy(desc(dailyReports.createdAt))
+              .limit(100)
+          : await db.select().from(dailyReports).orderBy(desc(dailyReports.createdAt)).limit(100);
+
+      const reports = rows.map((r) => ({
+        ...r,
+        financialAmount: Number(r.financialAmount || 0),
+        extractedTasks: Array.isArray(r.extractedTasksJson) ? r.extractedTasksJson : [],
+        attachments: Array.isArray(r.attachmentsJson) ? r.attachmentsJson : [],
+        createdAt: r.createdAt.toISOString(),
+        updatedAt: r.updatedAt.toISOString(),
+      }));
+
+      res.json({ reports });
+    } catch (error) {
+      console.error('Error fetching daily reports:', error);
+      res.status(500).json({ error: 'تعذر تحميل التقارير اليومية' });
+    }
+  });
+
+  app.post('/api/daily-reports', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.dbUser!;
+      const {
+        rawContent,
+        audioDataUrl,
+        audioDurationSec,
+        reportDate,
+        targetAudience,
+        reportType,
+        financialAmount,
+        category,
+        attachments,
+      } = req.body;
+
+      const safeAttachments = Array.isArray(attachments) ? attachments : [];
+      let text = String(rawContent || '').trim();
+
+      // Allow voice-only or attachment-only reports without erroring
+      if (!text) {
+        if (audioDataUrl && safeAttachments.length > 0) {
+          text = `تقرير صوتي مسجل (${Number(audioDurationSec || 0)} ثانية) ومرفق به ${safeAttachments.length} فواتير ومستندات`;
+        } else if (audioDataUrl) {
+          text = `تقرير صوتي مسجل (${Number(audioDurationSec || 0)} ثانية)`;
+        } else if (safeAttachments.length > 0) {
+          text = `تقرير مرفق بمستندات وفواتير (${safeAttachments.length} فواتير ومستندات)`;
+        } else {
+          return res.status(400).json({ error: 'يرجى تسجيل أو كتابة محتوى التقرير أو إرفاق فواتير ومستندات' });
+        }
+      }
+
+      // Smart extraction
+      let extractedAmount =
+        financialAmount !== undefined && financialAmount !== null ? Number(financialAmount) : 0;
+
+      if (!extractedAmount || isNaN(extractedAmount)) {
+        const amountMatch =
+          text.match(
+            /(?:بمبلغ|مبلغ|تكلفة|مصاريف|سلفة|تحصيل|إجمالي|صرفت|دفعت|قبضت)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)/i
+          ) || text.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:جنيه|ج\.م|egp|ألف)/i);
+        if (amountMatch) {
+          let val = parseFloat(amountMatch[1]);
+          if (text.includes('ألف') && val < 1000) val *= 1000;
+          extractedAmount = val;
+        }
+      }
+
+      // Extract tasks
+      const taskLines = text
+        .split(/[\n\r•\-\*]/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 4);
+
+      const extractedTasks = taskLines.length > 0 ? taskLines.slice(0, 8) : [text.slice(0, 100)];
+
+      // Determine Report Type
+      let finalReportType = reportType || 'operations';
+      const isMoneyRelated =
+        extractedAmount > 0 ||
+        safeAttachments.some((a) => a.category === 'invoice' || a.category === 'fuel' || a.category === 'maintenance') ||
+        /(?:فلوس|مبلغ|جنيه|مصاريف|سلفة|فاتورة|حساب|صيانة|إيراد|تحصيل|بنزين|سولار)/i.test(text);
+      const isOpsRelated =
+        /(?:باص|سائق|مشرفة|مدرسة|مسار|خط سير|صيانة|تغطية|غياب|حضور|عطل|عقد)/i.test(text);
+
+      if (isMoneyRelated && isOpsRelated) {
+        finalReportType = 'mixed';
+      } else if (isMoneyRelated) {
+        finalReportType = 'financial';
+      } else {
+        finalReportType = 'operations';
+      }
+
+      // Target Audience
+      let finalTarget = targetAudience || 'both';
+
+      const todayCairo = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo' }).format(
+        new Date()
+      );
+      const finalDate =
+        reportDate && /^\d{4}-\d{2}-\d{2}$/.test(reportDate) ? reportDate : todayCairo;
+
+      const employeeName = user.fullName || 'موظف';
+      const employeeRoleOrTitle = user.roleNameAr || user.roleSlug || 'موظف';
+
+      const [newReport] = await db
+        .insert(dailyReports)
+        .values({
+          userId: user.id,
+          employeeId: user.employeeId || null,
+          employeeName,
+          employeeRoleOrTitle,
+          reportDate: finalDate,
+          rawContent: text,
+          audioDataUrl: audioDataUrl || null,
+          audioDurationSec: Number(audioDurationSec || 0),
+          reportType: finalReportType,
+          targetAudience: finalTarget,
+          financialAmount: String(extractedAmount || 0),
+          extractedTasksJson: extractedTasks,
+          attachmentsJson: safeAttachments,
+          category:
+            category || (finalReportType === 'financial' ? 'تقرير مالي ومصروفات' : 'تقرير مهام وتشغيل'),
+          status: 'submitted',
+        })
+        .returning();
+
+      // Create notification
+      try {
+        const notifTitle = `تقرير يومي جديد من: ${employeeName}`;
+        const notifBody = `${
+          finalReportType === 'financial' ? '💰 تقرير مالي' : '📋 تقرير مهام'
+        }: ${text.slice(0, 120)}...`;
+
+        await db.insert(notifications).values([
+          {
+            targetRole: 'super_admin',
+            type: 'announcement',
+            title: notifTitle,
+            body: notifBody,
+            isRead: false,
+          },
+        ]);
+      } catch (notifErr) {
+        console.warn('Failed to dispatch notification for daily report:', notifErr);
+      }
+
+      res.status(201).json({
+        report: {
+          ...newReport,
+          financialAmount: Number(newReport.financialAmount || 0),
+          extractedTasks,
+          attachments: safeAttachments,
+          createdAt: newReport.createdAt.toISOString(),
+          updatedAt: newReport.updatedAt.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error('Error creating daily report:', error);
+      res.status(500).json({ error: 'تعذر حفظ التقرير اليومي' });
+    }
+  });
+
+  app.patch('/api/daily-reports/:id', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { status, accountantNotes, managerNotes } = req.body;
+
+      const [existing] = await db.select().from(dailyReports).where(eq(dailyReports.id, id)).limit(1);
+      if (!existing) {
+        return res.status(404).json({ error: 'التقرير غير موجود' });
+      }
+
+      const updates: any = { updatedAt: new Date() };
+      if (status !== undefined) updates.status = String(status);
+      if (accountantNotes !== undefined) updates.accountantNotes = String(accountantNotes);
+      if (managerNotes !== undefined) updates.managerNotes = String(managerNotes);
+
+      const [updated] = await db
+        .update(dailyReports)
+        .set(updates)
+        .where(eq(dailyReports.id, id))
+        .returning();
+
+      res.json({
+        report: {
+          ...updated,
+          financialAmount: Number(updated.financialAmount || 0),
+          extractedTasks: Array.isArray(updated.extractedTasksJson) ? updated.extractedTasksJson : [],
+          createdAt: updated.createdAt.toISOString(),
+          updatedAt: updated.updatedAt.toISOString(),
+        },
+      });
+    } catch (error) {
+      console.error('Error updating daily report:', error);
+      res.status(500).json({ error: 'تعذر تحديث التقرير' });
+    }
+  });
+
   app.patch('/api/finance/salaries/:id/status', requireAuth, requireAdminOrStaff, requirePermission('finance:write'), async (req: AuthRequest, res) => {
     try {
       const id = Number(req.params.id);
       const { status } = req.body;
       if (!['open', 'approved', 'paid'].includes(status)) {
         return res.status(400).json({ error: 'حالة الراتب غير صالحة' });
+      }
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [sal] = await db.select().from(salaries).where(eq(salaries.id, id)).limit(1);
+        if (sal) {
+          const drvSchoolId = await getDriverCurrentSchoolId(sal.driverId);
+          if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+            return res.status(403).json({ error: 'هذا الراتب تابع لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
       }
       const [updated] = await db
         .update(salaries)
@@ -3232,7 +3956,14 @@ async function startServer() {
     try {
       const dateStr = (req.query.date as string) || getTodayDateString();
       const rows = await db.select().from(attendance).where(eq(attendance.date, dateStr));
-      res.json({ date: dateStr, records: rows });
+      if (isSchoolUnrestricted(req.dbUser)) {
+        return res.json({ date: dateStr, records: rows });
+      }
+      const allowedDrivers = (await getEnrichedDrivers()).filter((d) =>
+        isSchoolAllowed(req.dbUser, d.schoolId)
+      );
+      const allowedSet = new Set(allowedDrivers.map((d) => d.id));
+      res.json({ date: dateStr, records: rows.filter((r) => allowedSet.has(r.driverId)) });
     } catch (error) {
       console.error('Attendance get error:', error);
       res.status(500).json({ error: 'تعذر تحميل الحضور' });
@@ -3244,6 +3975,10 @@ async function startServer() {
       const { driverId, date, status, notes } = req.body;
       if (!driverId || !date || !status) {
         return res.status(400).json({ error: 'السائق والتاريخ والحالة مطلوبة' });
+      }
+      const drvSchoolId = await getDriverCurrentSchoolId(Number(driverId));
+      if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+        return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
       }
       const [row] = await db
         .insert(attendance)
@@ -3267,10 +4002,10 @@ async function startServer() {
   });
 
   // 7. Live GPS Tracking
-  app.get('/api/gps/fleet', requireAuth, requireAdminOrStaff, requirePermission('gps:read'), async (_req: AuthRequest, res) => {
+  app.get('/api/gps/fleet', requireAuth, requireAdminOrStaff, requirePermission('gps:read'), async (req: AuthRequest, res) => {
     try {
       const fleet = (await getFleetWithLatestGps()).filter(
-        (v) => v.operationalStatus !== 'inactive'
+        (v) => v.operationalStatus !== 'inactive' && isSchoolAllowed(req.dbUser, v.schoolId)
       );
       res.json({ fleet });
     } catch (error) {
@@ -3282,6 +4017,16 @@ async function startServer() {
   app.get('/api/gps/vehicle/:id/history', requireAuth, requireAdminOrStaff, requirePermission('gps:read'), async (req: AuthRequest, res) => {
     try {
       const vehicleId = Number(req.params.id);
+      if (!isSchoolUnrestricted(req.dbUser)) {
+        const [assign] = await db
+          .select({ schoolId: driverAssignments.schoolId })
+          .from(driverAssignments)
+          .where(and(eq(driverAssignments.vehicleId, vehicleId), eq(driverAssignments.isCurrent, true)))
+          .limit(1);
+        if (!assign || !isSchoolAllowed(req.dbUser, assign.schoolId)) {
+          return res.status(403).json({ error: 'هذه المركبة خارج نطاق المدارس المصرح لك بها' });
+        }
+      }
       const history = await db
         .select()
         .from(gpsLocations)
@@ -3465,8 +4210,8 @@ async function startServer() {
     }
   });
 
-  // 8. Egyptian Arabic AI Voice Assistant (Admin Only)
-  app.post('/api/voice/transcribe', requireAuth, requireAdminOrStaff, requirePermission('*'), async (req: AuthRequest, res) => {
+  // 8. Egyptian Arabic AI Voice Assistant (Available to all authenticated staff & drivers)
+  app.post('/api/voice/transcribe', requireAuth, async (req: AuthRequest, res) => {
     try {
       const { audioBase64, mimeType } = req.body;
       if (!audioBase64) {
@@ -4222,24 +4967,312 @@ async function startServer() {
     }
   });
 
-  // 10. Users, Roles & Audit Logs
+  // 10. Users, Roles & Audit Logs (Super Admin Staff Appointment & Granular RBAC)
   app.get('/api/users', requireAuth, requireAdminOrStaff, requirePermission('*'), async (_req: AuthRequest, res) => {
     try {
-      const allUsers = await db.select().from(users).orderBy(users.id);
-      const allRoles = await db.select().from(userRoles);
+      const [allUsers, allRoles, allSchools, allEmployees] = await Promise.all([
+        db.select().from(users).orderBy(users.id),
+        db.select().from(userRoles).orderBy(userRoles.id),
+        db.select().from(schools).orderBy(schools.name),
+        db.select().from(employees).orderBy(employees.fullName),
+      ]);
       const roleById: Record<number, typeof userRoles.$inferSelect> = {};
       for (const r of allRoles) roleById[r.id] = r;
 
+      const schoolMap: Record<number, string> = {};
+      for (const s of allSchools) schoolMap[s.id] = s.name;
+
+      const empMap: Record<number, string> = {};
+      for (const e of allEmployees) empMap[e.id] = e.fullName;
+
       res.json({
-        users: allUsers.map((u) => ({
-          ...u,
-          roleSlug: roleById[u.roleId]?.slug || 'driver',
-          roleNameAr: roleById[u.roleId]?.nameAr || 'سائق',
-        })),
+        users: allUsers.map((u) => {
+          const role = roleById[u.roleId];
+          const roleSlug = role?.slug || 'driver';
+          const assignedSchoolIds =
+            roleSlug === 'super_admin' ? [] : normalizeSchoolIds(u.assignedSchoolIds);
+          return {
+            ...u,
+            roleSlug,
+            roleNameAr: role?.nameAr || 'سائق',
+            assignedSchoolIds,
+            assignedSchoolNames: assignedSchoolIds
+              .map((sid) => schoolMap[sid])
+              .filter(Boolean),
+            customPermissions: Array.isArray(u.customPermissions) ? u.customPermissions : null,
+            effectivePermissions: buildEffectivePermissions(
+              roleSlug,
+              role?.permissions,
+              u.customPermissions
+            ),
+            staffCode: u.staffCode || '',
+            employeeId: u.employeeId ?? null,
+            employeeName: u.employeeId ? empMap[u.employeeId] || null : null,
+          };
+        }),
         roles: allRoles,
+        schools: allSchools
+          .filter((s) => s.isActive)
+          .map((s) => ({ id: s.id, name: s.name })),
+        employees: allEmployees
+          .filter((e) => e.status === 'active')
+          .map((e) => ({
+            id: e.id,
+            fullName: e.fullName,
+            jobTitle: e.jobTitle,
+            phone: e.phone,
+            employeeCode: e.employeeCode,
+          })),
       });
     } catch (error) {
+      console.error('Get users error:', error);
       res.status(500).json({ error: 'تعذر تحميل المستخدمين' });
+    }
+  });
+
+  app.post('/api/users', requireAuth, requireAdminOrStaff, requirePermission('*'), async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'إضافة وتعيين الموظفين متاح للمدير العام فقط' });
+      }
+      const {
+        fullName,
+        email,
+        phone,
+        roleId,
+        roleSlug,
+        assignedSchoolIds,
+        customPermissions,
+        staffCode,
+        employeeId,
+        isActive,
+      } = req.body;
+
+      const trimmedName = String(fullName || '').trim();
+      if (!trimmedName) {
+        return res.status(400).json({ error: 'الاسم الكامل مطلوب' });
+      }
+
+      const allRoles = await db.select().from(userRoles);
+      const targetRole = roleId
+        ? allRoles.find((r) => r.id === Number(roleId))
+        : roleSlug
+        ? allRoles.find((r) => r.slug === String(roleSlug))
+        : allRoles.find((r) => r.slug === 'accountant');
+
+      if (!targetRole) {
+        return res.status(400).json({ error: 'الدور الوظيفي المحدد غير موجود' });
+      }
+      if (targetRole.slug === 'driver' || targetRole.slug === 'supervisor') {
+        return res.status(400).json({
+          error: 'يتم إضافة السائقين من قسم السائقين والمشرفات من قسم المشرفات',
+        });
+      }
+
+      const cleanStaffCode = normalizeDriverCode(staffCode || '') || `STF-${Math.floor(1000 + Math.random() * 9000)}`;
+      const cleanPhone = normalizeEgyptPhone(phone || '') || String(phone || '').trim();
+      const rawEmail = String(email || '').trim().toLowerCase();
+      const cleanEmail = rawEmail || `staff.${Date.now()}.${Math.floor(Math.random() * 1000)}@staff.alwaleed.local`;
+
+      // Prevent duplicate email
+      const [dupEmail] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, cleanEmail))
+        .limit(1);
+      if (dupEmail) {
+        return res.status(409).json({ error: 'هذا البريد الإلكتروني مستخدم بالفعل لحساب آخر' });
+      }
+
+      // Prevent duplicate staffCode among active staff
+      const allUsersRows = await db.select().from(users);
+      const dupCode = allUsersRows.find(
+        (u) =>
+          u.staffCode &&
+          normalizeDriverCode(u.staffCode).toLowerCase() === cleanStaffCode.toLowerCase()
+      );
+      if (dupCode) {
+        return res.status(409).json({ error: `كود الدخول ${cleanStaffCode} مستخدم لموظف آخر` });
+      }
+
+      const nextEmployeeId = employeeId ? Number(employeeId) : null;
+      if (nextEmployeeId) {
+        const linkedConflict = allUsersRows.find((u) => u.employeeId === nextEmployeeId);
+        if (linkedConflict) {
+          return res.status(409).json({ error: 'هذا الموظف لديه حساب وصلاحيات مفعلة بالفعل — يمكنك تعديله من القائمة' });
+        }
+      }
+
+      const nextSchools = targetRole.slug === 'super_admin' ? [] : normalizeSchoolIds(assignedSchoolIds);
+      const nextCustomPerms =
+        targetRole.slug === 'super_admin' ? null : normalizePermissionsList(customPermissions);
+
+      const [created] = await db
+        .insert(users)
+        .values({
+          uid: `staff_pre_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+          email: cleanEmail,
+          fullName: trimmedName,
+          phone: cleanPhone || null,
+          roleId: targetRole.id,
+          assignedSchoolIds: nextSchools,
+          customPermissions: nextCustomPerms,
+          staffCode: cleanStaffCode,
+          employeeId: nextEmployeeId,
+          isActive: isActive !== false,
+        })
+        .returning();
+
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'CREATE_STAFF_USER',
+        entityType: 'users',
+        entityId: String(created.id),
+        afterJson: {
+          fullName: created.fullName,
+          roleSlug: targetRole.slug,
+          assignedSchoolIds: nextSchools,
+          staffCode: cleanStaffCode,
+        },
+        ipAddress: req.ip || '',
+      });
+
+      res.status(201).json({ user: created });
+    } catch (error) {
+      console.error('Create staff user error:', error);
+      res.status(500).json({ error: 'تعذر إنشاء حساب الموظف ومنحه الصلاحيات' });
+    }
+  });
+
+  app.patch('/api/users/:id', requireAuth, requireAdminOrStaff, requirePermission('*'), async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'تعديل حسابات وصلاحيات الموظفين متاح للمدير العام فقط' });
+      }
+      const userId = Number(req.params.id);
+      const [existing] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+      if (!existing) {
+        return res.status(404).json({ error: 'المستخدم غير موجود' });
+      }
+
+      const {
+        fullName,
+        email,
+        phone,
+        roleId,
+        roleSlug,
+        assignedSchoolIds,
+        customPermissions,
+        staffCode,
+        employeeId,
+        isActive,
+      } = req.body;
+
+      const allRoles = await db.select().from(userRoles);
+      const currentRole = allRoles.find((r) => r.id === existing.roleId);
+      let nextRole = currentRole;
+      if (roleId) {
+        nextRole = allRoles.find((r) => r.id === Number(roleId));
+      } else if (roleSlug) {
+        nextRole = allRoles.find((r) => r.slug === String(roleSlug));
+      }
+      if (!nextRole) {
+        return res.status(400).json({ error: 'الدور الوظيفي المحدد غير موجود' });
+      }
+
+      if (existing.email === 'hamdyhamzway@gmail.com') {
+        if (nextRole.slug !== 'super_admin' || isActive === false) {
+          return res.status(400).json({ error: 'لا يمكن إيقاف أو تخفيض صلاحية المالك الرئيسي للنظام' });
+        }
+      }
+
+      const nextEmail =
+        email !== undefined && String(email).trim()
+          ? String(email).trim().toLowerCase()
+          : existing.email;
+
+      if (nextEmail !== existing.email) {
+        const [dup] = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.email, nextEmail), ne(users.id, userId)))
+          .limit(1);
+        if (dup) {
+          return res.status(409).json({ error: 'البريد الإلكتروني مستخدم لحساب آخر' });
+        }
+      }
+
+      const nextStaffCode =
+        staffCode !== undefined ? normalizeDriverCode(staffCode) : existing.staffCode || '';
+      if (nextStaffCode) {
+        const allOthers = await db.select().from(users).where(ne(users.id, userId));
+        const dupCode = allOthers.find(
+          (u) =>
+            u.staffCode &&
+            normalizeDriverCode(u.staffCode).toLowerCase() === nextStaffCode.toLowerCase()
+        );
+        if (dupCode) {
+          return res.status(409).json({ error: `كود الدخول ${nextStaffCode} مستخدم لموظف آخر` });
+        }
+      }
+
+      const nextSchools =
+        nextRole.slug === 'super_admin'
+          ? []
+          : assignedSchoolIds !== undefined
+          ? normalizeSchoolIds(assignedSchoolIds)
+          : normalizeSchoolIds(existing.assignedSchoolIds);
+
+      const nextCustomPerms =
+        nextRole.slug === 'super_admin'
+          ? null
+          : customPermissions !== undefined
+          ? normalizePermissionsList(customPermissions)
+          : existing.customPermissions;
+
+      const nextEmployeeId =
+        employeeId !== undefined ? (employeeId ? Number(employeeId) : null) : existing.employeeId;
+
+      const [updated] = await db
+        .update(users)
+        .set({
+          fullName: fullName !== undefined ? String(fullName).trim() || existing.fullName : existing.fullName,
+          email: nextEmail,
+          phone: phone !== undefined ? (normalizeEgyptPhone(phone) || String(phone).trim() || null) : existing.phone,
+          roleId: nextRole.id,
+          assignedSchoolIds: nextSchools,
+          customPermissions: nextCustomPerms,
+          staffCode: nextStaffCode,
+          employeeId: nextEmployeeId,
+          isActive: isActive !== undefined ? Boolean(isActive) : existing.isActive,
+          updatedAt: new Date(),
+        })
+        .where(eq(users.id, userId))
+        .returning();
+
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'UPDATE_STAFF_USER',
+        entityType: 'users',
+        entityId: String(userId),
+        beforeJson: {
+          roleId: existing.roleId,
+          assignedSchoolIds: existing.assignedSchoolIds,
+          isActive: existing.isActive,
+        },
+        afterJson: {
+          roleId: updated.roleId,
+          assignedSchoolIds: updated.assignedSchoolIds,
+          customPermissions: updated.customPermissions,
+          isActive: updated.isActive,
+        },
+        ipAddress: req.ip || '',
+      });
+
+      res.json({ user: updated });
+    } catch (error) {
+      console.error('Update staff user error:', error);
+      res.status(500).json({ error: 'تعذر تحديث بيانات وصلاحيات الموظف' });
     }
   });
 
@@ -4268,6 +5301,76 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/users/:id', requireAuth, requireAdminOrStaff, requirePermission('*'), async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'حذف حسابات الموظفين متاح للمدير العام فقط' });
+      }
+      const userId = Number(req.params.id);
+      if (userId === req.dbUser.id) {
+        return res.status(400).json({ error: 'لا يمكنك حذف حسابك النشط الحالي' });
+      }
+      const [existing] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+      if (!existing) {
+        return res.status(404).json({ error: 'المستخدم غير موجود' });
+      }
+      if (existing.email === 'hamdyhamzway@gmail.com') {
+        return res.status(400).json({ error: 'لا يمكن حذف حساب المدير العام الرئيسي' });
+      }
+
+      // Check financial/ledger dependencies that cannot break audit trail
+      const [advRef, covRef, ftRef] = await Promise.all([
+        db.select({ id: advances.id }).from(advances).where(eq(advances.recordedByUserId, userId)).limit(1),
+        db.select({ id: coverageRecords.id }).from(coverageRecords).where(eq(coverageRecords.recordedByUserId, userId)).limit(1),
+        db.select({ id: financialTransactions.id }).from(financialTransactions).where(eq(financialTransactions.recordedByUserId, userId)).limit(1),
+      ]);
+
+      if (advRef[0] || covRef[0] || ftRef[0]) {
+        const [disabled] = await db
+          .update(users)
+          .set({ isActive: false, staffCode: '', updatedAt: new Date() })
+          .where(eq(users.id, userId))
+          .returning();
+        await db.insert(auditLogs).values({
+          actorUserId: req.dbUser.id,
+          action: 'REVOKE_STAFF_USER',
+          entityType: 'users',
+          entityId: String(userId),
+          beforeJson: existing,
+          ipAddress: req.ip || '',
+        });
+        return res.json({
+          ok: true,
+          revokedOnly: true,
+          user: disabled,
+          message: 'تم سحب صلاحية الدخول وإيقاف الحساب نهائياً مع الاحتفاظ بسجل العمليات المالية السابقة للتدقيق.',
+        });
+      }
+
+      await db.transaction(async (tx) => {
+        await tx.update(drivers).set({ userId: null }).where(eq(drivers.userId, userId));
+        await tx.update(supervisors).set({ userId: null }).where(eq(supervisors.userId, userId));
+        await tx.update(attendance).set({ recordedByUserId: null }).where(eq(attendance.recordedByUserId, userId));
+        await tx.update(notifications).set({ recipientUserId: null }).where(eq(notifications.recipientUserId, userId));
+        await tx.update(auditLogs).set({ actorUserId: null }).where(eq(auditLogs.actorUserId, userId));
+        await tx.delete(users).where(eq(users.id, userId));
+        await tx.insert(auditLogs).values({
+          actorUserId: req.dbUser!.id,
+          action: 'DELETE_STAFF_USER',
+          entityType: 'users',
+          entityId: String(userId),
+          beforeJson: existing,
+          ipAddress: req.ip || '',
+        });
+      });
+
+      res.json({ ok: true, deletedId: userId });
+    } catch (error) {
+      console.error('Delete user error:', error);
+      res.status(500).json({ error: 'تعذر حذف المستخدم' });
+    }
+  });
+
   app.get('/api/audit-logs', requireAuth, requireAdminOrStaff, requirePermission('*'), async (_req: AuthRequest, res) => {
     try {
       const logs = await db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(60);
@@ -4284,6 +5387,7 @@ async function startServer() {
       const month = Number(req.query.month) || activePeriod.month;
       const year = Number(req.query.year) || activePeriod.year;
       const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
+      const unrestricted = isSchoolUnrestricted(req.dbUser);
 
       const [closingRow] = await db
         .select({ id: monthlyClosings.id })
@@ -4291,7 +5395,10 @@ async function startServer() {
         .where(and(eq(monthlyClosings.month, month), eq(monthlyClosings.year, year)))
         .limit(1);
 
-      const allDrivers = await getEnrichedDrivers();
+      const allDrivers = (await getEnrichedDrivers()).filter((d) =>
+        isSchoolAllowed(req.dbUser, d.schoolId)
+      );
+      const scopedDriverIds = new Set(allDrivers.map((d) => d.id));
       const activeDrivers = allDrivers.filter((d) => d.accountStatus === 'active');
       if (!closingRow) {
         for (const d of activeDrivers) {
@@ -4301,11 +5408,11 @@ async function startServer() {
 
       const [
         rawMonthSalaries,
-        monthAdvances,
-        monthCoverages,
-        monthAttendance,
-        allSchools,
-        fleet,
+        rawMonthAdvances,
+        rawMonthCoverages,
+        rawMonthAttendance,
+        rawAllSchools,
+        rawFleet,
       ] = await Promise.all([
         db
           .select()
@@ -4328,9 +5435,10 @@ async function startServer() {
       ]);
 
       const activeIds = new Set(activeDrivers.map((d) => d.id));
-      const monthSalaries = closingRow
+      const monthSalaries = (closingRow
         ? rawMonthSalaries
-        : rawMonthSalaries.filter((s) => activeIds.has(s.driverId));
+        : rawMonthSalaries.filter((s) => activeIds.has(s.driverId))
+      ).filter((s) => unrestricted || scopedDriverIds.has(s.driverId));
       const reportDriverIds = new Set(monthSalaries.map((s) => s.driverId));
       const enrichedDrivers = closingRow
         ? allDrivers.filter((d) => reportDriverIds.has(d.id) || d.accountStatus === 'active')
@@ -4340,11 +5448,17 @@ async function startServer() {
         period: { month, year },
         drivers: enrichedDrivers,
         salaries: monthSalaries,
-        advances: monthAdvances,
-        coverages: monthCoverages,
-        attendance: monthAttendance,
-        schools: allSchools,
-        fleet,
+        advances: unrestricted
+          ? rawMonthAdvances
+          : rawMonthAdvances.filter((a) => scopedDriverIds.has(a.driverId)),
+        coverages: unrestricted
+          ? rawMonthCoverages
+          : rawMonthCoverages.filter((c) => scopedDriverIds.has(c.absentDriverId)),
+        attendance: unrestricted
+          ? rawMonthAttendance
+          : rawMonthAttendance.filter((a) => scopedDriverIds.has(a.driverId)),
+        schools: rawAllSchools.filter((s) => isSchoolAllowed(req.dbUser, s.id)),
+        fleet: rawFleet.filter((v) => isSchoolAllowed(req.dbUser, v.schoolId)),
       });
     } catch (error) {
       console.error('Reports error:', error);
@@ -4524,6 +5638,13 @@ async function startServer() {
         const driverId = Number(req.params.id);
         const [existing] = await db.select().from(drivers).where(eq(drivers.id, driverId)).limit(1);
         if (!existing) return res.status(404).json({ error: 'السائق غير موجود' });
+
+        if (!isSchoolUnrestricted(req.dbUser)) {
+          const sId = await getDriverCurrentSchoolId(driverId);
+          if (!isSchoolAllowed(req.dbUser, sId)) {
+            return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
 
         let nextPhotos: DriverLicensePhoto[];
         try {
@@ -4777,9 +5898,11 @@ async function startServer() {
     requireAuth,
     requireAdminOrStaff,
     requireAnyPermission(['drivers:read', 'gps:read']),
-    async (_req: AuthRequest, res) => {
+    async (req: AuthRequest, res) => {
       try {
-        const list = await getEnrichedSupervisors();
+        const list = (await getEnrichedSupervisors()).filter((s) =>
+          isSchoolAllowed(req.dbUser, s.schoolId)
+        );
         res.json({ supervisors: list });
       } catch (error) {
         console.error('Get supervisors error:', error);

@@ -24,7 +24,7 @@ export const userRoles = pgTable('user_roles', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
-// 2. Users (linked to Firebase Auth UID)
+// 2. Users (linked to Firebase Auth UID or Staff Code)
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
   uid: text('uid').notNull().unique(),
@@ -34,6 +34,10 @@ export const users = pgTable('users', {
   roleId: integer('role_id')
     .references(() => userRoles.id)
     .notNull(),
+  assignedSchoolIds: jsonb('assigned_school_ids').$type<number[]>().notNull().default([]),
+  customPermissions: jsonb('custom_permissions').$type<string[] | null>().default(null),
+  staffCode: text('staff_code').default(''),
+  employeeId: integer('employee_id').references(() => employees.id, { onDelete: 'set null' }),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
@@ -144,18 +148,18 @@ export const drivers = pgTable(
     pgPolicy('drivers_admin_insert', {
       for: 'insert',
       to: 'public',
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')`,
     }),
     pgPolicy('drivers_admin_update', {
       for: 'update',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')`,
     }),
     pgPolicy('drivers_admin_delete', {
       for: 'delete',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'movement_manager', 'accountant')`,
     }),
     pgPolicy('drivers_self_select', {
       for: 'select',
@@ -292,23 +296,23 @@ export const financialTransactions = pgTable(
     pgPolicy('ft_admin_accountant_select', {
       for: 'select',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')`,
     }),
     pgPolicy('ft_admin_accountant_insert', {
       for: 'insert',
       to: 'public',
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')`,
     }),
     pgPolicy('ft_admin_accountant_update', {
       for: 'update',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
-      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')`,
+      withCheck: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')`,
     }),
     pgPolicy('ft_admin_accountant_delete', {
       for: 'delete',
       to: 'public',
-      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant')`,
+      using: sql`current_setting('app.user_role', true) IN ('system', 'super_admin', 'accountant', 'movement_manager')`,
     }),
     pgPolicy('ft_driver_self_select', {
       for: 'select',
@@ -651,5 +655,56 @@ export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
   channel: one(chatChannels, { fields: [chatMessages.channelId], references: [chatChannels.id] }),
   senderUser: one(users, { fields: [chatMessages.senderUserId], references: [users.id] }),
 }));
+
+// 25. Employee Daily Reports (تقارير الموظفين اليومية الصوتية والكتابية الموجهة للمحاسب والمدير)
+export const dailyReports = pgTable(
+  'daily_reports',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id').references(() => users.id),
+    employeeId: integer('employee_id').references(() => employees.id, { onDelete: 'set null' }),
+    employeeName: text('employee_name').notNull(),
+    employeeRoleOrTitle: text('employee_role_or_title').default(''),
+    reportDate: text('report_date').notNull(), // YYYY-MM-DD
+    rawContent: text('raw_content').notNull(),
+    audioDataUrl: text('audio_data_url'),
+    audioDurationSec: integer('audio_duration_sec').default(0),
+    reportType: text('report_type').notNull().default('operations'), // operations | financial | mixed | urgent
+    targetAudience: text('target_audience').notNull().default('both'), // both | accountant | manager
+    financialAmount: numeric('financial_amount', { precision: 12, scale: 2 }).default('0'),
+    extractedTasksJson: jsonb('extracted_tasks_json').$type<string[]>().default([]),
+    attachmentsJson: jsonb('attachments_json')
+      .$type<
+        Array<{
+          id: string;
+          name: string;
+          url: string;
+          type: string;
+          category?: string;
+          sizeKb?: number;
+          createdAt?: string;
+        }>
+      >()
+      .default([]),
+    category: text('category').default('يومي عام'),
+    status: text('status').notNull().default('submitted'), // submitted | reviewed_by_accountant | reviewed_by_manager | approved
+    accountantNotes: text('accountant_notes').default(''),
+    managerNotes: text('manager_notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_daily_reports_date').on(table.reportDate),
+    index('idx_daily_reports_target').on(table.targetAudience),
+    index('idx_daily_reports_status').on(table.status),
+    index('idx_daily_reports_user').on(table.userId),
+  ]
+);
+
+export const dailyReportsRelations = relations(dailyReports, ({ one }) => ({
+  user: one(users, { fields: [dailyReports.userId], references: [users.id] }),
+  employee: one(employees, { fields: [dailyReports.employeeId], references: [employees.id] }),
+}));
+
 
 
