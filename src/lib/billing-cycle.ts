@@ -17,11 +17,22 @@ export interface SchoolBillingRange {
   year: number;
   startDate: string; // YYYY-MM-DD inclusive
   endDate: string; // YYYY-MM-DD inclusive
+  startDateTime: string; // YYYY-MM-DD 00:00:00
+  endDateTime: string; // YYYY-MM-DD 23:59:59 (11:59 PM)
+  startAtIso: string; // ISO-8601 Cairo start timestamp
+  endAtIso: string; // ISO-8601 Cairo end timestamp
   cycleType: BillingCycleType;
   startDay: number;
   endDay: number;
   labelAr: string;
   shortLabelAr: string;
+}
+
+export interface FinancialPeriodBounds extends SchoolBillingRange {
+  schoolId: number | null;
+  schoolName: string | null;
+  startAt: Date;
+  endAt: Date;
 }
 
 function pad2(n: number): string {
@@ -58,8 +69,9 @@ export function getDaysInMonth(year: number, month: number): number {
 
 /**
  * Resolves the financial cycle rule for a school.
- * - "مدرسة إشراقة الغد" (or default): calendar month (day 1 to 30/31)
- * - "مدرسة الهلالية" (or any school configured with shifted / startDay > 1): day 13 to day 12 of next month
+ * - "مدرسة إشراقة الغد" (or default): calendar month (day 1 00:00 to last day 23:59:59)
+ * - "مدرسة الهلالية" (or any school configured with shifted / startDay > 1):
+ *   day 13 of previous month 00:00 to day 12 of target month 23:59:59
  */
 export function resolveSchoolBillingRule(school?: SchoolBillingConfig | null): ResolvedBillingRule {
   const rawType = school?.billingCycleType;
@@ -84,13 +96,17 @@ export function resolveSchoolBillingRule(school?: SchoolBillingConfig | null): R
 }
 
 /**
- * Given a billing period (month, year) and a school's billing rule,
- * returns the exact inclusive [startDate, endDate] range in YYYY-MM-DD.
+ * Given a target billing period (month, year) and a school's billing rule,
+ * returns the exact inclusive [StartDate 00:00:00, EndDate 23:59:59] range.
  *
  * Examples:
- * - Calendar (day 1): month=11, year=2026 => 2026-11-01 to 2026-11-30
- * - Shifted (day 13): month=11, year=2026 => 2026-11-13 to 2026-12-12
- * - Shifted (day 13): month=12, year=2026 => 2026-12-13 to 2027-01-12
+ * - Calendar ("إشراقة الغد", day 1):
+ *   - month=11, year=2026 => 2026-11-01 00:00:00 to 2026-11-30 23:59:59
+ *   - month=2,  year=2024 => 2024-02-01 00:00:00 to 2024-02-29 23:59:59 (leap year)
+ * - Shifted ("الهلالية", startDay=13 -> endDay=12):
+ *   - month=11, year=2026 => 2026-10-13 00:00:00 to 2026-11-12 23:59:59
+ *   - month=1,  year=2026 => 2025-12-13 00:00:00 to 2026-01-12 23:59:59 (cross-year)
+ *   - month=12, year=2026 => 2026-11-13 00:00:00 to 2026-12-12 23:59:59
  */
 export function getBillingDateRangeForPeriod(
   month: number,
@@ -110,32 +126,64 @@ export function getBillingDateRangeForPeriod(
       year: safeYear,
       startDate,
       endDate,
+      startDateTime: `${startDate} 00:00:00`,
+      endDateTime: `${endDate} 23:59:59`,
+      startAtIso: `${startDate}T00:00:00.000+02:00`,
+      endAtIso: `${endDate}T23:59:59.999+02:00`,
       cycleType: 'calendar',
       startDay: 1,
       endDay: lastDay,
-      labelAr: `دورة ميلادية: من ${startDate} إلى ${endDate} (يوم 1 إلى ${lastDay})`,
+      labelAr: `دورة ميلادية: من ${startDate} إلى ${endDate} (يوم 1 إلى ${lastDay} · 11:59 م)`,
       shortLabelAr: `1/${safeMonth} → ${lastDay}/${safeMonth}`,
     };
   }
 
   const startDay = rule.startDay;
   const endDay = startDay - 1;
-  const nextMonth = safeMonth === 12 ? 1 : safeMonth + 1;
-  const nextYear = safeMonth === 12 ? safeYear + 1 : safeYear;
+  const prevMonth = safeMonth === 1 ? 12 : safeMonth - 1;
+  const prevYear = safeMonth === 1 ? safeYear - 1 : safeYear;
 
-  const startDate = `${safeYear}-${pad2(safeMonth)}-${pad2(startDay)}`;
-  const endDate = `${nextYear}-${pad2(nextMonth)}-${pad2(endDay)}`;
+  const prevMonthDays = getDaysInMonth(prevYear, prevMonth);
+  const clampedStartDay = Math.min(startDay, prevMonthDays);
+  const currMonthDays = getDaysInMonth(safeYear, safeMonth);
+  const clampedEndDay = Math.min(endDay, currMonthDays);
+
+  const startDate = `${prevYear}-${pad2(prevMonth)}-${pad2(clampedStartDay)}`;
+  const endDate = `${safeYear}-${pad2(safeMonth)}-${pad2(clampedEndDay)}`;
 
   return {
     month: safeMonth,
     year: safeYear,
     startDate,
     endDate,
+    startDateTime: `${startDate} 00:00:00`,
+    endDateTime: `${endDate} 23:59:59`,
+    startAtIso: `${startDate}T00:00:00.000+02:00`,
+    endAtIso: `${endDate}T23:59:59.999+02:00`,
     cycleType: 'shifted',
-    startDay,
-    endDay,
-    labelAr: `دورة مرحّلة: من ${startDate} إلى ${endDate} (يوم ${startDay} إلى ${endDay} التالي)`,
-    shortLabelAr: `${startDay}/${safeMonth} → ${endDay}/${nextMonth}`,
+    startDay: clampedStartDay,
+    endDay: clampedEndDay,
+    labelAr: `دورة مرحّلة: من ${startDate} إلى ${endDate} (${clampedStartDay}/${prevMonth} ← ${clampedEndDay}/${safeMonth} · 11:59 م)`,
+    shortLabelAr: `${clampedStartDay}/${prevMonth} → ${clampedEndDay}/${safeMonth}`,
+  };
+}
+
+/**
+ * Pure helper returning StartDate / EndDate (with 00:00:00 and 23:59:59 Date objects)
+ * for a given school config, targetMonth, and targetYear.
+ */
+export function getFinancialPeriodBounds(
+  school: SchoolBillingConfig | null | undefined,
+  targetMonth: number,
+  targetYear: number
+): FinancialPeriodBounds {
+  const range = getBillingDateRangeForPeriod(targetMonth, targetYear, school);
+  return {
+    ...range,
+    schoolId: school?.id ?? null,
+    schoolName: school?.name ?? null,
+    startAt: new Date(range.startAtIso),
+    endAt: new Date(range.endAtIso),
   };
 }
 
@@ -143,11 +191,12 @@ export function getBillingDateRangeForPeriod(
  * Given a transaction or trip date (YYYY-MM-DD) and a school's billing rule,
  * returns the canonical (month, year) billing period that this date belongs to.
  *
- * Examples for Shifted (startDay = 13):
- * - 2026-11-12 => { month: 10, year: 2026 } (range 2026-10-13 .. 2026-11-12)
- * - 2026-11-13 => { month: 11, year: 2026 } (range 2026-11-13 .. 2026-12-12)
- * - 2026-12-05 => { month: 11, year: 2026 } (range 2026-11-13 .. 2026-12-12)
- * - 2026-01-05 => { month: 12, year: 2025 } (range 2025-12-13 .. 2026-01-12)
+ * Examples for Shifted ("الهلالية", startDay = 13, closes day 12 of target month):
+ * - 2026-10-13 => { month: 11, year: 2026 } (Nov period: 2026-10-13 .. 2026-11-12)
+ * - 2026-11-12 => { month: 11, year: 2026 } (Nov period: 2026-10-13 .. 2026-11-12)
+ * - 2026-11-13 => { month: 12, year: 2026 } (Dec period: 2026-11-13 .. 2026-12-12)
+ * - 2026-12-18 => { month: 1,  year: 2027 } (Jan 2027 period: 2026-12-13 .. 2027-01-12)
+ * - 2026-01-05 => { month: 1,  year: 2026 } (Jan 2026 period: 2025-12-13 .. 2026-01-12)
  */
 export function getBillingPeriodForDate(
   dateStr: string,
@@ -173,15 +222,16 @@ export function getBillingPeriodForDate(
     return { month, year };
   }
 
+  // Day >= startDay (e.g. 13..31) belongs to NEXT month's shifted period (13 current -> 12 next)
   if (day >= rule.startDay) {
-    return { month, year };
+    if (month === 12) {
+      return { month: 1, year: year + 1 };
+    }
+    return { month: month + 1, year };
   }
 
-  // Day is before startDay -> belongs to the cycle that started in the previous month
-  if (month === 1) {
-    return { month: 12, year: year - 1 };
-  }
-  return { month: month - 1, year };
+  // Day < startDay (e.g. 1..12) belongs to THIS month's shifted period (13 prev -> 12 current)
+  return { month, year };
 }
 
 /**

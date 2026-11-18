@@ -1396,14 +1396,14 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         schoolForm.billingCycleType === 'shifted' ? 'text-[#ebd089]' : 'text-slate-500'
                       }`}
                     >
-                      من يوم 13 إلى 12 الشهر التالي (مثل: الهلالية)
+                      من يوم 13 الشهر السابق إلى 12 الشهر الحالي · 11:59 م (مثل: الهلالية)
                     </div>
                   </button>
                 </div>
                 {schoolForm.billingCycleType === 'shifted' && (
                   <div className="flex items-center justify-between gap-3 pt-1">
                     <label className="text-[11px] font-semibold text-slate-700">
-                      يوم بداية الدورة المالية في الشهر:
+                      يوم بداية الدورة المالية (من الشهر السابق):
                     </label>
                     <div className="flex items-center gap-2">
                       <input
@@ -1420,7 +1420,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         className="w-16 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center font-mono font-bold"
                       />
                       <span className="text-[11px] text-slate-500 font-mono">
-                        ← ينتهي يوم {Math.max(1, (Number(schoolForm.billingCycleStartDay) || 13) - 1)} التالي
+                        ← ينتهي يوم {Math.max(1, (Number(schoolForm.billingCycleStartDay) || 13) - 1)} من الشهر الحالي (11:59 م)
                       </span>
                     </div>
                   </div>

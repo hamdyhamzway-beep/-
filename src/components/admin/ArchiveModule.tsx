@@ -12,6 +12,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatEGP, normalizeLookupText } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
 import { DriverAvatar } from '../DriverAvatar';
@@ -37,6 +38,11 @@ interface ArchivedDriverStatement {
 }
 
 export const ArchiveModule: React.FC = () => {
+  const { dbUser } = useAuth();
+  const perms = dbUser?.permissions || [];
+  const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || perms.includes('*');
+  const can = (p: string) => isSuperAdmin || perms.includes('*') || perms.includes(p);
+
   const [data, setData] = useState<ArchivePayload>({
     drivers: [],
     employees: [],
@@ -52,13 +58,26 @@ export const ArchiveModule: React.FC = () => {
 
   const [deleteDriverTarget, setDeleteDriverTarget] = useState<EnrichedDriver | null>(null);
   const [deleteEmployeeTarget, setDeleteEmployeeTarget] = useState<EmployeeRecord | null>(null);
+  const [deleteVehicleTarget, setDeleteVehicleTarget] = useState<FleetVehicle | null>(null);
+  const [deleteSchoolTarget, setDeleteSchoolTarget] = useState<SchoolItem | null>(null);
   const [statementPreview, setStatementPreview] = useState<ArchivedDriverStatement | null>(null);
 
-  useEscapeKey(Boolean(deleteEmployeeTarget || deleteDriverTarget || statementPreview), () => {
-    if (deleteEmployeeTarget) setDeleteEmployeeTarget(null);
-    else if (deleteDriverTarget) setDeleteDriverTarget(null);
-    else if (statementPreview) setStatementPreview(null);
-  });
+  useEscapeKey(
+    Boolean(
+      deleteSchoolTarget ||
+        deleteVehicleTarget ||
+        deleteEmployeeTarget ||
+        deleteDriverTarget ||
+        statementPreview
+    ),
+    () => {
+      if (deleteSchoolTarget) setDeleteSchoolTarget(null);
+      else if (deleteVehicleTarget) setDeleteVehicleTarget(null);
+      else if (deleteEmployeeTarget) setDeleteEmployeeTarget(null);
+      else if (deleteDriverTarget) setDeleteDriverTarget(null);
+      else if (statementPreview) setStatementPreview(null);
+    }
+  );
 
   const loadArchive = useCallback(async () => {
     setLoading(true);
@@ -141,14 +160,16 @@ export const ArchiveModule: React.FC = () => {
     if (!deleteDriverTarget) return;
     setBusyId(`del-driver-${deleteDriverTarget.id}`);
     setError(null);
+    setMessage(null);
     try {
-      await apiFetch(`/api/drivers/${deleteDriverTarget.id}`, { method: 'DELETE' });
+      await apiFetch(`/api/archive/drivers/${deleteDriverTarget.id}`, { method: 'DELETE' });
+      const deletedName = deleteDriverTarget.fullName;
       setDeleteDriverTarget(null);
-      setMessage('تم حذف السائق من النظام نهائياً.');
+      setMessage(`تم حذف السائق ${deletedName} نهائياً من النظام.`);
       await loadArchive();
     } catch (err: unknown) {
       setDeleteDriverTarget(null);
-      setError(err instanceof Error ? err.message : 'تعذر الحذف النهائي لارتباط السائق بسجلات مالية');
+      setError(err instanceof Error ? err.message : 'تعذر الحذف النهائي للسائق');
     } finally {
       setBusyId(null);
     }
@@ -158,14 +179,54 @@ export const ArchiveModule: React.FC = () => {
     if (!deleteEmployeeTarget) return;
     setBusyId(`del-emp-${deleteEmployeeTarget.id}`);
     setError(null);
+    setMessage(null);
     try {
-      await apiFetch(`/api/employees/${deleteEmployeeTarget.id}`, { method: 'DELETE' });
+      await apiFetch(`/api/archive/employees/${deleteEmployeeTarget.id}`, { method: 'DELETE' });
+      const deletedName = deleteEmployeeTarget.fullName;
       setDeleteEmployeeTarget(null);
-      setMessage('تم حذف الموظف نهائياً.');
+      setMessage(`تم حذف الموظف ${deletedName} نهائياً من النظام.`);
       await loadArchive();
     } catch (err: unknown) {
       setDeleteEmployeeTarget(null);
-      setError(err instanceof Error ? err.message : 'تعذر حذف الموظف');
+      setError(err instanceof Error ? err.message : 'تعذر حذف الموظف نهائياً');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDeleteVehicle = async () => {
+    if (!deleteVehicleTarget) return;
+    setBusyId(`del-veh-${deleteVehicleTarget.id}`);
+    setError(null);
+    setMessage(null);
+    try {
+      await apiFetch(`/api/archive/vehicles/${deleteVehicleTarget.id}`, { method: 'DELETE' });
+      const busNum = deleteVehicleTarget.busNumber;
+      setDeleteVehicleTarget(null);
+      setMessage(`تم حذف المركبة ${busNum} نهائياً من النظام.`);
+      await loadArchive();
+    } catch (err: unknown) {
+      setDeleteVehicleTarget(null);
+      setError(err instanceof Error ? err.message : 'تعذر الحذف النهائي للمركبة');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDeleteSchool = async () => {
+    if (!deleteSchoolTarget) return;
+    setBusyId(`del-school-${deleteSchoolTarget.id}`);
+    setError(null);
+    setMessage(null);
+    try {
+      await apiFetch(`/api/archive/schools/${deleteSchoolTarget.id}`, { method: 'DELETE' });
+      const schoolName = deleteSchoolTarget.name;
+      setDeleteSchoolTarget(null);
+      setMessage(`تم حذف المدرسة ${schoolName} نهائياً من النظام.`);
+      await loadArchive();
+    } catch (err: unknown) {
+      setDeleteSchoolTarget(null);
+      setError(err instanceof Error ? err.message : 'تعذر الحذف النهائي للمدرسة');
     } finally {
       setBusyId(null);
     }
@@ -199,6 +260,21 @@ export const ArchiveModule: React.FC = () => {
       normalizeLookupText(e.fullName).includes(q) ||
       normalizeLookupText(e.employeeCode).includes(q) ||
       normalizeLookupText(e.jobTitle).includes(q)
+  );
+  const filteredVehicles = data.vehicles.filter(
+    (v) =>
+      !q ||
+      normalizeLookupText(v.busNumber).includes(q) ||
+      normalizeLookupText(v.registrationNumber).includes(q) ||
+      normalizeLookupText(v.ownerName).includes(q) ||
+      normalizeLookupText(v.schoolName || '').includes(q)
+  );
+  const filteredSchools = data.schools.filter(
+    (s) =>
+      !q ||
+      normalizeLookupText(s.name).includes(q) ||
+      normalizeLookupText(s.contactName || '').includes(q) ||
+      normalizeLookupText(s.contactPhone || '').includes(q)
   );
 
   return (
@@ -397,29 +473,46 @@ export const ArchiveModule: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="px-5 py-3.5 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
-              المركبات المؤرشفة ({data.vehicles.length})
+              المركبات المؤرشفة ({filteredVehicles.length})
             </div>
-            {data.vehicles.length === 0 ? (
+            {filteredVehicles.length === 0 ? (
               <div className="p-8 text-center text-xs text-slate-400">لا توجد مركبات مؤرشفة</div>
             ) : (
               <div className="divide-y divide-slate-100">
-                {data.vehicles.map((v) => (
-                  <div key={v.id} className="p-4 flex items-center justify-between gap-3 text-xs">
+                {filteredVehicles.map((v) => (
+                  <div key={v.id} className="p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
                     <div>
                       <div className="font-bold text-[#0B1F3A] font-mono">
                         {v.busNumber} · {v.registrationNumber}
                       </div>
-                      <div className="text-slate-500 mt-0.5">المالك: {v.ownerName}</div>
+                      <div className="text-slate-500 mt-0.5">
+                        المالك: {v.ownerName || '—'} · {v.schoolName || 'غير معين'}
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      disabled={busyId === `veh-${v.id}`}
-                      onClick={() => restoreVehicle(v)}
-                      className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-xs font-semibold text-white cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      استعادة
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {can('vehicles:write') && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={busyId === `veh-${v.id}`}
+                            onClick={() => restoreVehicle(v)}
+                            className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#13325c] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5 text-[#C89B3C]" />
+                            استعادة
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyId === `del-veh-${v.id}`}
+                            onClick={() => setDeleteVehicleTarget(v)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            حذف نهائي
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -428,29 +521,44 @@ export const ArchiveModule: React.FC = () => {
 
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
             <div className="px-5 py-3.5 border-b border-slate-200 font-bold text-sm text-[#0B1F3A]">
-              المدارس المؤرشفة ({data.schools.length})
+              المدارس المؤرشفة ({filteredSchools.length})
             </div>
-            {data.schools.length === 0 ? (
+            {filteredSchools.length === 0 ? (
               <div className="p-8 text-center text-xs text-slate-400">لا توجد مدارس مؤرشفة</div>
             ) : (
               <div className="divide-y divide-slate-100">
-                {data.schools.map((s) => (
-                  <div key={s.id} className="p-4 flex items-center justify-between gap-3 text-xs">
+                {filteredSchools.map((s) => (
+                  <div key={s.id} className="p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
                     <div>
                       <div className="font-bold text-[#0B1F3A]">{s.name}</div>
-                      <div className="text-slate-500 mt-0.5">
+                      <div className="text-slate-500 mt-0.5 tabular-nums">
                         قيمة العقد: {formatEGP(s.monthlyContractValue)}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      disabled={busyId === `school-${s.id}`}
-                      onClick={() => restoreSchool(s)}
-                      className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-xs font-semibold text-white cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      استعادة
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {can('schools:write') && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={busyId === `school-${s.id}`}
+                            onClick={() => restoreSchool(s)}
+                            className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#13325c] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5 text-[#C89B3C]" />
+                            استعادة
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyId === `del-school-${s.id}`}
+                            onClick={() => setDeleteSchoolTarget(s)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            حذف نهائي
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -512,7 +620,7 @@ export const ArchiveModule: React.FC = () => {
             <div className="px-5 py-4 bg-red-700 text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <AlertTriangle className="w-5 h-5" />
-                <h3 className="font-display text-sm font-bold">تأكيد الحذف النهائي</h3>
+                <h3 className="font-display text-sm font-bold">تأكيد الحذف النهائي للسائق</h3>
               </div>
               <button
                 type="button"
@@ -526,6 +634,7 @@ export const ArchiveModule: React.FC = () => {
               <p className="text-slate-700 leading-relaxed">
                 هل تريد حذف السائق <strong>{deleteDriverTarget.fullName}</strong> (كود{' '}
                 <strong className="font-mono">{deleteDriverTarget.driverCode}</strong>) نهائياً من النظام؟
+                سيتم مسح ملفه ورواتبه وسجلاته المرتبطة بشكل نهائي لا يمكن التراجع عنه.
               </p>
               <div className="flex justify-end gap-2">
                 <button
@@ -537,8 +646,9 @@ export const ArchiveModule: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  disabled={busyId === `del-driver-${deleteDriverTarget.id}`}
                   onClick={handleDeleteDriver}
-                  className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 cursor-pointer"
+                  className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 disabled:opacity-50 cursor-pointer"
                 >
                   حذف نهائي
                 </button>
@@ -551,26 +661,129 @@ export const ArchiveModule: React.FC = () => {
       {/* Permanent Delete Employee Confirmation */}
       {deleteEmployeeTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
-          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl p-5 space-y-4 text-xs">
-            <h3 className="font-bold text-sm text-[#0B1F3A]">تأكيد حذف الموظف نهائياً</h3>
-            <p className="text-slate-600">
-              هل تريد حذف الموظف <strong>{deleteEmployeeTarget.fullName}</strong> نهائياً؟
-            </p>
-            <div className="flex justify-end gap-2">
+          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="px-5 py-4 bg-red-700 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5" />
+                <h3 className="font-display text-sm font-bold">تأكيد الحذف النهائي للموظف</h3>
+              </div>
               <button
                 type="button"
                 onClick={() => setDeleteEmployeeTarget(null)}
-                className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 cursor-pointer"
+                className="text-red-100 hover:text-white cursor-pointer"
               >
-                إلغاء
+                <X className="w-5 h-5" />
               </button>
+            </div>
+            <div className="p-5 space-y-4 text-xs">
+              <p className="text-slate-700 leading-relaxed">
+                هل تريد حذف الموظف <strong>{deleteEmployeeTarget.fullName}</strong> نهائياً من النظام؟ هذا الإجراء لا يمكن التراجع عنه.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteEmployeeTarget(null)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={busyId === `del-emp-${deleteEmployeeTarget.id}`}
+                  onClick={handleDeleteEmployee}
+                  className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 disabled:opacity-50 cursor-pointer"
+                >
+                  حذف نهائي
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Permanent Delete Vehicle Confirmation */}
+      {deleteVehicleTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="px-5 py-4 bg-red-700 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5" />
+                <h3 className="font-display text-sm font-bold">تأكيد الحذف النهائي للمركبة</h3>
+              </div>
               <button
                 type="button"
-                onClick={handleDeleteEmployee}
-                className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 cursor-pointer"
+                onClick={() => setDeleteVehicleTarget(null)}
+                className="text-red-100 hover:text-white cursor-pointer"
               >
-                حذف نهائي
+                <X className="w-5 h-5" />
               </button>
+            </div>
+            <div className="p-5 space-y-4 text-xs">
+              <p className="text-slate-700 leading-relaxed">
+                هل تريد حذف المركبة <strong className="font-mono">{deleteVehicleTarget.busNumber}</strong> (لوحة{' '}
+                <strong className="font-mono">{deleteVehicleTarget.registrationNumber}</strong>) نهائياً من النظام؟
+                لا يمكن التراجع عن هذا الإجراء.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteVehicleTarget(null)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={busyId === `del-veh-${deleteVehicleTarget.id}`}
+                  onClick={handleDeleteVehicle}
+                  className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 disabled:opacity-50 cursor-pointer"
+                >
+                  حذف نهائي
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Permanent Delete School Confirmation */}
+      {deleteSchoolTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="px-5 py-4 bg-red-700 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5" />
+                <h3 className="font-display text-sm font-bold">تأكيد الحذف النهائي للمدرسة</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteSchoolTarget(null)}
+                className="text-red-100 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4 text-xs">
+              <p className="text-slate-700 leading-relaxed">
+                هل تريد حذف المدرسة <strong>{deleteSchoolTarget.name}</strong> نهائياً من النظام؟ سيتم فك ارتباطها بالسجلات وحذفها بشكل نهائي لا يمكن التراجع عنه.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteSchoolTarget(null)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={busyId === `del-school-${deleteSchoolTarget.id}`}
+                  onClick={handleDeleteSchool}
+                  className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 disabled:opacity-50 cursor-pointer"
+                >
+                  حذف نهائي
+                </button>
+              </div>
             </div>
           </div>
         </div>

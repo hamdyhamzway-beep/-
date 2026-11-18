@@ -9,6 +9,8 @@ import {
   advances,
   attendance,
   auditLogs,
+  billingPeriods,
+  chatChannels,
   coverageRecords,
   dailyReports,
   driverAssignments,
@@ -66,9 +68,11 @@ import {
   deleteCoverageTransaction,
   getActiveBillingPeriod,
   getDriverSchoolBillingConfig,
+  GetFinancialPeriod,
   getMonthlyClosingsHistory,
   getOrRecalculateDriverSalaryForRead,
   getSchoolBillingConfigById,
+  getSchoolBillingPeriodKey,
   getSupervisorCycleSummaries,
   recalculateDriverSalary,
   recordAdjustmentTransaction,
@@ -3115,6 +3119,8 @@ async function startServer() {
             year,
             startDate: defaultRange.startDate,
             endDate: defaultRange.endDate,
+            startDateTime: defaultRange.startDateTime,
+            endDateTime: defaultRange.endDateTime,
             labelAr: defaultRange.labelAr,
             shortLabelAr: defaultRange.shortLabelAr,
             schoolId: selectedSchoolId,
@@ -3844,6 +3850,262 @@ async function startServer() {
     }
   });
 
+  app.delete(
+    '/api/archive/drivers/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('drivers:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const driverId = Number(req.params.id);
+        const [existing] = await db
+          .select()
+          .from(drivers)
+          .where(eq(drivers.id, driverId))
+          .limit(1);
+        if (!existing) return res.status(404).json({ error: 'السائق غير موجود' });
+        if (existing.accountStatus === 'active') {
+          return res.status(409).json({ error: 'يرجى أرشفة السائق أولاً قبل الحذف النهائي' });
+        }
+
+        if (!isSchoolUnrestricted(req.dbUser)) {
+          const currentSchoolId = await getDriverCurrentSchoolId(driverId);
+          if (!isSchoolAllowed(req.dbUser, currentSchoolId)) {
+            return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
+          }
+        }
+
+        await db.transaction(async (tx) => {
+          await tx
+            .update(gpsLocations)
+            .set({ driverId: null })
+            .where(eq(gpsLocations.driverId, driverId));
+          await tx
+            .delete(chatChannels)
+            .where(and(eq(chatChannels.driverId, driverId), eq(chatChannels.channelType, 'direct')));
+          await tx
+            .update(chatChannels)
+            .set({ driverId: null })
+            .where(eq(chatChannels.driverId, driverId));
+          await tx
+            .update(coverageRecords)
+            .set({ replacementDriverId: null })
+            .where(eq(coverageRecords.replacementDriverId, driverId));
+          await tx
+            .delete(coverageRecords)
+            .where(eq(coverageRecords.absentDriverId, driverId));
+          await tx
+            .delete(financialTransactions)
+            .where(eq(financialTransactions.driverId, driverId));
+          await tx.delete(advances).where(eq(advances.driverId, driverId));
+          await tx.delete(salaries).where(eq(salaries.driverId, driverId));
+          await tx.delete(attendance).where(eq(attendance.driverId, driverId));
+          await tx.delete(driverAssignments).where(eq(driverAssignments.driverId, driverId));
+          await tx.delete(notifications).where(eq(notifications.recipientDriverId, driverId));
+          await tx.delete(drivers).where(eq(drivers.id, driverId));
+
+          if (existing.userId) {
+            await tx
+              .update(users)
+              .set({ isActive: false, phone: null, updatedAt: new Date() })
+              .where(eq(users.id, existing.userId));
+          }
+
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'PERMANENT_DELETE_DRIVER_FROM_ARCHIVE',
+            entityType: 'drivers',
+            entityId: String(driverId),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+        });
+
+        res.json({ ok: true, deletedId: driverId });
+      } catch (error) {
+        console.error('Archive permanent delete driver error:', error);
+        res.status(500).json({ error: 'تعذر الحذف النهائي للسائق من الأرشفة' });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/archive/employees/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('employees:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const [existing] = await db.select().from(employees).where(eq(employees.id, id)).limit(1);
+        if (!existing) return res.status(404).json({ error: 'الموظف غير موجود' });
+        if (existing.status === 'active') {
+          return res.status(409).json({ error: 'يرجى أرشفة الموظف أولاً قبل الحذف النهائي' });
+        }
+        if (!isSchoolAllowed(req.dbUser, existing.schoolId)) {
+          return res.status(403).json({ error: 'هذا الموظف تابع لمدرسة خارج نطاق صلاحياتك' });
+        }
+
+        await db.transaction(async (tx) => {
+          await tx.delete(employees).where(eq(employees.id, id));
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'PERMANENT_DELETE_EMPLOYEE_FROM_ARCHIVE',
+            entityType: 'employees',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+        });
+
+        res.json({ ok: true, deletedId: id });
+      } catch (error) {
+        console.error('Archive permanent delete employee error:', error);
+        res.status(500).json({ error: 'تعذر الحذف النهائي للموظف من الأرشفة' });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/archive/vehicles/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('vehicles:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const [existing] = await db.select().from(vehicles).where(eq(vehicles.id, id)).limit(1);
+        if (!existing) return res.status(404).json({ error: 'المركبة غير موجودة' });
+        if (existing.operationalStatus !== 'inactive') {
+          return res.status(409).json({ error: 'يرجى أرشفة المركبة أولاً قبل الحذف النهائي' });
+        }
+
+        if (!isSchoolUnrestricted(req.dbUser)) {
+          const [assign] = await db
+            .select({ schoolId: driverAssignments.schoolId })
+            .from(driverAssignments)
+            .where(and(eq(driverAssignments.vehicleId, id), eq(driverAssignments.isCurrent, true)))
+            .limit(1);
+          const effSchoolId = existing.schoolId ?? assign?.schoolId ?? null;
+          if (!effSchoolId || !isSchoolAllowed(req.dbUser, effSchoolId)) {
+            return res.status(403).json({ error: 'هذه المركبة خارج نطاق المدارس المصرح لك بها' });
+          }
+        }
+
+        await db.transaction(async (tx) => {
+          await tx.update(gpsLocations).set({ vehicleId: null }).where(eq(gpsLocations.vehicleId, id));
+          await tx
+            .update(driverAssignments)
+            .set({ vehicleId: null })
+            .where(eq(driverAssignments.vehicleId, id));
+          await tx
+            .update(coverageRecords)
+            .set({ vehicleId: null })
+            .where(eq(coverageRecords.vehicleId, id));
+          await tx.update(supervisors).set({ vehicleId: null }).where(eq(supervisors.vehicleId, id));
+          await tx
+            .update(supervisorTrips)
+            .set({ vehicleId: null })
+            .where(eq(supervisorTrips.vehicleId, id));
+          await tx.delete(vehicles).where(eq(vehicles.id, id));
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'PERMANENT_DELETE_VEHICLE_FROM_ARCHIVE',
+            entityType: 'vehicles',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+        });
+
+        res.json({ ok: true, deletedId: id });
+      } catch (error) {
+        console.error('Archive permanent delete vehicle error:', error);
+        res.status(500).json({ error: 'تعذر الحذف النهائي للمركبة من الأرشفة' });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/archive/schools/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('schools:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const [existing] = await db.select().from(schools).where(eq(schools.id, id)).limit(1);
+        if (!existing) return res.status(404).json({ error: 'المدرسة غير موجودة' });
+        if (existing.isActive) {
+          return res.status(409).json({ error: 'يرجى أرشفة المدرسة أولاً قبل الحذف النهائي' });
+        }
+        if (!isSchoolAllowed(req.dbUser, id)) {
+          return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+        }
+
+        await db.transaction(async (tx) => {
+          await tx.update(vehicles).set({ schoolId: null }).where(eq(vehicles.schoolId, id));
+          await tx.update(routes).set({ schoolId: null }).where(eq(routes.schoolId, id));
+          await tx
+            .update(driverAssignments)
+            .set({ schoolId: null })
+            .where(eq(driverAssignments.schoolId, id));
+          await tx.update(salaries).set({ schoolId: null }).where(eq(salaries.schoolId, id));
+          await tx.update(advances).set({ schoolId: null }).where(eq(advances.schoolId, id));
+          await tx
+            .update(coverageRecords)
+            .set({ schoolId: null })
+            .where(eq(coverageRecords.schoolId, id));
+          await tx
+            .update(financialTransactions)
+            .set({ schoolId: null })
+            .where(eq(financialTransactions.schoolId, id));
+          await tx.update(attendance).set({ schoolId: null }).where(eq(attendance.schoolId, id));
+          await tx.update(employees).set({ schoolId: null }).where(eq(employees.schoolId, id));
+          await tx
+            .update(monthlyClosings)
+            .set({ schoolId: null })
+            .where(eq(monthlyClosings.schoolId, id));
+          await tx.update(supervisors).set({ schoolId: null }).where(eq(supervisors.schoolId, id));
+          await tx.update(chatChannels).set({ schoolId: null }).where(eq(chatChannels.schoolId, id));
+          await tx.update(dailyReports).set({ schoolId: null }).where(eq(dailyReports.schoolId, id));
+          await tx
+            .delete(billingPeriods)
+            .where(eq(billingPeriods.key, getSchoolBillingPeriodKey(id)));
+
+          const allUsersRows = await tx.select().from(users);
+          for (const u of allUsersRows) {
+            const currentAssigned = Array.isArray(u.assignedSchoolIds) ? u.assignedSchoolIds : [];
+            if (currentAssigned.includes(id)) {
+              await tx
+                .update(users)
+                .set({
+                  assignedSchoolIds: currentAssigned.filter((sid) => sid !== id),
+                  updatedAt: new Date(),
+                })
+                .where(eq(users.id, u.id));
+            }
+          }
+
+          await tx.delete(schools).where(eq(schools.id, id));
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'PERMANENT_DELETE_SCHOOL_FROM_ARCHIVE',
+            entityType: 'schools',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+        });
+
+        res.json({ ok: true, deletedId: id });
+      } catch (error) {
+        console.error('Archive permanent delete school error:', error);
+        res.status(500).json({ error: 'تعذر الحذف النهائي للمدرسة من الأرشفة' });
+      }
+    }
+  );
+
   app.post('/api/employees', requireAuth, requireAdminOrStaff, requirePermission('employees:write'), async (req: AuthRequest, res) => {
     try {
       const {
@@ -4409,18 +4671,29 @@ async function startServer() {
   // 5d. Monthly Settlement / Closing & Fresh-Month Rollover (التصفية الشهرية وبدء شهر جديد على بياض)
   app.get('/api/finance/period', requireAuth, async (req: AuthRequest, res) => {
     try {
-      const schoolId = req.query.schoolId ? Number(req.query.schoolId) : null;
+      const schoolId = req.query.schoolId && req.query.schoolId !== 'all' ? Number(req.query.schoolId) : null;
+      if (schoolId && !isSchoolAllowed(req.dbUser, schoolId)) {
+        return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+      }
       const [activePeriod, schoolCfg] = await Promise.all([
         getActiveBillingPeriod(schoolId),
         getSchoolBillingConfigById(db, schoolId),
       ]);
-      const billingRange = getBillingDateRangeForPeriod(
-        activePeriod.month,
-        activePeriod.year,
-        schoolCfg
-      );
+      const autoPeriod = String(req.query.autoPeriod || '').toLowerCase() === 'true';
       const currentAutoRange = getCurrentBillingRangeForSchool(schoolCfg);
-      res.json({ activePeriod, billingRange, currentAutoRange });
+      const targetMonth = autoPeriod
+        ? currentAutoRange.month
+        : Number(req.query.month) || activePeriod.month;
+      const targetYear = autoPeriod
+        ? currentAutoRange.year
+        : Number(req.query.year) || activePeriod.year;
+      const financialPeriod = await GetFinancialPeriod(schoolId, targetMonth, targetYear);
+      res.json({
+        activePeriod,
+        billingRange: financialPeriod,
+        currentAutoRange,
+        financialPeriod,
+      });
     } catch (error) {
       res.status(500).json({ error: 'تعذر قراءة الشهر المالي المفتوح' });
     }
@@ -6175,6 +6448,8 @@ async function startServer() {
           year,
           startDate: defaultRange.startDate,
           endDate: defaultRange.endDate,
+          startDateTime: defaultRange.startDateTime,
+          endDateTime: defaultRange.endDateTime,
           labelAr: defaultRange.labelAr,
           shortLabelAr: defaultRange.shortLabelAr,
           schoolId: selectedSchoolId,
@@ -6306,6 +6581,8 @@ async function startServer() {
           year,
           startDate: range.startDate,
           endDate: range.endDate,
+          startDateTime: range.startDateTime,
+          endDateTime: range.endDateTime,
           labelAr: range.labelAr,
           shortLabelAr: range.shortLabelAr,
         },

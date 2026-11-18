@@ -22,6 +22,8 @@ import {
   getBillingPeriodForDate,
   getCairoTodayDateString,
   getCurrentBillingRangeForSchool,
+  getFinancialPeriodBounds,
+  type FinancialPeriodBounds,
   type SchoolBillingConfig,
   type SchoolBillingRange,
 } from '../lib/billing-cycle.ts';
@@ -78,6 +80,24 @@ export async function getSchoolBillingConfigById(
     .limit(1);
   return school || null;
 }
+
+/**
+ * GetFinancialPeriod(schoolId, targetMonth, targetYear)
+ * Returns exact StartDate (00:00:00) and EndDate (23:59:59) for the given school & period:
+ * - "إشراقة الغد" (calendar): Day 1 00:00:00 to last day of targetMonth 23:59:59
+ * - "الهلالية" (shifted, startDay=13): Day 13 of previous month 00:00:00 to Day 12 of targetMonth 23:59:59
+ */
+export async function getFinancialPeriod(
+  schoolId: number | null | undefined,
+  targetMonth: number,
+  targetYear: number,
+  tx: DbExecutor = db
+): Promise<FinancialPeriodBounds> {
+  const schoolCfg = await getSchoolBillingConfigById(tx, schoolId);
+  return getFinancialPeriodBounds(schoolCfg, targetMonth, targetYear);
+}
+
+export const GetFinancialPeriod = getFinancialPeriod;
 
 export async function recalculateDriverSalary(
   tx: DbExecutor,

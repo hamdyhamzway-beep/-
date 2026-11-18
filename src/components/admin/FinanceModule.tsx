@@ -98,6 +98,8 @@ interface FinanceOverview {
     year: number;
     startDate?: string;
     endDate?: string;
+    startDateTime?: string;
+    endDateTime?: string;
     labelAr?: string;
     shortLabelAr?: string;
     schoolId?: number | null;
