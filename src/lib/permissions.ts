@@ -68,14 +68,14 @@ export const STAFF_PERMISSIONS_CATALOG: PermissionDefinition[] = [
   },
   {
     key: 'vehicles:read',
-    labelAr: 'عرض المركبات والملاك',
-    descriptionAr: 'عرض أرقام الباصات واللوحات وملاك السيارات',
+    labelAr: 'عرض المركبات',
+    descriptionAr: 'عرض أرقام الباصات واللوحات للمركبات',
     group: 'fleet',
   },
   {
     key: 'vehicles:write',
-    labelAr: 'إدارة المركبات والملاك',
-    descriptionAr: 'إضافة وتعديل الباصات وملاك المركبات',
+    labelAr: 'إدارة المركبات',
+    descriptionAr: 'إضافة وتعديل بيانات الباصات والمركبات',
     group: 'fleet',
   },
   {

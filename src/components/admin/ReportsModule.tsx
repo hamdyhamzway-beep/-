@@ -209,13 +209,13 @@ export const ReportsModule: React.FC = () => {
     } else if (reportType === 'schools' || reportType === 'profitability') {
       exportRowsToExcel(
         `alwaleed-profitability-${year}-${month}`,
-        ['المدرسة', 'قيمة العقد الشهري', 'عدد المركبات', 'تكلفة الملاك', 'صافي ربح المكتب'],
+        ['المدرسة', 'قيمة العقد الشهري', 'عدد المركبات', 'إجمالي رواتب السائقين', 'صافي ربح المدرسة'],
         data.schools.map((s) => {
           const vCount = data.fleet.filter((v) => v.schoolId === s.id).length;
-          const ownerCost = data.fleet
-            .filter((v) => v.schoolId === s.id)
-            .reduce((sum, v) => sum + v.monthlyOwnerCost, 0);
-          return [s.name, Number(s.monthlyContractValue), vCount, ownerCost, Number(s.monthlyContractValue) - ownerCost];
+          const schoolSal = data.salaries
+            .filter((sal) => driverById[sal.driverId]?.schoolId === s.id)
+            .reduce((sum, sal) => sum + Number(sal.netSalary || 0), 0);
+          return [s.name, Number(s.monthlyContractValue), vCount, schoolSal, Number(s.monthlyContractValue) - schoolSal];
         })
       );
     } else if (reportType === 'vehicles' || reportType === 'gps') {
@@ -258,8 +258,8 @@ export const ReportsModule: React.FC = () => {
 
   const totalSchoolRevenue =
     data?.schools.reduce((sum, s) => sum + Number(s.monthlyContractValue || 0), 0) || 0;
-  const totalOwnerCosts =
-    data?.fleet.reduce((sum, v) => sum + Number(v.monthlyOwnerCost || 0), 0) || 0;
+  const totalSalariesNet =
+    data?.salaries.reduce((sum, sal) => sum + Number(sal.netSalary || 0), 0) || 0;
 
   const handleSendReportToWhatsApp = async () => {
     if (!reportCaptureRef.current || !data) return;
@@ -704,15 +704,15 @@ export const ReportsModule: React.FC = () => {
                     </div>
                   </div>
                   <div className="border border-slate-200 rounded-xl p-4">
-                    <div className="text-slate-500">إجمالي تكاليف ملاك الباصات</div>
-                    <div className="mt-1 font-mono text-lg font-bold text-slate-900 tabular-nums">
-                      {formatEGP(totalOwnerCosts)}
+                    <div className="text-slate-500">إجمالي صافي رواتب السائقين</div>
+                    <div className="mt-1 font-mono text-lg font-bold text-red-700 tabular-nums">
+                      {formatEGP(totalSalariesNet)}
                     </div>
                   </div>
                   <div className="bg-[#0B1F3A] text-white rounded-xl p-4">
-                    <div className="text-slate-300">صافي ربح الوليد ترافيل</div>
+                    <div className="text-slate-300">صافي ربح المكتب المتوقع</div>
                     <div className="mt-1 font-mono text-lg font-bold text-[#C89B3C] tabular-nums">
-                      {formatEGP(totalSchoolRevenue - totalOwnerCosts)}
+                      {formatEGP(totalSchoolRevenue - totalSalariesNet)}
                     </div>
                   </div>
                 </div>
@@ -722,16 +722,16 @@ export const ReportsModule: React.FC = () => {
                       <th className="py-3 px-4">المدرسة</th>
                       <th className="py-3 px-4">قيمة العقد الشهري</th>
                       <th className="py-3 px-4">عدد الباصات</th>
-                      <th className="py-3 px-4">تكلفة الملاك</th>
-                      <th className="py-3 px-4">صافي الربح</th>
+                      <th className="py-3 px-4">رواتب السائقين</th>
+                      <th className="py-3 px-4">صافي الربح المتوقع</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {data.schools.map((s) => {
                       const vCount = data.fleet.filter((v) => v.schoolId === s.id).length;
-                      const ownerCost = data.fleet
-                        .filter((v) => v.schoolId === s.id)
-                        .reduce((sum, v) => sum + v.monthlyOwnerCost, 0);
+                      const schoolSal = data.salaries
+                        .filter((sal) => driverById[sal.driverId]?.schoolId === s.id)
+                        .reduce((sum, sal) => sum + Number(sal.netSalary || 0), 0);
                       return (
                         <tr key={s.id}>
                           <td className="py-3 px-4 font-semibold">{s.name}</td>
@@ -739,11 +739,11 @@ export const ReportsModule: React.FC = () => {
                             {formatEGP(s.monthlyContractValue)}
                           </td>
                           <td className="py-3 px-4 font-mono tabular-nums">{vCount}</td>
-                          <td className="py-3 px-4 font-mono tabular-nums">
-                            {formatEGP(ownerCost)}
+                          <td className="py-3 px-4 font-mono tabular-nums text-red-700">
+                            {formatEGP(schoolSal)}
                           </td>
                           <td className="py-3 px-4 font-mono font-bold text-emerald-700 tabular-nums">
-                            {formatEGP(Number(s.monthlyContractValue) - ownerCost)}
+                            {formatEGP(Number(s.monthlyContractValue) - schoolSal)}
                           </td>
                         </tr>
                       );

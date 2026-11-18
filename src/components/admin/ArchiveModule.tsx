@@ -266,7 +266,6 @@ export const ArchiveModule: React.FC = () => {
       !q ||
       normalizeLookupText(v.busNumber).includes(q) ||
       normalizeLookupText(v.registrationNumber).includes(q) ||
-      normalizeLookupText(v.ownerName).includes(q) ||
       normalizeLookupText(v.schoolName || '').includes(q)
   );
   const filteredSchools = data.schools.filter(
@@ -486,7 +485,7 @@ export const ArchiveModule: React.FC = () => {
                         {v.busNumber} · {v.registrationNumber}
                       </div>
                       <div className="text-slate-500 mt-0.5">
-                        المالك: {v.ownerName || '—'} · {v.schoolName || 'غير معين'}
+                        {v.schoolName || 'غير معين بمدرسة'}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">

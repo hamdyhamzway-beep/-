@@ -28,7 +28,6 @@ import {
   userRoles,
   users,
   type DriverLicensePhoto,
-  vehicleOwners,
   vehicles,
   voiceCommandLogs,
 } from './src/db/schema.ts';
@@ -202,13 +201,12 @@ function sanitizeLicensePhotos(
 }
 
 async function getEnrichedDrivers() {
-  const [allDrivers, currentAssignments, allSchools, allVehicles, allOwners, allRoutes] =
+  const [allDrivers, currentAssignments, allSchools, allVehicles, allRoutes] =
     await Promise.all([
       db.select().from(drivers).orderBy(drivers.driverCode),
       db.select().from(driverAssignments).where(eq(driverAssignments.isCurrent, true)),
       db.select().from(schools),
       db.select().from(vehicles),
-      db.select().from(vehicleOwners),
       db.select().from(routes),
     ]);
 
@@ -217,9 +215,6 @@ async function getEnrichedDrivers() {
 
   const vehicleById: Record<number, typeof vehicles.$inferSelect> = {};
   for (const v of allVehicles) vehicleById[v.id] = v;
-
-  const ownerById: Record<number, typeof vehicleOwners.$inferSelect> = {};
-  for (const o of allOwners) ownerById[o.id] = o;
 
   const routeById: Record<number, typeof routes.$inferSelect> = {};
   for (const r of allRoutes) routeById[r.id] = r;
@@ -231,7 +226,6 @@ async function getEnrichedDrivers() {
     const assign = assignByDriver[d.id];
     const school = assign?.schoolId ? schoolById[assign.schoolId] : undefined;
     const vehicle = assign?.vehicleId ? vehicleById[assign.vehicleId] : undefined;
-    const owner = vehicle?.ownerId ? ownerById[vehicle.ownerId] : undefined;
     const route = assign?.routeId ? routeById[assign.routeId] : undefined;
 
     return {
@@ -244,8 +238,6 @@ async function getEnrichedDrivers() {
       vehicleId: vehicle?.id || null,
       busNumber: vehicle?.busNumber || '—',
       registrationNumber: vehicle?.registrationNumber || '—',
-      vehicleOwnerName: owner?.fullName || '—',
-      vehicleOwnerPhone: owner?.phone || '—',
       routeId: route?.id || null,
       routeName: route?.name || '—',
       pickupArea: route?.pickupArea || '',
@@ -259,7 +251,6 @@ async function getEnrichedDrivers() {
 async function getFleetWithLatestGps() {
   const [
     allVehicles,
-    allOwners,
     allSchools,
     allRoutes,
     allDrivers,
@@ -267,7 +258,6 @@ async function getFleetWithLatestGps() {
     latestGpsRows,
   ] = await Promise.all([
     db.select().from(vehicles).orderBy(vehicles.busNumber),
-    db.select().from(vehicleOwners),
     db.select().from(schools),
     db.select().from(routes),
     db.select().from(drivers),
@@ -281,9 +271,6 @@ async function getFleetWithLatestGps() {
       latestByVehicle[g.vehicleId] = g;
     }
   }
-
-  const ownerById: Record<number, typeof vehicleOwners.$inferSelect> = {};
-  for (const o of allOwners) ownerById[o.id] = o;
 
   const schoolById: Record<number, typeof schools.$inferSelect> = {};
   for (const s of allSchools) schoolById[s.id] = s;
@@ -306,15 +293,11 @@ async function getFleetWithLatestGps() {
     const effectiveSchoolId = v.schoolId ?? assign?.schoolId ?? null;
     const school = effectiveSchoolId ? schoolById[effectiveSchoolId] : undefined;
     const route = assign?.routeId ? routeById[assign.routeId] : undefined;
-    const owner = v.ownerId ? ownerById[v.ownerId] : undefined;
     const gps = latestByVehicle[v.id] || null;
     const fresh = gps ? isGpsFresh(gps.recordedAt, gps.isLive) : false;
 
     return {
       ...v,
-      monthlyOwnerCost: Number(v.monthlyOwnerCost || 0),
-      ownerName: owner?.fullName || '—',
-      ownerPhone: owner?.phone || '—',
       driverId: driver?.id || null,
       driverName: driver?.fullName || 'غير معين',
       driverCode: driver?.driverCode || '—',
@@ -1125,9 +1108,6 @@ async function startServer() {
         (sum, s) => sum + Number(s.monthlyContractValue || 0),
         0
       );
-      const totalOwnerCosts = fleet
-        .filter((v) => v.operationalStatus !== 'inactive')
-        .reduce((sum, v) => sum + Number(v.monthlyOwnerCost || 0), 0);
 
       const totalDriverSalaries = totalMonthlySalaries;
       const totalEmployeeSalaries = activeEmployees.reduce((sum, e) => {
@@ -1213,7 +1193,6 @@ async function startServer() {
           totalCoverageDeductions,
           totalOutstandingPayments,
           totalSchoolContracts: effectiveSchoolContracts,
-          totalOwnerCosts,
           monthlyBusinessProfit: effectiveProfit,
         },
         drivers: enrichedDrivers.map((d) => {
@@ -1425,35 +1404,7 @@ async function startServer() {
     return opts.routeId ? Number(opts.routeId) : null;
   }
 
-  async function resolveOwnerIdForVehicle(
-    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
-    opts: { ownerId?: unknown; ownerName?: unknown }
-  ): Promise<number | null> {
-    if (opts.ownerName !== undefined) {
-      const trimmed = String(opts.ownerName || '').trim();
-      if (!trimmed) return null;
 
-      const [existing] = await tx
-        .select()
-        .from(vehicleOwners)
-        .where(eq(vehicleOwners.fullName, trimmed))
-        .limit(1);
-      if (existing) return existing.id;
-
-      const [created] = await tx
-        .insert(vehicleOwners)
-        .values({
-          fullName: trimmed,
-          phone: '',
-          nationalId: '',
-          notes: '',
-        })
-        .returning();
-      return created.id;
-    }
-
-    return opts.ownerId ? Number(opts.ownerId) : null;
-  }
 
   async function resolveDriverByIdOrQuery(opts: {
     driverId?: unknown;
@@ -2052,7 +2003,6 @@ async function startServer() {
             (d) => d.schoolId === s.id && d.accountStatus === 'active'
           );
           const schoolRoutes = allRoutes.filter((r) => r.schoolId === s.id);
-          const ownerCost = schoolVehicles.reduce((sum, v) => sum + v.monthlyOwnerCost, 0);
 
           const driverSummaries = await Promise.all(
             schoolDrivers.map(async (d) => {
@@ -2100,10 +2050,9 @@ async function startServer() {
             monthlyContractValue: contractValue,
             vehicleCount: schoolVehicles.length,
             driverCount: driverSummaries.length,
-            ownerCost,
             totalDriverSalaries,
             totalNetDriverSalaries,
-            estimatedProfit: contractValue - ownerCost - totalDriverSalaries,
+            estimatedProfit: contractValue - totalDriverSalaries,
             routes: schoolRoutes,
             vehicles: schoolVehicles,
             drivers: driverSummaries,
@@ -2297,142 +2246,13 @@ async function startServer() {
     }
   });
 
-  app.get('/api/owners', requireAuth, requireAdminOrStaff, requireAnyPermission(['vehicles:read', 'schools:read']), async (req: AuthRequest, res) => {
-    try {
-      const allOwners = await db.select().from(vehicleOwners).orderBy(vehicleOwners.fullName);
-      if (isSchoolUnrestricted(req.dbUser)) {
-        return res.json({ owners: allOwners });
-      }
-      const fleet = await getFleetWithLatestGps();
-      const allowedOwnerIds = new Set(
-        fleet
-          .filter((v) => isSchoolAllowed(req.dbUser, v.schoolId) && v.ownerId)
-          .map((v) => v.ownerId as number)
-      );
-      res.json({ owners: allOwners.filter((o) => allowedOwnerIds.has(o.id)) });
-    } catch (error) {
-      console.error('Get owners error:', error);
-      res.status(500).json({ error: 'تعذر تحميل ملاك المركبات' });
-    }
-  });
-
-  app.post('/api/owners', requireAuth, requireAdminOrStaff, requirePermission('vehicles:write'), async (req: AuthRequest, res) => {
-    try {
-      const { fullName, phone, nationalId, notes } = req.body;
-      if (!fullName || !phone) {
-        return res.status(400).json({ error: 'اسم المالك ورقم الهاتف مطلوبان' });
-      }
-      const [owner] = await db
-        .insert(vehicleOwners)
-        .values({
-          fullName: String(fullName).trim(),
-          phone: String(phone).trim(),
-          nationalId: String(nationalId || '').trim(),
-          notes: String(notes || '').trim(),
-        })
-        .returning();
-      res.status(201).json({ owner });
-    } catch (error) {
-      console.error('Create owner error:', error);
-      res.status(500).json({ error: 'تعذر إضافة مالك المركبة' });
-    }
-  });
-
-  app.patch('/api/owners/:id', requireAuth, requireAdminOrStaff, requirePermission('vehicles:write'), async (req: AuthRequest, res) => {
-    try {
-      const id = Number(req.params.id);
-      if (!Number.isFinite(id)) {
-        return res.status(400).json({ error: 'معرف المالك غير صالح' });
-      }
-      const [existing] = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, id)).limit(1);
-      if (!existing) {
-        return res.status(404).json({ error: 'مالك المركبة غير موجود' });
-      }
-      const nextName =
-        req.body.fullName !== undefined ? String(req.body.fullName).trim() : existing.fullName;
-      const nextPhone =
-        req.body.phone !== undefined ? String(req.body.phone).trim() : existing.phone;
-      if (!nextName || !nextPhone) {
-        return res.status(400).json({ error: 'اسم المالك ورقم الهاتف مطلوبان' });
-      }
-
-      const [updated] = await db
-        .update(vehicleOwners)
-        .set({
-          fullName: nextName,
-          phone: nextPhone,
-          nationalId:
-            req.body.nationalId !== undefined
-              ? String(req.body.nationalId || '').trim()
-              : existing.nationalId,
-          notes:
-            req.body.notes !== undefined
-              ? String(req.body.notes || '').trim()
-              : existing.notes,
-        })
-        .where(eq(vehicleOwners.id, id))
-        .returning();
-
-      await db.insert(auditLogs).values({
-        actorUserId: req.dbUser!.id,
-        action: 'UPDATE_VEHICLE_OWNER',
-        entityType: 'vehicle_owners',
-        entityId: String(id),
-        beforeJson: existing,
-        afterJson: updated,
-        ipAddress: req.ip || '',
-      });
-
-      res.json({ owner: updated });
-    } catch (error) {
-      console.error('Update owner error:', error);
-      res.status(500).json({ error: 'تعذر تحديث بيانات مالك المركبة' });
-    }
-  });
-
-  app.delete('/api/owners/:id', requireAuth, requireAdminOrStaff, requirePermission('vehicles:write'), async (req: AuthRequest, res) => {
-    try {
-      const id = Number(req.params.id);
-      if (!Number.isFinite(id)) {
-        return res.status(400).json({ error: 'معرف المالك غير صالح' });
-      }
-      const [existing] = await db.select().from(vehicleOwners).where(eq(vehicleOwners.id, id)).limit(1);
-      if (!existing) {
-        return res.status(404).json({ error: 'مالك المركبة غير موجود' });
-      }
-
-      await db.transaction(async (tx) => {
-        await tx
-          .update(vehicles)
-          .set({ ownerId: null })
-          .where(eq(vehicles.ownerId, id));
-
-        await tx.delete(vehicleOwners).where(eq(vehicleOwners.id, id));
-
-        await tx.insert(auditLogs).values({
-          actorUserId: req.dbUser!.id,
-          action: 'DELETE_VEHICLE_OWNER',
-          entityType: 'vehicle_owners',
-          entityId: String(id),
-          beforeJson: existing,
-          ipAddress: req.ip || '',
-        });
-      });
-
-      res.json({ ok: true });
-    } catch (error) {
-      console.error('Delete owner error:', error);
-      res.status(500).json({ error: 'تعذر حذف مالك المركبة' });
-    }
-  });
 
   app.get('/api/vehicles', requireAuth, requireAdminOrStaff, requirePermission('vehicles:read'), async (req: AuthRequest, res) => {
     try {
       const fleet = (await getFleetWithLatestGps()).filter((v) =>
         isSchoolAllowed(req.dbUser, v.schoolId)
       );
-      const owners = await db.select().from(vehicleOwners).orderBy(vehicleOwners.fullName);
-      res.json({ vehicles: fleet, owners });
+      res.json({ vehicles: fleet });
     } catch (error) {
       console.error('Get vehicles error:', error);
       res.status(500).json({ error: 'تعذر تحميل المركبات' });
@@ -2445,11 +2265,8 @@ async function startServer() {
         busNumber,
         registrationNumber,
         vehicleType,
-        ownerId,
-        ownerName,
         schoolId,
         schoolName,
-        monthlyOwnerCost,
         operationalStatus,
         notes,
       } = req.body;
@@ -2474,16 +2291,13 @@ async function startServer() {
         ) {
           throw new Error('SCHOOL_FORBIDDEN');
         }
-        const resolvedOwnerId = await resolveOwnerIdForVehicle(tx, { ownerId, ownerName });
         const [v] = await tx
           .insert(vehicles)
           .values({
             busNumber: String(busNumber).trim(),
             registrationNumber: String(registrationNumber).trim(),
             vehicleType: vehicleType || '',
-            ownerId: resolvedOwnerId,
             schoolId: resolvedSchoolId ?? null,
-            monthlyOwnerCost: Number(monthlyOwnerCost || 0).toFixed(2),
             operationalStatus: operationalStatus || 'active',
             gpsStatus: 'offline',
             notes: notes || '',
@@ -2534,20 +2348,13 @@ async function startServer() {
         busNumber,
         registrationNumber,
         vehicleType,
-        ownerId,
-        ownerName,
         schoolId,
         schoolName,
-        monthlyOwnerCost,
         operationalStatus,
         notes,
       } = req.body;
 
       const updated = await db.transaction(async (tx) => {
-        const nextOwnerId =
-          ownerName !== undefined || ownerId !== undefined
-            ? await resolveOwnerIdForVehicle(tx, { ownerId, ownerName })
-            : existing.ownerId;
         const nextSchoolId =
           schoolId !== undefined || schoolName !== undefined
             ? await resolveSchoolIdForDriver(tx, { schoolId, schoolName })
@@ -2565,12 +2372,7 @@ async function startServer() {
             busNumber: busNumber ?? existing.busNumber,
             registrationNumber: registrationNumber ?? existing.registrationNumber,
             vehicleType: vehicleType ?? existing.vehicleType,
-            ownerId: nextOwnerId,
             schoolId: nextSchoolId ?? null,
-            monthlyOwnerCost:
-              monthlyOwnerCost !== undefined
-                ? Number(monthlyOwnerCost).toFixed(2)
-                : existing.monthlyOwnerCost,
             operationalStatus: operationalStatus ?? existing.operationalStatus,
             notes: notes ?? existing.notes,
           })
@@ -3091,10 +2893,7 @@ async function startServer() {
         );
 
         const activeVehicles = allVehicles.filter((v) => v.operationalStatus !== 'inactive');
-        const totalVehicleOwnerCosts = activeVehicles.reduce(
-          (sum, v) => sum + Number(v.monthlyOwnerCost || 0),
-          0
-        );
+        const totalVehicleOwnerCosts = 0;
 
         const totalLedgerCredits = monthLedger
           .filter((t) => t.direction === 'credit')
@@ -3110,7 +2909,6 @@ async function startServer() {
           (totalAllBaseSalaries +
             totalEmployeeNetSalaries +
             totalSupervisorSalaries +
-            totalVehicleOwnerCosts +
             totalCoverageReplacementCost);
 
         res.json({
@@ -3160,7 +2958,6 @@ async function startServer() {
             totalEmployeeDeductions,
             totalEmployeeNetSalaries,
             totalSupervisorSalaries,
-            totalVehicleOwnerCosts,
             totalCombinedPayroll,
             totalLedgerCredits,
             totalLedgerDebits,
@@ -5283,16 +5080,11 @@ async function startServer() {
           queryResult = { type: 'total_net_salaries', totalNet, driverCount: enrichedDrivers.length };
           finalReply = `إجمالي صافي المرتبات المطلوب دفعها الشهر ده لعدد ${enrichedDrivers.length} سائقين هو ${totalNet.toLocaleString('ar-EG')} جنيه.`;
         } else if (interpreted.intent === 'monthly_profit') {
-          const fleet = await getFleetWithLatestGps();
           const schoolRev = allSchools
             .filter((s) => s.isActive)
             .reduce((sum, s) => sum + Number(s.monthlyContractValue || 0), 0);
-          const ownerCost = fleet
-            .filter((v) => v.operationalStatus !== 'inactive')
-            .reduce((sum, v) => sum + v.monthlyOwnerCost, 0);
-          const profit = schoolRev - ownerCost;
-          queryResult = { type: 'monthly_profit', schoolRev, ownerCost, profit };
-          finalReply = `صافي ربح المكتب الشهري المتوقع من عقود المدارس (${schoolRev.toLocaleString('ar-EG')} جنيه) ناقص تكلفة ملاك الباصات (${ownerCost.toLocaleString('ar-EG')} جنيه) هو ${profit.toLocaleString('ar-EG')} جنيه.`;
+          queryResult = { type: 'monthly_profit', schoolRev, profit: schoolRev };
+          finalReply = `إجمالي إيرادات عقود المدارس الشهرية المتوقعة هو ${schoolRev.toLocaleString('ar-EG')} جنيه.`;
         }
       } else {
         // Financial action requiring explicit Admin Confirmation!

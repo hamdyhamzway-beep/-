@@ -121,10 +121,9 @@ export const ContactPhoneInput: React.FC<ContactPhoneInputProps> = ({
 
   const handleOpenContacts = async () => {
     setStatusMessage(null);
-    const nav = navigator as NavigatorWithContacts;
-
-    if (nav.contacts && typeof nav.contacts.select === 'function') {
-      try {
+    try {
+      const nav = navigator as NavigatorWithContacts;
+      if (nav && nav.contacts && typeof nav.contacts.select === 'function') {
         const picked = await nav.contacts.select(['name', 'tel'], { multiple: false });
         if (!picked || !Array.isArray(picked) || picked.length === 0) return;
 
@@ -140,22 +139,12 @@ export const ContactPhoneInput: React.FC<ContactPhoneInputProps> = ({
 
         applySelection({ phone, name });
         return;
-      } catch (err: unknown) {
-        const errName = err instanceof Error ? err.name : '';
-        if (errName === 'AbortError') return; // User closed contact picker
-        if (errName === 'SecurityError' || errName === 'InvalidStateError') {
-          setStatusMessage(
-            'الوصول المباشر لجهات الاتصال يتطلب فتح التطبيق كموبايل PWA أو في نافذة مستقلة، أو يمكنك استيراد ملف جهة اتصال (.vcf).'
-          );
-          setShowFallbackHint(true);
-          return;
-        }
-        setStatusMessage('تعذر الوصول إلى جهات الاتصال. يمكنك الإدخال اليدوي أو استيراد ملف .vcf.');
-        setShowFallbackHint(true);
       }
-    } else {
-      setShowFallbackHint((prev) => !prev);
+    } catch (err: unknown) {
+      const errName = err instanceof Error ? err.name : '';
+      if (errName === 'AbortError') return; // User closed contact picker
     }
+    setShowFallbackHint((prev) => !prev);
   };
 
   const handleVcfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

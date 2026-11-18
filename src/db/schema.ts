@@ -64,27 +64,13 @@ export const schools = pgTable('schools', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
-// 4. Vehicle Owners
-export const vehicleOwners = pgTable('vehicle_owners', {
-  id: serial('id').primaryKey(),
-  fullName: text('full_name').notNull(),
-  phone: text('phone').notNull(),
-  nationalId: text('national_id').default(''),
-  notes: text('notes').default(''),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-});
-
-// 5. Vehicles
+// 4. Vehicles (previously vehicleOwners removed)
 export const vehicles = pgTable('vehicles', {
   id: serial('id').primaryKey(),
   busNumber: text('bus_number').notNull().unique(),
   registrationNumber: text('registration_number').notNull().unique(),
   vehicleType: text('vehicle_type').notNull().default(''),
-  ownerId: integer('owner_id').references(() => vehicleOwners.id),
   schoolId: integer('school_id').references(() => schools.id),
-  monthlyOwnerCost: numeric('monthly_owner_cost', { precision: 12, scale: 2 })
-    .notNull()
-    .default('0'),
   operationalStatus: text('operational_status').notNull().default('active'), // active | maintenance | inactive
   gpsStatus: text('gps_status').notNull().default('offline'), // online | offline | paused
   notes: text('notes').default(''),
@@ -547,12 +533,7 @@ export const schoolsRelations = relations(schools, ({ many }) => ({
   dailyReports: many(dailyReports),
 }));
 
-export const vehicleOwnersRelations = relations(vehicleOwners, ({ many }) => ({
-  vehicles: many(vehicles),
-}));
-
 export const vehiclesRelations = relations(vehicles, ({ one, many }) => ({
-  owner: one(vehicleOwners, { fields: [vehicles.ownerId], references: [vehicleOwners.id] }),
   school: one(schools, { fields: [vehicles.schoolId], references: [schools.id] }),
   assignments: many(driverAssignments),
   gpsLocations: many(gpsLocations),

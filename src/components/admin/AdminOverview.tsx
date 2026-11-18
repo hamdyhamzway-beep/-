@@ -4,6 +4,7 @@ import {
   Archive,
   ArrowRight,
   Briefcase,
+  Building2,
   Bus,
   CalendarCheck,
   CheckCircle2,
@@ -23,6 +24,7 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
+import { fetchWithSWR } from '../../lib/batch-swr';
 import {
   apiFetch,
   formatArabicTripTime,
@@ -83,7 +85,6 @@ interface DashboardData {
     totalCoverageDeductions: number;
     totalOutstandingPayments: number;
     totalSchoolContracts: number;
-    totalOwnerCosts: number;
     monthlyBusinessProfit: number;
   };
   drivers: EnrichedDriver[];
@@ -138,6 +139,7 @@ export const AdminOverview: React.FC<{
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [overviewSchoolFilter, setOverviewSchoolFilter] = useState<number | 'all'>('all');
 
   // Primary Driver Search (Name / Code / Mobile)
   const [driverLookup, setDriverLookup] = useState('');
@@ -261,13 +263,28 @@ export const AdminOverview: React.FC<{
   );
 
   const loadDashboard = useCallback(async () => {
-    setLoading(true);
     setError(null);
     try {
       const url = initialPeriodSyncedRef.current
         ? `/api/dashboard?month=${month}&year=${year}`
         : `/api/dashboard`;
-      const res = await apiFetch<DashboardData>(url);
+
+      const { data: res } = await fetchWithSWR<DashboardData>(
+        url,
+        {},
+        {
+          ttlMs: 45000,
+          onRevalidate: (freshData) => {
+            if (!initialPeriodSyncedRef.current) {
+              initialPeriodSyncedRef.current = true;
+              setMonth(freshData.period.month);
+              setYear(freshData.period.year);
+            }
+            setData(freshData);
+          },
+        }
+      );
+
       if (!initialPeriodSyncedRef.current) {
         initialPeriodSyncedRef.current = true;
         setMonth(res.period.month);
@@ -2209,6 +2226,258 @@ export const AdminOverview: React.FC<{
                   إجمالي السائقين المتاحين: {data?.drivers.length ?? 0}
                 </div>
               </div>
+            )}
+          </div>
+
+          {/* Isolated School Lists & Detailed Breakdown Section */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <h2 className="font-display text-base font-bold text-[#0B1F3A] flex items-center gap-2">
+                  <Building2 className="w-5 h-5 text-[#C89B3C]" />
+                  قوائم المدارس المستقلة وتفاصيلها الحركية والمالية
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  عرض مستقل لكل مدرسة بكافة تفاصيل عقودها وسائقيها ومركباتها وأرباحها دون تداخل
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onNavigate('schools')}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-bold text-[#0B1F3A] cursor-pointer self-start sm:self-auto"
+              >
+                إدارة المدارس والعقود الكاملة
+              </button>
+            </div>
+
+            {/* School Filter Tabs */}
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setOverviewSchoolFilter('all')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                  overviewSchoolFilter === 'all'
+                    ? 'bg-[#0B1F3A] text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                جميع المدارس ({data?.schools?.length || 0})
+              </button>
+              {data?.schools?.map((s) => {
+                const drvCount = (data?.drivers || []).filter((d) => d.schoolId === s.id).length;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setOverviewSchoolFilter(s.id)}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center gap-2 ${
+                      overviewSchoolFilter === s.id
+                        ? 'bg-[#0B1F3A] text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    <span>{s.name}</span>
+                    <span
+                      className={`font-mono text-[11px] tabular-nums ${
+                        overviewSchoolFilter === s.id ? 'text-[#C89B3C]' : 'text-slate-500'
+                      }`}
+                    >
+                      ({drvCount} سائق)
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* School Breakdown Content */}
+            {loading || !data ? (
+              <div className="p-8 text-center text-xs text-slate-400">جاري تحميل قوائم المدارس...</div>
+            ) : overviewSchoolFilter === 'all' ? (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-2">
+                {data.schools.map((s) => {
+                  const schoolDrivers = (data.drivers || []).filter((d) => d.schoolId === s.id);
+                  const schoolVehicles = (data.fleet || []).filter((v) => v.schoolId === s.id);
+                  const totalSalaries = schoolDrivers.reduce(
+                    (sum, d) => sum + Number(d.currentSalary?.netSalary ?? d.monthlyAgreedSalary),
+                    0
+                  );
+                  const estimatedProfit = Number(s.monthlyContractValue || 0) - totalSalaries;
+
+                  return (
+                    <div key={s.id} className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-display text-sm font-bold text-[#0B1F3A]">
+                            {s.name}
+                          </div>
+                          <div className="text-xs text-slate-500 mt-0.5">
+                            {s.contactName ? `المسؤول: ${s.contactName}` : ''}{' '}
+                            {s.contactPhone ? `· ${s.contactPhone}` : ''}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setOverviewSchoolFilter(s.id)}
+                          className="rounded-lg bg-[#0B1F3A] text-white px-3 py-1.5 text-[11px] font-bold hover:bg-[#13325c] cursor-pointer shrink-0"
+                        >
+                          عرض القائمة التفصيلية
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 rounded-lg bg-white border border-slate-200/80 p-3 text-[11px]">
+                        <div>
+                          <div className="text-slate-400">قيمة العقد</div>
+                          <div className="font-mono font-bold text-[#0B1F3A] mt-0.5 tabular-nums">
+                            {formatEGP(s.monthlyContractValue)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400">السائقون والمركبات</div>
+                          <div className="font-mono font-bold text-slate-800 mt-0.5 tabular-nums">
+                            {schoolDrivers.length} سائق · {schoolVehicles.length} باص
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400">صافي الربح</div>
+                          <div
+                            className={`font-mono font-bold mt-0.5 tabular-nums ${
+                              estimatedProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
+                            }`}
+                          >
+                            {formatEGP(estimatedProfit)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              (() => {
+                const currentSchool = data.schools.find((s) => s.id === overviewSchoolFilter);
+                if (!currentSchool) return null;
+                const schoolDrivers = (data.drivers || []).filter(
+                  (d) => d.schoolId === currentSchool.id
+                );
+                const schoolVehicles = (data.fleet || []).filter(
+                  (v) => v.schoolId === currentSchool.id
+                );
+                const totalSalaries = schoolDrivers.reduce(
+                  (sum, d) => sum + Number(d.currentSalary?.netSalary ?? d.monthlyAgreedSalary),
+                  0
+                );
+                const estimatedProfit =
+                  Number(currentSchool.monthlyContractValue || 0) - totalSalaries;
+
+                return (
+                  <div className="space-y-4 pt-2">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div>
+                        <h3 className="font-display text-base font-bold text-[#0B1F3A]">
+                          {currentSchool.name} — التفاصيل المالية والحركية الكاملة
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-1">
+                          {currentSchool.address || 'العنوان غير مسجل'} {currentSchool.contactName ? `· المسؤول: ${currentSchool.contactName}` : ''} {currentSchool.contactPhone ? `· ${currentSchool.contactPhone}` : ''}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setOverviewSchoolFilter('all')}
+                          className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                        >
+                          العودة لكل المدارس
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                      <div className="rounded-xl bg-white border border-slate-200 p-3.5">
+                        <div className="text-slate-500">قيمة العقد الشهري</div>
+                        <div className="font-mono text-base font-bold text-[#0B1F3A] mt-1 tabular-nums">
+                          {formatEGP(currentSchool.monthlyContractValue)}
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-white border border-slate-200 p-3.5">
+                        <div className="text-slate-500">إجمالي رواتب السائقين ({schoolDrivers.length})</div>
+                        <div className="font-mono text-base font-bold text-red-700 mt-1 tabular-nums">
+                          {formatEGP(totalSalaries)}
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3.5">
+                        <div className="text-emerald-800 font-semibold">صافي ربح المدرسة الشهري</div>
+                        <div
+                          className={`font-mono text-base font-bold mt-1 tabular-nums ${
+                            estimatedProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
+                          }`}
+                        >
+                          {formatEGP(estimatedProfit)}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* School Drivers Table */}
+                    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                      <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 font-bold text-xs text-[#0B1F3A]">
+                        سائقو {currentSchool.name} النشطون ({schoolDrivers.length})
+                      </div>
+                      {schoolDrivers.length === 0 ? (
+                        <div className="p-6 text-center text-xs text-slate-400">
+                          لا يوجد سائقون معينون لهذه المدرسة حالياً
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-right text-xs">
+                            <thead className="bg-slate-50/50 text-slate-500 border-b border-slate-200">
+                              <tr>
+                                <th className="py-2.5 px-3">الكود</th>
+                                <th className="py-2.5 px-3">السائق والهاتف</th>
+                                <th className="py-2.5 px-3">رقم الباص وخط السير</th>
+                                <th className="py-2.5 px-3">الراتب الأساسي / الصافي</th>
+                                <th className="py-2.5 px-3">إجراء</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {schoolDrivers.map((d) => (
+                                <tr
+                                  key={d.id}
+                                  onClick={() => openDriverWorkspace(d)}
+                                  className="hover:bg-slate-50 cursor-pointer"
+                                >
+                                  <td className="py-2.5 px-3 font-mono font-bold text-[#0B1F3A]">
+                                    {d.driverCode}
+                                  </td>
+                                  <td className="py-2.5 px-3 font-semibold text-slate-900">
+                                    {d.fullName} <span className="font-mono text-slate-500" dir="ltr">({d.phone})</span>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-slate-700 font-mono">
+                                    باص {d.busNumber || '—'} · {d.routeName || '—'}
+                                  </td>
+                                  <td className="py-2.5 px-3 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                                    {formatEGP(d.currentSalary?.netSalary ?? d.monthlyAgreedSalary)}
+                                  </td>
+                                  <td className="py-2.5 px-3">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        openDriverWorkspace(d);
+                                      }}
+                                      className="rounded bg-[#0B1F3A] text-white px-2.5 py-1 text-[11px] hover:bg-[#13325c] cursor-pointer"
+                                    >
+                                      فتح الملف
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()
             )}
           </div>
 

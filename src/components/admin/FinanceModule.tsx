@@ -917,7 +917,7 @@ export const FinanceModule: React.FC = () => {
                     خانة الجمع الإجمالي لكل البيانات المالية — شهر {month} / {year}
                   </h2>
                   <p className="text-[11px] text-slate-500">
-                    تجميع شامل لجميع الإيرادات والرواتب والسلف والتغطيات والموظفين وملاك السيارات ودفتر الأستاذ
+                    تجميع شامل لجميع الإيرادات والرواتب والسلف والتغطيات والموظفين والمشرفات ودفتر الأستاذ
                   </p>
                 </div>
               </div>
@@ -938,7 +938,7 @@ export const FinanceModule: React.FC = () => {
 
             {showGrandTotalsBox && (
               <div className="divide-y divide-slate-200">
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 divide-y sm:divide-y-0 divide-x divide-x-reverse divide-slate-100 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 divide-y sm:divide-y-0 divide-x divide-x-reverse divide-slate-100 text-xs">
                   <div className="p-3.5">
                     <div className="text-slate-500">1. إجمالي عقود المدارس</div>
                     <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
@@ -1003,17 +1003,7 @@ export const FinanceModule: React.FC = () => {
                   </div>
 
                   <div className="p-3.5 border-t border-slate-100">
-                    <div className="text-slate-500">7. مستحقات ملاك السيارات</div>
-                    <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
-                      {formatEGP(gt?.totalVehicleOwnerCosts ?? 0)}
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5">
-                      {gt?.vehiclesCount ?? 0} مركبة بالأسطول
-                    </div>
-                  </div>
-
-                  <div className="p-3.5 border-t border-slate-100">
-                    <div className="text-slate-500">8. المنصرف vs المتبقي (سائقين)</div>
+                    <div className="text-slate-500">7. المنصرف vs المتبقي (سائقين)</div>
                     <div className="font-mono text-sm font-bold text-emerald-700 mt-1 tabular-nums">
                       صُرف: {formatEGP(gt?.totalPaidSalaries ?? 0)}
                     </div>
@@ -1023,7 +1013,7 @@ export const FinanceModule: React.FC = () => {
                   </div>
 
                   <div className="p-3.5 border-t border-slate-100">
-                    <div className="text-slate-500">9. قيود دفتر الأستاذ</div>
+                    <div className="text-slate-500">8. قيود دفتر الأستاذ</div>
                     <div className="font-mono text-xs font-bold text-emerald-700 mt-1 tabular-nums">
                       دائن: +{formatEGP(gt?.totalLedgerCredits ?? 0)}
                     </div>
@@ -1034,7 +1024,7 @@ export const FinanceModule: React.FC = () => {
 
                   <div className="p-3.5 border-t border-slate-100 bg-[#0B1F3A] text-white">
                     <div className="text-[11px] text-[#ebd089] font-semibold">
-                      10. الجمع الإجمالي (صافي الفائض العام)
+                      9. الجمع الإجمالي (صافي الفائض العام)
                     </div>
                     <div
                       className={`font-mono text-base font-bold mt-1 tabular-nums ${

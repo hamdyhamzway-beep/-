@@ -94,7 +94,6 @@ export interface SchoolItem {
   currentBillingRange?: SchoolBillingRange;
   vehicleCount?: number;
   driverCount?: number;
-  ownerCost?: number;
   totalDriverSalaries?: number;
   totalNetDriverSalaries?: number;
   estimatedProfit?: number;
@@ -103,26 +102,14 @@ export interface SchoolItem {
   drivers?: SchoolDriverSalarySummary[];
 }
 
-export interface VehicleOwner {
-  id: number;
-  fullName: string;
-  phone: string;
-  nationalId: string | null;
-  notes: string | null;
-}
-
 export interface FleetVehicle {
   id: number;
   busNumber: string;
   registrationNumber: string;
   vehicleType: string;
-  ownerId: number | null;
-  monthlyOwnerCost: number;
   operationalStatus: string;
   gpsStatus: string;
   notes: string | null;
-  ownerName: string;
-  ownerPhone: string;
   driverId: number | null;
   driverName: string;
   driverCode: string;
@@ -498,7 +485,6 @@ export interface FinanceGrandTotals {
   totalEmployeeBonuses: number;
   totalEmployeeDeductions: number;
   totalEmployeeNetSalaries: number;
-  totalVehicleOwnerCosts: number;
   totalCombinedPayroll: number;
   totalLedgerCredits: number;
   totalLedgerDebits: number;

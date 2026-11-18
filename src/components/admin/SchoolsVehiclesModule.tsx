@@ -8,7 +8,6 @@ import {
   Plus,
   Route,
   Trash2,
-  User,
   Users,
   Wallet,
   X,
@@ -16,10 +15,9 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatArabicTripTime, formatEGP, normalizeTimeInputValue } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
-import { ContactPhoneInput } from '../ContactPhoneInput';
-import type { FleetVehicle, RouteItem, SchoolItem, VehicleOwner } from '../../types';
+import type { FleetVehicle, RouteItem, SchoolItem } from '../../types';
 
-type SubTabId = 'schools' | 'vehicles' | 'owners' | 'routes';
+type SubTabId = 'schools' | 'vehicles' | 'routes';
 
 export const SchoolsVehiclesModule: React.FC = () => {
   const { dbUser } = useAuth();
@@ -40,9 +38,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const allowedSubTabs: Array<{ id: SubTabId; label: string; icon: typeof Building2 }> = [
     ...(canSchoolsRead ? [{ id: 'schools' as const, label: 'المدارس والعقود', icon: Building2 }] : []),
     ...(canVehiclesRead ? [{ id: 'vehicles' as const, label: 'المركبات والباصات', icon: Bus }] : []),
-    ...(canVehiclesRead || canSchoolsRead
-      ? [{ id: 'owners' as const, label: 'ملاك الباصات', icon: User }]
-      : []),
     ...(canSchoolsRead || canRoutesWrite
       ? [{ id: 'routes' as const, label: 'خطوط السير', icon: Route }]
       : []),
@@ -57,7 +52,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const [schoolsList, setSchoolsList] = useState<SchoolItem[]>([]);
   const [routesList, setRoutesList] = useState<RouteItem[]>([]);
   const [vehiclesList, setVehiclesList] = useState<FleetVehicle[]>([]);
-  const [ownersList, setOwnersList] = useState<VehicleOwner[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,21 +60,15 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const [editingSchoolId, setEditingSchoolId] = useState<number | null>(null);
   const [showVehicleModal, setShowVehicleModal] = useState(false);
   const [editingVehicleId, setEditingVehicleId] = useState<number | null>(null);
-  const [showOwnerModal, setShowOwnerModal] = useState(false);
-  const [editingOwnerId, setEditingOwnerId] = useState<number | null>(null);
-  const [deletingOwner, setDeletingOwner] = useState<VehicleOwner | null>(null);
-  const [deletingOwnerBusy, setDeletingOwnerBusy] = useState(false);
   const [showRouteModal, setShowRouteModal] = useState(false);
   const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [savingModal, setSavingModal] = useState(false);
 
   useEscapeKey(
-    Boolean(deletingOwner || showRouteModal || showOwnerModal || showVehicleModal || showSchoolModal),
+    Boolean(showRouteModal || showVehicleModal || showSchoolModal),
     () => {
-      if (deletingOwner) setDeletingOwner(null);
-      else if (showRouteModal) setShowRouteModal(false);
-      else if (showOwnerModal) setShowOwnerModal(false);
+      if (showRouteModal) setShowRouteModal(false);
       else if (showVehicleModal) setShowVehicleModal(false);
       else if (showSchoolModal) setShowSchoolModal(false);
     }
@@ -103,17 +91,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
     busNumber: '',
     registrationNumber: '',
     vehicleType: '',
-    ownerName: '',
-    monthlyOwnerCost: '',
     operationalStatus: 'active',
     schoolId: '',
-  });
-
-  const [ownerForm, setOwnerForm] = useState({
-    fullName: '',
-    phone: '',
-    nationalId: '',
-    notes: '',
   });
 
   const [routeForm, setRouteForm] = useState({
@@ -145,15 +124,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
         canVehiclesRead
           ? apiFetch<{ vehicles: FleetVehicle[] }>('/api/vehicles')
           : Promise.resolve({ vehicles: [] as FleetVehicle[] }),
-        canVehiclesRead || canSchoolsRead
-          ? apiFetch<{ owners: VehicleOwner[] }>('/api/owners')
-          : Promise.resolve({ owners: [] as VehicleOwner[] }),
       ]);
       setSchoolsList(sRes.schools);
       setRoutesList(sRes.routes);
       if (sRes.billingPeriod) setBillingPeriod(sRes.billingPeriod);
       setVehiclesList(vRes.vehicles);
-      setOwnersList(oRes.owners);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات المدارس والمركبات');
     } finally {
@@ -256,8 +231,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
     try {
       const payload = {
         ...vehicleForm,
-        ownerName: vehicleForm.ownerName.trim(),
-        monthlyOwnerCost: Number(vehicleForm.monthlyOwnerCost || 0),
         schoolId: vehicleForm.schoolId ? Number(vehicleForm.schoolId) : null,
       };
       if (editingVehicleId) {
@@ -277,8 +250,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
         busNumber: '',
         registrationNumber: '',
         vehicleType: '',
-        ownerName: '',
-        monthlyOwnerCost: '',
         operationalStatus: 'active',
         schoolId: '',
       });
@@ -287,50 +258,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
       setModalError(err instanceof Error ? err.message : 'تعذر حفظ بيانات المركبة');
     } finally {
       setSavingModal(false);
-    }
-  };
-
-  const handleSaveOwner = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setModalError(null);
-    setSavingModal(true);
-    try {
-      if (editingOwnerId) {
-        await apiFetch(`/api/owners/${editingOwnerId}`, {
-          method: 'PATCH',
-          body: JSON.stringify(ownerForm),
-        });
-      } else {
-        await apiFetch('/api/owners', {
-          method: 'POST',
-          body: JSON.stringify(ownerForm),
-        });
-      }
-      setShowOwnerModal(false);
-      setEditingOwnerId(null);
-      setOwnerForm({ fullName: '', phone: '', nationalId: '', notes: '' });
-      await loadData();
-    } catch (err: unknown) {
-      setModalError(
-        err instanceof Error ? err.message : editingOwnerId ? 'تعذر تعديل بيانات المالك' : 'تعذر إضافة مالك المركبة'
-      );
-    } finally {
-      setSavingModal(false);
-    }
-  };
-
-  const handleDeleteOwner = async () => {
-    if (!deletingOwner) return;
-    setDeletingOwnerBusy(true);
-    setError(null);
-    try {
-      await apiFetch(`/api/owners/${deletingOwner.id}`, { method: 'DELETE' });
-      setDeletingOwner(null);
-      await loadData();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'تعذر حذف مالك المركبة');
-    } finally {
-      setDeletingOwnerBusy(false);
     }
   };
 
@@ -436,8 +363,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
       busNumber: '',
       registrationNumber: '',
       vehicleType: '',
-      ownerName: '',
-      monthlyOwnerCost: '',
       operationalStatus: 'active',
       schoolId: defaultSchoolId,
     });
@@ -451,8 +376,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
       busNumber: v.busNumber,
       registrationNumber: v.registrationNumber,
       vehicleType: v.vehicleType || '',
-      ownerName: v.ownerName && v.ownerName !== '—' ? v.ownerName : '',
-      monthlyOwnerCost: String(v.monthlyOwnerCost || 0),
       operationalStatus: v.operationalStatus || 'active',
       schoolId: v.schoolId
         ? String(v.schoolId)
@@ -461,25 +384,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
         : '',
     });
     setShowVehicleModal(true);
-  };
-
-  const openAddOwner = () => {
-    setModalError(null);
-    setEditingOwnerId(null);
-    setOwnerForm({ fullName: '', phone: '', nationalId: '', notes: '' });
-    setShowOwnerModal(true);
-  };
-
-  const openEditOwner = (o: VehicleOwner) => {
-    setModalError(null);
-    setEditingOwnerId(o.id);
-    setOwnerForm({
-      fullName: o.fullName,
-      phone: o.phone,
-      nationalId: o.nationalId || '',
-      notes: o.notes || '',
-    });
-    setShowOwnerModal(true);
   };
 
   const openAddRoute = () => {
@@ -533,7 +437,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
             المدارس والمركبات وخطوط السير
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            عقود المدارس مقسمة حسب كل مدرسة بسائقيها ورواتبهم وأرباحها، وإدارة الملاك والمركبات
+            عقود المدارس مقسمة حسب كل مدرسة بسائقيها ورواتبهم وأرباحها، وإدارة أسطول المركبات
           </p>
         </div>
 
@@ -569,15 +473,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
             >
               <Plus className="w-4 h-4 text-[#C89B3C]" />
               إضافة مركبة
-            </button>
-          )}
-          {tab === 'owners' && canVehiclesWrite && (
-            <button
-              onClick={openAddOwner}
-              className="flex items-center gap-2 rounded-lg bg-[#0B1F3A] px-4 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-            >
-              <Plus className="w-4 h-4 text-[#C89B3C]" />
-              إضافة مالك باص
             </button>
           )}
           {tab === 'routes' && canRoutesWrite && (
@@ -738,7 +633,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 </div>
 
                 {canFinanceRead && (
-                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-4 border-t border-slate-100">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4 border-t border-slate-100">
                     <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
                       <div className="text-[11px] text-slate-500">قيمة العقد الشهري</div>
                       <div className="font-mono text-lg font-bold text-[#0B1F3A] mt-1 tabular-nums">
@@ -751,14 +646,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
                       </div>
                       <div className="font-mono text-lg font-bold text-red-700 mt-1 tabular-nums">
                         {formatEGP(selectedSchoolObj.totalDriverSalaries ?? 0)}
-                      </div>
-                    </div>
-                    <div className="rounded-xl bg-slate-50 border border-slate-200/70 p-3.5">
-                      <div className="text-[11px] text-slate-500">
-                        تكلفة ملاك الباصات ({selectedSchoolObj.vehicleCount ?? 0})
-                      </div>
-                      <div className="font-mono text-lg font-bold text-slate-800 mt-1 tabular-nums">
-                        {formatEGP(selectedSchoolObj.ownerCost ?? 0)}
                       </div>
                     </div>
                     <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-3.5">
@@ -873,12 +760,12 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 </div>
               </div>
 
-              {/* Isolated School Vehicles & Owner Costs */}
+              {/* Isolated School Vehicles */}
               <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
                 <div className="px-5 py-4 border-b border-slate-200 flex items-center gap-2">
                   <Bus className="w-4 h-4 text-[#C89B3C]" />
                   <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
-                    المركبات والملاك المخصصون لـ {selectedSchoolObj.name} ({(selectedSchoolObj.vehicles || []).length})
+                    المركبات المخصصة لـ {selectedSchoolObj.name} ({(selectedSchoolObj.vehicles || []).length})
                   </h3>
                 </div>
                 <div className="overflow-x-auto">
@@ -887,17 +774,14 @@ export const SchoolsVehiclesModule: React.FC = () => {
                       <tr>
                         <th className="py-3 px-4 font-semibold">رقم الباص</th>
                         <th className="py-3 px-4 font-semibold">اللوحة والنوع</th>
-                        <th className="py-3 px-4 font-semibold">المالك</th>
-                        {canFinanceRead && (
-                          <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
-                        )}
                         <th className="py-3 px-4 font-semibold">السائق</th>
+                        <th className="py-3 px-4 font-semibold">حالة التشغيل و GPS</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {(selectedSchoolObj.vehicles || []).length === 0 ? (
                         <tr>
-                          <td colSpan={canFinanceRead ? 5 : 4} className="py-8 text-center text-slate-400">
+                          <td colSpan={4} className="py-8 text-center text-slate-400">
                             لا توجد مركبات مربوطة بهذه المدرسة حالياً
                           </td>
                         </tr>
@@ -911,16 +795,26 @@ export const SchoolsVehiclesModule: React.FC = () => {
                               <div className="font-semibold text-slate-800">{v.registrationNumber}</div>
                               <div className="text-slate-500">{v.vehicleType || '—'}</div>
                             </td>
-                            <td className="py-3 px-4">
-                              <div className="text-slate-800">{v.ownerName}</div>
-                              <div className="font-mono text-slate-500">{v.ownerPhone}</div>
+                            <td className="py-3 px-4 text-slate-700">
+                              <div className="font-semibold text-slate-800">{v.driverName}</div>
+                              <div className="text-slate-500 font-mono">{v.driverPhone}</div>
                             </td>
-                            {canFinanceRead && (
-                              <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
-                                {formatEGP(v.monthlyOwnerCost)}
-                              </td>
-                            )}
-                            <td className="py-3 px-4 text-slate-700">{v.driverName}</td>
+                            <td className="py-3 px-4">
+                              <div className="font-semibold text-slate-800">
+                                {v.operationalStatus === 'active'
+                                  ? 'بالخدمة'
+                                  : v.operationalStatus === 'maintenance'
+                                  ? 'صيانة'
+                                  : 'متوقفة'}
+                              </div>
+                              <div
+                                className={`text-[11px] font-medium ${
+                                  v.isOnline ? 'text-emerald-700' : 'text-amber-700'
+                                }`}
+                              >
+                                {v.isOnline ? 'GPS متصل مباشر' : 'GPS غير متصل'}
+                              </div>
+                            </td>
                           </tr>
                         ))
                       )}
@@ -967,7 +861,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                     )}
                   </div>
 
-                  <div className={`grid ${canFinanceRead ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-1'} gap-3 border-t border-slate-100 pt-3 text-xs`}>
+                  <div className={`grid ${canFinanceRead ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1'} gap-3 border-t border-slate-100 pt-3 text-xs`}>
                     <div>
                       <div className="text-slate-500">السائقون / الباصات</div>
                       <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
@@ -980,12 +874,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
                           <div className="text-slate-500">رواتب السائقين</div>
                           <div className="font-mono font-semibold text-red-700 mt-0.5 tabular-nums">
                             {formatEGP(s.totalDriverSalaries ?? 0)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-500">تكلفة الملاك</div>
-                          <div className="font-mono font-semibold text-slate-900 mt-0.5 tabular-nums">
-                            {formatEGP(s.ownerCost ?? 0)}
                           </div>
                         </div>
                         <div>
@@ -1068,10 +956,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 <tr>
                   <th className="py-3 px-4 font-semibold">رقم الباص</th>
                   <th className="py-3 px-4 font-semibold">رقم اللوحة والنوع</th>
-                  <th className="py-3 px-4 font-semibold">مالك المركبة</th>
-                  {canFinanceRead && (
-                    <th className="py-3 px-4 font-semibold">التكلفة الشهرية للمالك</th>
-                  )}
                   <th className="py-3 px-4 font-semibold">المدرسة والسائق</th>
                   <th className="py-3 px-4 font-semibold">حالة التشغيل و GPS</th>
                   {canVehiclesWrite && <th className="py-3 px-4 font-semibold">تعديل</th>}
@@ -1085,15 +969,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
                       <div className="font-semibold text-slate-900">{v.registrationNumber}</div>
                       <div className="text-slate-500">{v.vehicleType}</div>
                     </td>
-                    <td className="py-3.5 px-4">
-                      <div className="text-slate-800">{v.ownerName}</div>
-                      <div className="text-slate-500 font-mono">{v.ownerPhone}</div>
-                    </td>
-                    {canFinanceRead && (
-                      <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
-                        {formatEGP(v.monthlyOwnerCost)}
-                      </td>
-                    )}
                     <td className="py-3.5 px-4">
                       <div className="text-slate-800">{v.schoolName}</div>
                       <div className="text-slate-500">
@@ -1132,62 +1007,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
               </tbody>
             </table>
           </div>
-        </div>
-      ) : tab === 'owners' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {ownersList.map((o) => {
-            const linkedVehicles = vehiclesList.filter((v) => v.ownerId === o.id);
-            return (
-              <div
-                key={o.id}
-                className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between gap-4"
-              >
-                <div>
-                  <div className="flex items-start justify-between gap-2">
-                    <h3 className="font-bold text-[#0B1F3A] text-sm">{o.fullName}</h3>
-                    <span className="font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
-                      {linkedVehicles.length} مركبة
-                    </span>
-                  </div>
-                  <div className="mt-1 font-mono text-xs text-slate-600" dir="ltr">
-                    {o.phone}
-                  </div>
-                  {o.nationalId && (
-                    <div className="mt-1 font-mono text-xs text-slate-500">
-                      الرقم القومي/السجل: {o.nationalId}
-                    </div>
-                  )}
-                  {linkedVehicles.length > 0 && (
-                    <div className="mt-2 text-[11px] text-slate-600">
-                      الباصات: {linkedVehicles.map((v) => v.busNumber).join('، ')}
-                    </div>
-                  )}
-                  {o.notes && <p className="mt-2 text-xs text-slate-500">{o.notes}</p>}
-                </div>
-
-                {canVehiclesWrite && (
-                  <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => openEditOwner(o)}
-                      className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
-                    >
-                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                      تعديل
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDeletingOwner(o)}
-                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      حذف
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
         </div>
       ) : (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
@@ -1497,25 +1316,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 onChange={(e) => setVehicleForm({ ...vehicleForm, vehicleType: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
-              <div className="grid grid-cols-2 gap-3">
-                <input
-                  type="text"
-                  placeholder="اكتب اسم مالك المركبة"
-                  value={vehicleForm.ownerName}
-                  onChange={(e) => setVehicleForm({ ...vehicleForm, ownerName: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
-                />
-                <input
-                  type="number"
-                  required
-                  placeholder="التكلفة الشهرية للمالك (ج.م)"
-                  value={vehicleForm.monthlyOwnerCost}
-                  onChange={(e) =>
-                    setVehicleForm({ ...vehicleForm, monthlyOwnerCost: e.target.value })
-                  }
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
-              </div>
+
               {schoolsList.length > 0 && (
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600 mb-1">
@@ -1550,108 +1351,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
         </div>
       )}
 
-      {/* Add/Edit Owner Modal */}
-      {showOwnerModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
-          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
-            <div className="px-6 py-4 bg-[#0B1F3A] text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">
-                {editingOwnerId ? 'تعديل بيانات مالك المركبة' : 'إضافة مالك مركبة'}
-              </h3>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowOwnerModal(false);
-                  setEditingOwnerId(null);
-                }}
-                className="cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <form onSubmit={handleSaveOwner} className="p-6 space-y-3 text-xs">
-              {modalError && (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
-                  {modalError}
-                </div>
-              )}
-              <input
-                required
-                placeholder="الاسم الكامل للمالك *"
-                value={ownerForm.fullName}
-                onChange={(e) => setOwnerForm({ ...ownerForm, fullName: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-              <ContactPhoneInput
-                required
-                placeholder="رقم الهاتف *"
-                value={ownerForm.phone}
-                onChange={(phone) => setOwnerForm((prev) => ({ ...prev, phone }))}
-                onPickContact={({ phone, name }) =>
-                  setOwnerForm((prev) => ({
-                    ...prev,
-                    phone,
-                    fullName: prev.fullName.trim() ? prev.fullName : name || prev.fullName,
-                  }))
-                }
-              />
-              <input
-                placeholder="الرقم القومي / السجل التجاري"
-                value={ownerForm.nationalId}
-                onChange={(e) => setOwnerForm({ ...ownerForm, nationalId: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-              />
-              <textarea
-                rows={2}
-                placeholder="ملاحظات إضافية (اختياري)"
-                value={ownerForm.notes}
-                onChange={(e) => setOwnerForm({ ...ownerForm, notes: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-              <button
-                type="submit"
-                disabled={savingModal}
-                className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
-              >
-                {savingModal ? 'جاري الحفظ...' : editingOwnerId ? 'حفظ التعديلات' : 'حفظ المالك'}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
 
-      {/* Delete Owner Confirmation Modal */}
-      {deletingOwner && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
-          <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-xl p-5 space-y-4 text-xs">
-            <div className="flex items-center gap-2 text-red-700 font-bold text-sm">
-              <AlertTriangle className="w-5 h-5 shrink-0" />
-              <span>تأكيد حذف مالك المركبة</span>
-            </div>
-            <p className="text-slate-600 leading-relaxed">
-              هل تريد حذف المالك <strong>{deletingOwner.fullName}</strong>؟ سيتم فك ارتباطه بأي باصات مسجلة باسمه دون حذف الباصات نفسها.
-            </p>
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                disabled={deletingOwnerBusy}
-                onClick={() => setDeletingOwner(null)}
-                className="rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-700 cursor-pointer"
-              >
-                إلغاء
-              </button>
-              <button
-                type="button"
-                disabled={deletingOwnerBusy}
-                onClick={handleDeleteOwner}
-                className="rounded-lg bg-red-600 px-4 py-2 font-bold text-white hover:bg-red-700 disabled:opacity-50 cursor-pointer"
-              >
-                {deletingOwnerBusy ? 'جاري الحذف...' : 'تأكيد الحذف'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Add/Edit Route Modal */}
       {showRouteModal && (

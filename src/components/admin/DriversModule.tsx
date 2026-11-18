@@ -1230,41 +1230,23 @@ export const DriversModule: React.FC<{
                     <label className="block text-slate-600 mb-1">
                       المدرسة {!isSuperAdmin && restrictedSchoolCount > 0 ? '*' : ''}
                     </label>
-                    {mySchools.length > 0 || restrictedSchoolCount > 0 ? (
-                      <select
-                        required={!isSuperAdmin && restrictedSchoolCount > 0}
-                        disabled={isSingleSchoolRestricted}
-                        value={formState.schoolName}
-                        onChange={(e) =>
-                          setFormState({ ...formState, schoolName: e.target.value })
-                        }
-                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none disabled:bg-slate-100"
-                      >
-                        {(isSuperAdmin || restrictedSchoolCount === 0) && (
-                          <option value="">غير معين بمدرسة</option>
-                        )}
-                        {mySchools.map((s) => (
-                          <option key={s.id} value={s.name}>
-                            {s.name}
-                          </option>
-                        ))}
-                        {isSuperAdmin &&
-                          formState.schoolName &&
-                          !mySchools.some((s) => s.name === formState.schoolName) && (
-                            <option value={formState.schoolName}>{formState.schoolName}</option>
-                          )}
-                      </select>
-                    ) : (
-                      <input
-                        type="text"
-                        value={formState.schoolName}
-                        onChange={(e) =>
-                          setFormState({ ...formState, schoolName: e.target.value })
-                        }
-                        placeholder="اكتب اسم المدرسة"
-                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
-                      />
-                    )}
+                    <input
+                      type="text"
+                      list="driver-schools-datalist"
+                      required={!isSuperAdmin && restrictedSchoolCount > 0}
+                      disabled={isSingleSchoolRestricted}
+                      value={formState.schoolName}
+                      onChange={(e) =>
+                        setFormState({ ...formState, schoolName: e.target.value })
+                      }
+                      placeholder="اختر مدرسة أو اكتب مدرسة أخرى..."
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none disabled:bg-slate-100"
+                    />
+                    <datalist id="driver-schools-datalist">
+                      {mySchools.map((s) => (
+                        <option key={s.id} value={s.name} />
+                      ))}
+                    </datalist>
                   </div>
                   <div>
                     <label className="block text-slate-600 mb-1">الباص / المركبة</label>
