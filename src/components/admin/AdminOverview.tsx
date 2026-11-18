@@ -120,6 +120,8 @@ export const AdminOverview: React.FC<{
   const canEmployeesAccess = can('employees:read') || can('employees:write');
   const canSchoolsOrVehicles = can('schools:read') || can('vehicles:read');
   const canGpsRead = can('gps:read');
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolIds.length === 1;
 
   const now = new Date();
   const today = getLocalTodayDateString();
@@ -128,6 +130,9 @@ export const AdminOverview: React.FC<{
   const [year, setYear] = useState(now.getFullYear());
   const initialPeriodSyncedRef = useRef(false);
   const [showCloseMonthModal, setShowCloseMonthModal] = useState(false);
+  const [closeMonthSchoolId, setCloseMonthSchoolId] = useState<string>(() =>
+    isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : 'all'
+  );
   const [showDriversBroadcastModal, setShowDriversBroadcastModal] = useState(false);
   const [closeMonthNotes, setCloseMonthNotes] = useState('');
   const [data, setData] = useState<DashboardData | null>(null);
@@ -275,6 +280,14 @@ export const AdminOverview: React.FC<{
       setLoading(false);
     }
   }, [month, year]);
+
+  useEffect(() => {
+    if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+      setCloseMonthSchoolId(String(restrictedSchoolIds[0]));
+    } else if (!isSuperAdmin && restrictedSchoolIds.length > 1 && closeMonthSchoolId === 'all') {
+      setCloseMonthSchoolId(String(restrictedSchoolIds[0]));
+    }
+  }, [isSingleSchoolRestricted, isSuperAdmin, restrictedSchoolIds, closeMonthSchoolId]);
 
   useEffect(() => {
     loadDashboard();
@@ -2454,15 +2467,45 @@ export const AdminOverview: React.FC<{
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">اسم المدرسة</label>
-                  <input
-                    value={editDriverForm.schoolName}
-                    onChange={(e) =>
-                      setEditDriverForm({ ...editDriverForm, schoolName: e.target.value })
-                    }
-                    placeholder="اكتب اسم المدرسة"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2"
-                  />
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    المدرسة {!isSuperAdmin && restrictedSchoolIds.length > 0 ? '*' : ''}
+                  </label>
+                  {data?.schools && data.schools.length > 0 ? (
+                    <select
+                      required={!isSuperAdmin && restrictedSchoolIds.length > 0}
+                      disabled={isSingleSchoolRestricted}
+                      value={editDriverForm.schoolName}
+                      onChange={(e) =>
+                        setEditDriverForm({ ...editDriverForm, schoolName: e.target.value })
+                      }
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] disabled:bg-slate-100"
+                    >
+                      {(isSuperAdmin || restrictedSchoolIds.length === 0) && (
+                        <option value="">غير معين بمدرسة</option>
+                      )}
+                      {data.schools.map((s) => (
+                        <option key={s.id} value={s.name}>
+                          {s.name}
+                        </option>
+                      ))}
+                      {isSuperAdmin &&
+                        editDriverForm.schoolName &&
+                        !data.schools.some((s) => s.name === editDriverForm.schoolName) && (
+                          <option value={editDriverForm.schoolName}>
+                            {editDriverForm.schoolName}
+                          </option>
+                        )}
+                    </select>
+                  ) : (
+                    <input
+                      value={editDriverForm.schoolName}
+                      onChange={(e) =>
+                        setEditDriverForm({ ...editDriverForm, schoolName: e.target.value })
+                      }
+                      placeholder="اكتب اسم المدرسة"
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                    />
+                  )}
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">رقم الباص</label>
@@ -2938,12 +2981,40 @@ export const AdminOverview: React.FC<{
               </button>
             </div>
             <p className="text-slate-600 leading-relaxed">
-              سيتم إغلاق شهر <strong>{month}/{year}</strong> وحفظ تقريره الختامي وتحديد رواتبه كـ «تم الصرف»، وتصفير السلف والتغطيات والمكافآت والخصومات لبداية الشهر الجديد{' '}
+              سيتم إغلاق شهر <strong>{month}/{year}</strong> (
+              <strong>
+                {closeMonthSchoolId === 'all'
+                  ? 'جميع المدارس'
+                  : data?.schools.find((s) => String(s.id) === closeMonthSchoolId)?.name ||
+                    dbUser?.assignedSchoolNames?.[0] ||
+                    'المدرسة المحددة'}
+              </strong>
+              ) وحفظ تقريره الختامي وتحديد رواتبه كـ «تم الصرف»، وتصفير السلف والتغطيات والمكافآت والخصومات لبداية الشهر الجديد{' '}
               <strong>
                 {month === 12 ? 1 : month + 1}/{month === 12 ? year + 1 : year}
               </strong>{' '}
               على بياض بنفس السائقين والموظفين والمدارس والمركبات.
             </p>
+            {data?.schools && data.schools.length > 0 && (
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  نطاق المدرسة للتصفية
+                </label>
+                <select
+                  disabled={isSingleSchoolRestricted}
+                  value={closeMonthSchoolId}
+                  onChange={(e) => setCloseMonthSchoolId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-bold text-[#0B1F3A] disabled:opacity-80"
+                >
+                  {isSuperAdmin && <option value="all">جميع المدارس (تصفية شاملة)</option>}
+                  {data.schools.map((s) => (
+                    <option key={s.id} value={String(s.id)}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <label className="block font-semibold text-slate-700 mb-1">ملاحظات (اختياري)</label>
               <input
@@ -2981,6 +3052,10 @@ export const AdminOverview: React.FC<{
                     setBusyAction(true);
                     setError(null);
                     try {
+                      const targetSchoolId =
+                        closeMonthSchoolId && closeMonthSchoolId !== 'all'
+                          ? Number(closeMonthSchoolId)
+                          : null;
                       const res = await apiFetch<{ nextPeriod: { month: number; year: number } }>(
                         '/api/finance/close-month',
                         {
@@ -2988,6 +3063,7 @@ export const AdminOverview: React.FC<{
                           body: JSON.stringify({
                             month,
                             year,
+                            schoolId: targetSchoolId,
                             markAllPaid: true,
                             notes: closeMonthNotes.trim(),
                           }),

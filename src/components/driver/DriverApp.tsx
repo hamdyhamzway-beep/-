@@ -94,11 +94,13 @@ import type {
   FinancialTransaction,
   NotificationItem,
   SalaryRecord,
+  SchoolBillingRange,
 } from '../../types';
 
 interface DriverAppResponse {
   linked: boolean;
-  period?: { month: number; year: number };
+  period?: { month: number; year: number; startDate?: string; endDate?: string };
+  billingRange?: SchoolBillingRange;
   driver: EnrichedDriver | null;
   salary?: SalaryRecord;
   advances?: AdvanceRecord[];
@@ -1519,6 +1521,11 @@ export const DriverApp: React.FC<{
                       <p className="text-xs text-slate-500 mt-0.5">
                         بيان مالي موثق للقراءة فقط — يتم تحديثه تلقائياً من إدارة الوليد ترافيل
                       </p>
+                      {data.billingRange && (
+                        <p className="text-[11px] font-bold text-[#0B1F3A] mt-1 font-mono tabular-nums">
+                          نطاق دورة {data.driver?.schoolName || 'المدرسة'}: {data.billingRange.labelAr}
+                        </p>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <select

@@ -1,3 +1,7 @@
+import type { SchoolBillingRange } from '../lib/billing-cycle';
+
+export type { SchoolBillingRange };
+
 export interface DbUser {
   id: number;
   uid: string;
@@ -5,11 +9,12 @@ export interface DbUser {
   fullName: string;
   phone: string | null;
   roleId: number;
-  roleSlug: 'super_admin' | 'driver' | 'supervisor' | 'movement_manager' | 'accountant' | string;
+  roleSlug: 'super_admin' | 'driver' | 'supervisor' | 'movement_manager' | 'accountant' | 'employee' | string;
   roleNameAr: string;
   permissions: string[];
   customPermissions?: string[] | null;
   assignedSchoolIds: number[];
+  assignedSchoolNames?: string[];
   staffCode?: string | null;
   employeeId?: number | null;
   isActive: boolean;
@@ -84,6 +89,9 @@ export interface SchoolItem {
   contractEndDate: string;
   notes: string | null;
   isActive: boolean;
+  billingCycleType?: 'calendar' | 'shifted' | string;
+  billingCycleStartDay?: number;
+  currentBillingRange?: SchoolBillingRange;
   vehicleCount?: number;
   driverCount?: number;
   ownerCost?: number;
@@ -183,6 +191,9 @@ export interface SchoolFinanceContract {
   profit: number;
   netPayoutProfit: number;
   profitMarginPct: number;
+  billingRange?: SchoolBillingRange;
+  supervisorsCount?: number;
+  totalSupervisorSalaries?: number;
   drivers: SalaryRecord[];
 }
 
@@ -260,6 +271,7 @@ export interface EmployeeLinkedUserSummary {
   roleNameAr: string;
   staffCode: string;
   assignedSchoolIds: number[];
+  assignedSchoolNames?: string[];
   customPermissions: string[] | null;
   permissions: string[];
   isActive: boolean;
@@ -271,6 +283,8 @@ export interface EmployeeRecord {
   fullName: string;
   jobTitle: string;
   phone: string;
+  schoolId?: number | null;
+  schoolName?: string;
   monthlySalary: number;
   bonuses: number;
   deductions: number;
@@ -328,9 +342,28 @@ export interface SupervisorRecord {
   assignedDriverName?: string;
   assignedDriverPhone?: string;
   accountStatus: 'active' | 'inactive' | string;
+  monthlySalary?: number;
+  cycleTripsCount?: number;
+  billingRange?: SchoolBillingRange;
   notes?: string | null;
   liveLocation?: SupervisorLiveLocation | null;
   todayTrip?: SupervisorTripRecord | null;
+}
+
+export interface SupervisorCycleSummaryItem {
+  supervisorId: number;
+  supervisorCode: string;
+  fullName: string;
+  phone: string;
+  schoolId: number | null;
+  schoolName: string;
+  monthlySalary: number;
+  tripsCount: number;
+  morningTripsCount: number;
+  eveningTripsCount: number;
+  completedDaysCount: number;
+  billingRange: SchoolBillingRange;
+  accountStatus: string;
 }
 
 export interface SupervisorTrackedVehicle {
@@ -472,6 +505,8 @@ export interface FinanceGrandTotals {
   netLedgerBalance: number;
   contractsProfitAfterDrivers: number;
   overallNetBalance: number;
+  supervisorsCount?: number;
+  totalSupervisorSalaries?: number;
 }
 
 export interface DailyReportAttachment {
@@ -489,6 +524,8 @@ export interface DailyReportRecord {
   id: number;
   userId: number | null;
   employeeId: number | null;
+  schoolId?: number | null;
+  schoolName?: string;
   employeeName: string;
   employeeRoleOrTitle: string;
   reportDate: string; // YYYY-MM-DD

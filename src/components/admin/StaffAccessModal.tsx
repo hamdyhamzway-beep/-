@@ -76,7 +76,7 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
 }) => {
   const isEditing = Boolean(initialUser?.id);
   const staffRoles = roles.filter((r) =>
-    ['accountant', 'movement_manager', 'super_admin'].includes(r.slug)
+    ['accountant', 'movement_manager', 'employee', 'super_admin'].includes(r.slug)
   );
 
   const [fullName, setFullName] = useState('');
@@ -100,7 +100,9 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
     if (!open) return;
     setError(null);
     if (initialUser) {
-      const slug = ['accountant', 'movement_manager', 'super_admin'].includes(initialUser.roleSlug)
+      const slug = ['accountant', 'movement_manager', 'employee', 'super_admin'].includes(
+        initialUser.roleSlug
+      )
         ? initialUser.roleSlug
         : 'accountant';
       setFullName(initialUser.fullName || '');
@@ -199,7 +201,7 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
     }
   };
 
-  const applyPreset = (preset: 'coverage_advances' | 'accountant' | 'movement_manager') => {
+  const applyPreset = (preset: 'coverage_advances' | 'accountant' | 'movement_manager' | 'employee') => {
     if (preset === 'coverage_advances') {
       setSelectedPermissions([
         'dashboard:read',
@@ -208,6 +210,8 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
         'coverage:write',
         'attendance:write',
       ]);
+    } else if (preset === 'employee') {
+      setSelectedPermissions([...(ROLE_DEFAULT_PERMISSIONS.employee || ['dashboard:read'])]);
     } else if (preset === 'accountant') {
       setSelectedPermissions([...ROLE_DEFAULT_PERMISSIONS.accountant]);
     } else {
@@ -402,12 +406,13 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
           {/* Role Selection */}
           <div className="space-y-2">
             <label className="block font-bold text-[#0B1F3A]">الدور الوظيفي داخل التطبيق *</label>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
               {(staffRoles.length > 0
                 ? staffRoles
                 : [
                     { id: 0, slug: 'accountant', nameAr: 'محاسب', description: 'إدارة المرتبات والسلف والتغطيات', permissions: [] },
                     { id: 0, slug: 'movement_manager', nameAr: 'مشرف حركة', description: 'متابعة السائقين والتغطيات والسلف والأسطول', permissions: [] },
+                    { id: 0, slug: 'employee', nameAr: 'موظف عادي / ميداني', description: 'تقديم التقارير اليومية والمحادثات ضمن مدرسته', permissions: [] },
                     { id: 0, slug: 'super_admin', nameAr: 'المدير العام', description: 'صلاحيات كاملة', permissions: [] },
                   ]
               ).map((r) => {
@@ -481,7 +486,7 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
             ) : (
               <div className="space-y-2">
                 <p className="text-[11px] text-slate-600">
-                  اختر المدرسة أو المدارس التي يُسمح لهذا الموظف بمتابعة سائقيها وتسجيل السلف والتغطيات لها فقط:
+                  عزل كامل لبيانات المدرسة المختارة — لا يرى الموظف أي سائقين أو مركبات أو تقارير أو مرتبات لمدارس أخرى:
                 </p>
                 {schools.length === 0 ? (
                   <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
@@ -544,7 +549,11 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
                     type="button"
                     onClick={() =>
                       applyPreset(
-                        roleSlug === 'movement_manager' ? 'movement_manager' : 'accountant'
+                        roleSlug === 'movement_manager'
+                          ? 'movement_manager'
+                          : roleSlug === 'employee'
+                          ? 'employee'
+                          : 'accountant'
                       )
                     }
                     className="rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-2.5 py-1 text-[11px] font-semibold text-slate-700 cursor-pointer"

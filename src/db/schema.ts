@@ -57,6 +57,8 @@ export const schools = pgTable('schools', {
     .default('0'),
   contractStartDate: text('contract_start_date').notNull().default(''),
   contractEndDate: text('contract_end_date').notNull().default(''),
+  billingCycleType: text('billing_cycle_type').notNull().default('calendar'), // calendar (1..30/31) | shifted (e.g. 13..12)
+  billingCycleStartDay: integer('billing_cycle_start_day').notNull().default(1), // 1 for calendar, 13 for Al-Hilaliya
   notes: text('notes').default(''),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -79,6 +81,7 @@ export const vehicles = pgTable('vehicles', {
   registrationNumber: text('registration_number').notNull().unique(),
   vehicleType: text('vehicle_type').notNull().default(''),
   ownerId: integer('owner_id').references(() => vehicleOwners.id),
+  schoolId: integer('school_id').references(() => schools.id),
   monthlyOwnerCost: numeric('monthly_owner_cost', { precision: 12, scale: 2 })
     .notNull()
     .default('0'),
@@ -195,6 +198,7 @@ export const salaries = pgTable(
     driverId: integer('driver_id')
       .references(() => drivers.id)
       .notNull(),
+    schoolId: integer('school_id').references(() => schools.id),
     month: integer('month').notNull(),
     year: integer('year').notNull(),
     baseSalary: numeric('base_salary', { precision: 12, scale: 2 }).notNull().default('0'),
@@ -213,7 +217,10 @@ export const salaries = pgTable(
     status: text('status').notNull().default('open'), // open | approved | paid
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
-  (table) => [uniqueIndex('uq_salaries_driver_month_year').on(table.driverId, table.month, table.year)]
+  (table) => [
+    uniqueIndex('uq_salaries_driver_month_year').on(table.driverId, table.month, table.year),
+    index('idx_salaries_school').on(table.schoolId),
+  ]
 );
 
 // 10. Advances
@@ -224,6 +231,7 @@ export const advances = pgTable(
     driverId: integer('driver_id')
       .references(() => drivers.id)
       .notNull(),
+    schoolId: integer('school_id').references(() => schools.id),
     amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
     date: text('date').notNull(), // YYYY-MM-DD
     reason: text('reason').notNull().default(''),
@@ -236,7 +244,10 @@ export const advances = pgTable(
     isReversed: boolean('is_reversed').notNull().default(false),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
-  (table) => [index('idx_advances_driver_date').on(table.driverId, table.date)]
+  (table) => [
+    index('idx_advances_driver_date').on(table.driverId, table.date),
+    index('idx_advances_school').on(table.schoolId),
+  ]
 );
 
 // 11. Coverage Records (Absence Coverage)
@@ -278,6 +289,7 @@ export const financialTransactions = pgTable(
     driverId: integer('driver_id')
       .references(() => drivers.id)
       .notNull(),
+    schoolId: integer('school_id').references(() => schools.id),
     month: integer('month').notNull(),
     year: integer('year').notNull(),
     type: text('type').notNull(), // advance | coverage_deduction | other_deduction | bonus | reversal | salary_adjustment
@@ -293,6 +305,7 @@ export const financialTransactions = pgTable(
   },
   (table) => [
     index('idx_ft_driver_period').on(table.driverId, table.year, table.month),
+    index('idx_ft_school').on(table.schoolId),
     pgPolicy('ft_admin_accountant_select', {
       for: 'select',
       to: 'public',
@@ -330,13 +343,17 @@ export const attendance = pgTable(
     driverId: integer('driver_id')
       .references(() => drivers.id)
       .notNull(),
+    schoolId: integer('school_id').references(() => schools.id),
     date: text('date').notNull(), // YYYY-MM-DD
     status: text('status').notNull().default('present'), // present | absent | covered | leave
     notes: text('notes').default(''),
     recordedByUserId: integer('recorded_by_user_id').references(() => users.id),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
-  (table) => [uniqueIndex('uq_attendance_driver_date').on(table.driverId, table.date)]
+  (table) => [
+    uniqueIndex('uq_attendance_driver_date').on(table.driverId, table.date),
+    index('idx_attendance_school').on(table.schoolId),
+  ]
 );
 
 // 14. GPS Locations
@@ -405,29 +422,38 @@ export const auditLogs = pgTable('audit_logs', {
 });
 
 // 18. Non-Driver Employees (الموظفون غير السائقين)
-export const employees = pgTable('employees', {
-  id: serial('id').primaryKey(),
-  employeeCode: text('employee_code').notNull().default(''),
-  fullName: text('full_name').notNull(),
-  jobTitle: text('job_title').notNull().default(''),
-  phone: text('phone').notNull().default(''),
-  monthlySalary: numeric('monthly_salary', { precision: 12, scale: 2 }).notNull().default('0'),
-  bonuses: numeric('bonuses', { precision: 12, scale: 2 }).notNull().default('0'),
-  deductions: numeric('deductions', { precision: 12, scale: 2 }).notNull().default('0'),
-  employmentStartDate: text('employment_start_date').notNull().default(''),
-  status: text('status').notNull().default('active'), // active | inactive
-  notes: text('notes').default(''),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+export const employees = pgTable(
+  'employees',
+  {
+    id: serial('id').primaryKey(),
+    employeeCode: text('employee_code').notNull().default(''),
+    fullName: text('full_name').notNull(),
+    jobTitle: text('job_title').notNull().default(''),
+    phone: text('phone').notNull().default(''),
+    schoolId: integer('school_id').references(() => schools.id),
+    monthlySalary: numeric('monthly_salary', { precision: 12, scale: 2 }).notNull().default('0'),
+    bonuses: numeric('bonuses', { precision: 12, scale: 2 }).notNull().default('0'),
+    deductions: numeric('deductions', { precision: 12, scale: 2 }).notNull().default('0'),
+    employmentStartDate: text('employment_start_date').notNull().default(''),
+    status: text('status').notNull().default('active'), // active | inactive
+    notes: text('notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [index('idx_employees_school').on(table.schoolId)]
+);
 
-// 19. Monthly Closings (تصفية الشهر وأرشفة ملخصاته)
+// 19. Monthly Closings (تصفية الشهر وأرشفة ملخصاته - على مستوى كل مدرسة أو شامل)
 export const monthlyClosings = pgTable(
   'monthly_closings',
   {
     id: serial('id').primaryKey(),
     month: integer('month').notNull(),
     year: integer('year').notNull(),
+    schoolId: integer('school_id').references(() => schools.id),
+    schoolName: text('school_name').default(''),
+    cycleStartDate: text('cycle_start_date').default(''),
+    cycleEndDate: text('cycle_end_date').default(''),
     closedByUserId: integer('closed_by_user_id').references(() => users.id),
     driversCount: integer('drivers_count').notNull().default(0),
     employeesCount: integer('employees_count').notNull().default(0),
@@ -478,12 +504,20 @@ export const monthlyClosings = pgTable(
           deductions: number;
           netSalary: number;
         }>;
+        supervisors?: Array<{
+          supervisorId: number;
+          supervisorCode: string;
+          fullName: string;
+          schoolName: string;
+          tripsCount: number;
+          monthlySalary: number;
+        }>;
       }>()
       .notNull()
       .default({ drivers: [], employees: [] }),
     closedAt: timestamp('closed_at').defaultNow().notNull(),
   },
-  (table) => [uniqueIndex('uq_monthly_closings_month_year').on(table.month, table.year)]
+  (table) => [index('idx_monthly_closings_period_school').on(table.month, table.year, table.schoolId)]
 );
 
 // 20. Billing Periods (الشهر المالي المفتوح حالياً للعمل عليه على بياض)
@@ -507,7 +541,10 @@ export const usersRelations = relations(users, ({ one }) => ({
 
 export const schoolsRelations = relations(schools, ({ many }) => ({
   routes: many(routes),
+  vehicles: many(vehicles),
+  employees: many(employees),
   assignments: many(driverAssignments),
+  dailyReports: many(dailyReports),
 }));
 
 export const vehicleOwnersRelations = relations(vehicleOwners, ({ many }) => ({
@@ -516,8 +553,13 @@ export const vehicleOwnersRelations = relations(vehicleOwners, ({ many }) => ({
 
 export const vehiclesRelations = relations(vehicles, ({ one, many }) => ({
   owner: one(vehicleOwners, { fields: [vehicles.ownerId], references: [vehicleOwners.id] }),
+  school: one(schools, { fields: [vehicles.schoolId], references: [schools.id] }),
   assignments: many(driverAssignments),
   gpsLocations: many(gpsLocations),
+}));
+
+export const employeesRelations = relations(employees, ({ one }) => ({
+  school: one(schools, { fields: [employees.schoolId], references: [schools.id] }),
 }));
 
 export const driversRelations = relations(drivers, ({ one, many }) => ({
@@ -542,6 +584,7 @@ export const supervisors = pgTable(
     schoolId: integer('school_id').references(() => schools.id),
     vehicleId: integer('vehicle_id').references(() => vehicles.id),
     routeId: integer('route_id').references(() => routes.id),
+    monthlySalary: numeric('monthly_salary', { precision: 12, scale: 2 }).notNull().default('0'),
     liveLat: doublePrecision('live_lat'),
     liveLng: doublePrecision('live_lng'),
     liveSpeedKmh: doublePrecision('live_speed_kmh').default(0),
@@ -663,6 +706,7 @@ export const dailyReports = pgTable(
     id: serial('id').primaryKey(),
     userId: integer('user_id').references(() => users.id),
     employeeId: integer('employee_id').references(() => employees.id, { onDelete: 'set null' }),
+    schoolId: integer('school_id').references(() => schools.id),
     employeeName: text('employee_name').notNull(),
     employeeRoleOrTitle: text('employee_role_or_title').default(''),
     reportDate: text('report_date').notNull(), // YYYY-MM-DD
@@ -698,12 +742,14 @@ export const dailyReports = pgTable(
     index('idx_daily_reports_target').on(table.targetAudience),
     index('idx_daily_reports_status').on(table.status),
     index('idx_daily_reports_user').on(table.userId),
+    index('idx_daily_reports_school').on(table.schoolId),
   ]
 );
 
 export const dailyReportsRelations = relations(dailyReports, ({ one }) => ({
   user: one(users, { fields: [dailyReports.userId], references: [users.id] }),
   employee: one(employees, { fields: [dailyReports.employeeId], references: [employees.id] }),
+  school: one(schools, { fields: [dailyReports.schoolId], references: [schools.id] }),
 }));
 
 

@@ -190,7 +190,7 @@ export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> =
     }
   };
 
-  const staffRoleSlugs = new Set(['accountant', 'movement_manager', 'super_admin']);
+  const staffRoleSlugs = new Set(['accountant', 'movement_manager', 'employee', 'super_admin']);
   const staffCount = usersList.filter((u) => staffRoleSlugs.has(u.roleSlug)).length;
 
   const filteredUsers = usersList.filter((u) => {
@@ -281,7 +281,7 @@ export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> =
                 فريق العمل والصلاحيات المخصصة ({staffCount} موظف إدارة)
               </h2>
               <p className="text-[11px] text-slate-500">
-                يسجل الموظف دخوله من تبويب «الإدارة» باستخدام رقمه أو اسمه مع «كود الموظف» أو بحساب Google
+                يسجل الموظف دخوله من تبويب «الموظفين والإدارة» باستخدام رقم الموبايل وكود الدخول (PIN)
               </p>
             </div>
           </div>
@@ -315,7 +315,7 @@ export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> =
                   viewFilter === 'staff' ? 'bg-[#0B1F3A] text-white' : 'text-slate-600'
                 }`}
               >
-                المحاسبون والحركة ({staffCount})
+                المحاسبون والحركة والموظفون ({staffCount})
               </button>
               <button
                 type="button"

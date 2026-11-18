@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   advances,
@@ -14,28 +14,77 @@ import {
   notifications,
   salaries,
   schools,
+  supervisors,
+  supervisorTrips,
 } from '../db/schema.ts';
+import {
+  getBillingDateRangeForPeriod,
+  getBillingPeriodForDate,
+  getCairoTodayDateString,
+  getCurrentBillingRangeForSchool,
+  type SchoolBillingConfig,
+  type SchoolBillingRange,
+} from '../lib/billing-cycle.ts';
 
 type DbExecutor = Parameters<Parameters<typeof db.transaction>[0]>[0] | typeof db;
 
-export function getMonthYearFromDate(dateStr: string): { month: number; year: number } {
-  const parts = dateStr.split('-');
-  if (parts.length >= 2) {
-    const year = Number(parts[0]);
-    const month = Number(parts[1]);
-    if (Number.isFinite(year) && Number.isFinite(month) && month >= 1 && month <= 12) {
-      return { month, year };
-    }
-  }
-  const now = new Date();
-  return { month: now.getMonth() + 1, year: now.getFullYear() };
+export function getMonthYearFromDate(
+  dateStr: string,
+  school?: SchoolBillingConfig | null
+): { month: number; year: number } {
+  return getBillingPeriodForDate(dateStr, school);
+}
+
+export async function getDriverSchoolBillingConfig(
+  tx: DbExecutor,
+  driverId: number
+): Promise<SchoolBillingConfig | null> {
+  const [assignment] = await tx
+    .select({ schoolId: driverAssignments.schoolId })
+    .from(driverAssignments)
+    .where(and(eq(driverAssignments.driverId, driverId), eq(driverAssignments.isCurrent, true)))
+    .limit(1);
+
+  if (!assignment?.schoolId) return null;
+
+  const [school] = await tx
+    .select({
+      id: schools.id,
+      name: schools.name,
+      billingCycleType: schools.billingCycleType,
+      billingCycleStartDay: schools.billingCycleStartDay,
+    })
+    .from(schools)
+    .where(eq(schools.id, assignment.schoolId))
+    .limit(1);
+
+  return school || null;
+}
+
+export async function getSchoolBillingConfigById(
+  tx: DbExecutor,
+  schoolId?: number | null
+): Promise<SchoolBillingConfig | null> {
+  if (!schoolId) return null;
+  const [school] = await tx
+    .select({
+      id: schools.id,
+      name: schools.name,
+      billingCycleType: schools.billingCycleType,
+      billingCycleStartDay: schools.billingCycleStartDay,
+    })
+    .from(schools)
+    .where(eq(schools.id, schoolId))
+    .limit(1);
+  return school || null;
 }
 
 export async function recalculateDriverSalary(
   tx: DbExecutor,
   driverId: number,
   month: number,
-  year: number
+  year: number,
+  schoolConfigOverride?: SchoolBillingConfig | null
 ) {
   const [driver] = await tx
     .select()
@@ -48,6 +97,11 @@ export async function recalculateDriverSalary(
   }
 
   const baseSalary = Number(driver.monthlyAgreedSalary || 0);
+  const schoolConfig =
+    schoolConfigOverride !== undefined
+      ? schoolConfigOverride
+      : await getDriverSchoolBillingConfig(tx, driverId);
+  const range = getBillingDateRangeForPeriod(month, year, schoolConfig);
 
   // Sum all financial transactions for this driver & period
   const txRows = await tx
@@ -61,9 +115,7 @@ export async function recalculateDriverSalary(
       )
     );
 
-  // Also calculate from active (non-reversed) advances & coverage records for clear itemized totals
-  const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
-
+  // Filter active advances & coverage records strictly within this driver's school financial cycle [startDate, endDate]
   const activeAdvances = await tx
     .select()
     .from(advances)
@@ -71,7 +123,8 @@ export async function recalculateDriverSalary(
       and(
         eq(advances.driverId, driverId),
         eq(advances.isReversed, false),
-        sql`${advances.date} LIKE ${monthPrefix + '%'}`
+        gte(advances.date, range.startDate),
+        lte(advances.date, range.endDate)
       )
     );
 
@@ -82,7 +135,8 @@ export async function recalculateDriverSalary(
       and(
         eq(coverageRecords.absentDriverId, driverId),
         eq(coverageRecords.isReversed, false),
-        sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`
+        gte(coverageRecords.date, range.startDate),
+        lte(coverageRecords.date, range.endDate)
       )
     );
 
@@ -120,6 +174,7 @@ export async function recalculateDriverSalary(
     .insert(salaries)
     .values({
       driverId,
+      schoolId: schoolConfig?.id ?? null,
       month,
       year,
       baseSalary: baseSalary.toFixed(2),
@@ -133,6 +188,7 @@ export async function recalculateDriverSalary(
     .onConflictDoUpdate({
       target: [salaries.driverId, salaries.month, salaries.year],
       set: {
+        schoolId: schoolConfig?.id ?? null,
         baseSalary: baseSalary.toFixed(2),
         totalAdvances: totalAdvances.toFixed(2),
         totalCoverageDeductions: totalCoverageDeductions.toFixed(2),
@@ -151,12 +207,30 @@ export async function getOrRecalculateDriverSalaryForRead(
   tx: DbExecutor,
   driverId: number,
   month: number,
-  year: number
+  year: number,
+  schoolConfigOverride?: SchoolBillingConfig | null
 ) {
+  const schoolConfig =
+    schoolConfigOverride !== undefined
+      ? schoolConfigOverride
+      : await getDriverSchoolBillingConfig(tx, driverId);
+
+  const closingConditions = schoolConfig?.id
+    ? and(
+        eq(monthlyClosings.month, month),
+        eq(monthlyClosings.year, year),
+        sql`(${monthlyClosings.schoolId} IS NULL OR ${monthlyClosings.schoolId} = ${schoolConfig.id})`
+      )
+    : and(
+        eq(monthlyClosings.month, month),
+        eq(monthlyClosings.year, year),
+        isNull(monthlyClosings.schoolId)
+      );
+
   const [closing] = await tx
     .select({ id: monthlyClosings.id })
     .from(monthlyClosings)
-    .where(and(eq(monthlyClosings.month, month), eq(monthlyClosings.year, year)))
+    .where(closingConditions)
     .limit(1);
 
   if (closing) {
@@ -176,7 +250,7 @@ export async function getOrRecalculateDriverSalaryForRead(
     }
   }
 
-  return recalculateDriverSalary(tx, driverId, month, year);
+  return recalculateDriverSalary(tx, driverId, month, year, schoolConfig);
 }
 
 export async function recordAdvanceTransaction(params: {
@@ -213,10 +287,13 @@ export async function recordAdvanceTransaction(params: {
       .limit(1);
     if (!driver) throw new Error('لم يتم العثور على السائق');
 
+    const schoolConfig = await getDriverSchoolBillingConfig(tx, params.driverId);
+
     const [insertedAdvance] = await tx
       .insert(advances)
       .values({
         driverId: params.driverId,
+        schoolId: schoolConfig?.id ?? null,
         amount: params.amount.toFixed(2),
         date: params.date,
         reason: params.reason || '',
@@ -227,10 +304,11 @@ export async function recordAdvanceTransaction(params: {
       })
       .returning();
 
-    const { month, year } = getMonthYearFromDate(params.date);
+    const { month, year } = getMonthYearFromDate(params.date, schoolConfig);
 
     await tx.insert(financialTransactions).values({
       driverId: params.driverId,
+      schoolId: schoolConfig?.id ?? null,
       month,
       year,
       type: 'advance',
@@ -242,7 +320,7 @@ export async function recordAdvanceTransaction(params: {
       recordedByUserId: params.recordedByUserId,
     });
 
-    const salary = await recalculateDriverSalary(tx, params.driverId, month, year);
+    const salary = await recalculateDriverSalary(tx, params.driverId, month, year, schoolConfig);
 
     await tx.insert(notifications).values({
       recipientDriverId: params.driverId,
@@ -303,6 +381,11 @@ export async function recordCoverageTransaction(params: {
       .limit(1);
     if (!absentDriver) throw new Error('السائق الغائب غير موجود');
 
+    const schoolConfig = params.schoolId
+      ? await getSchoolBillingConfigById(tx, params.schoolId)
+      : await getDriverSchoolBillingConfig(tx, params.absentDriverId);
+    const effectiveSchoolId = params.schoolId ?? schoolConfig?.id ?? null;
+
     const [insertedCoverage] = await tx
       .insert(coverageRecords)
       .values({
@@ -310,7 +393,7 @@ export async function recordCoverageTransaction(params: {
         replacementDriverId: params.replacementDriverId || null,
         replacementExternalName: params.replacementExternalName || '',
         vehicleId: params.vehicleId || null,
-        schoolId: params.schoolId || null,
+        schoolId: effectiveSchoolId,
         date: params.date,
         actualReplacementCost: params.actualReplacementCost.toFixed(2),
         absentDriverDeduction: params.absentDriverDeduction.toFixed(2),
@@ -321,11 +404,12 @@ export async function recordCoverageTransaction(params: {
       })
       .returning();
 
-    const { month, year } = getMonthYearFromDate(params.date);
+    const { month, year } = getMonthYearFromDate(params.date, schoolConfig);
 
     if (params.absentDriverDeduction > 0) {
       await tx.insert(financialTransactions).values({
         driverId: params.absentDriverId,
+        schoolId: effectiveSchoolId,
         month,
         year,
         type: 'coverage_deduction',
@@ -343,6 +427,7 @@ export async function recordCoverageTransaction(params: {
       .insert(attendance)
       .values({
         driverId: params.absentDriverId,
+        schoolId: effectiveSchoolId,
         date: params.date,
         status: 'covered',
         notes: params.reason || 'تمت التغطية',
@@ -351,13 +436,14 @@ export async function recordCoverageTransaction(params: {
       .onConflictDoUpdate({
         target: [attendance.driverId, attendance.date],
         set: {
+          schoolId: effectiveSchoolId,
           status: 'covered',
           notes: params.reason || 'تمت التغطية',
           recordedByUserId: params.recordedByUserId,
         },
       });
 
-    const salary = await recalculateDriverSalary(tx, params.absentDriverId, month, year);
+    const salary = await recalculateDriverSalary(tx, params.absentDriverId, month, year, schoolConfig);
 
     await tx.insert(notifications).values({
       recipientDriverId: params.absentDriverId,
@@ -403,11 +489,13 @@ export async function recordAdjustmentTransaction(params: {
     if (!driver) throw new Error('السائق غير موجود');
 
     const direction = params.type === 'bonus' ? 'credit' : 'debit';
+    const schoolConfig = await getDriverSchoolBillingConfig(tx, params.driverId);
 
     const [ledger] = await tx
       .insert(financialTransactions)
       .values({
         driverId: params.driverId,
+        schoolId: schoolConfig?.id ?? null,
         month: params.month,
         year: params.year,
         type: params.type,
@@ -419,7 +507,13 @@ export async function recordAdjustmentTransaction(params: {
       })
       .returning();
 
-    const salary = await recalculateDriverSalary(tx, params.driverId, params.month, params.year);
+    const salary = await recalculateDriverSalary(
+      tx,
+      params.driverId,
+      params.month,
+      params.year,
+      schoolConfig
+    );
 
     await tx.insert(notifications).values({
       recipientDriverId: params.driverId,
@@ -464,12 +558,14 @@ export async function reverseFinancialRecord(params: {
         .set({ isReversed: true })
         .where(eq(advances.id, adv.id));
 
-      const { month, year } = getMonthYearFromDate(adv.date);
+      const schoolConfig = await getDriverSchoolBillingConfig(tx, adv.driverId);
+      const { month, year } = getMonthYearFromDate(adv.date, schoolConfig);
 
       const [rev] = await tx
         .insert(financialTransactions)
         .values({
           driverId: adv.driverId,
+          schoolId: adv.schoolId ?? schoolConfig?.id ?? null,
           month,
           year,
           type: 'reversal',
@@ -482,7 +578,7 @@ export async function reverseFinancialRecord(params: {
         })
         .returning();
 
-      const salary = await recalculateDriverSalary(tx, adv.driverId, month, year);
+      const salary = await recalculateDriverSalary(tx, adv.driverId, month, year, schoolConfig);
 
       await tx.insert(auditLogs).values({
         actorUserId: params.recordedByUserId,
@@ -509,12 +605,16 @@ export async function reverseFinancialRecord(params: {
         .set({ isReversed: true })
         .where(eq(coverageRecords.id, cov.id));
 
-      const { month, year } = getMonthYearFromDate(cov.date);
+      const schoolConfig = cov.schoolId
+        ? await getSchoolBillingConfigById(tx, cov.schoolId)
+        : await getDriverSchoolBillingConfig(tx, cov.absentDriverId);
+      const { month, year } = getMonthYearFromDate(cov.date, schoolConfig);
 
       const [rev] = await tx
         .insert(financialTransactions)
         .values({
           driverId: cov.absentDriverId,
+          schoolId: cov.schoolId ?? schoolConfig?.id ?? null,
           month,
           year,
           type: 'reversal',
@@ -527,7 +627,7 @@ export async function reverseFinancialRecord(params: {
         })
         .returning();
 
-      const salary = await recalculateDriverSalary(tx, cov.absentDriverId, month, year);
+      const salary = await recalculateDriverSalary(tx, cov.absentDriverId, month, year, schoolConfig);
 
       await tx.insert(auditLogs).values({
         actorUserId: params.recordedByUserId,
@@ -566,8 +666,9 @@ export async function updateAdvanceTransaction(params: {
       .limit(1);
     if (!existing) throw new Error('السلفة غير موجودة');
 
-    const oldPeriod = getMonthYearFromDate(existing.date);
-    const newPeriod = getMonthYearFromDate(params.date);
+    const schoolConfig = await getDriverSchoolBillingConfig(tx, existing.driverId);
+    const oldPeriod = getMonthYearFromDate(existing.date, schoolConfig);
+    const newPeriod = getMonthYearFromDate(params.date, schoolConfig);
 
     const [updated] = await tx
       .update(advances)
@@ -599,6 +700,7 @@ export async function updateAdvanceTransaction(params: {
       await tx
         .update(financialTransactions)
         .set({
+          schoolId: existing.schoolId ?? schoolConfig?.id ?? null,
           amount: params.amount.toFixed(2),
           month: newPeriod.month,
           year: newPeriod.year,
@@ -608,6 +710,7 @@ export async function updateAdvanceTransaction(params: {
     } else if (!existing.isReversed) {
       await tx.insert(financialTransactions).values({
         driverId: existing.driverId,
+        schoolId: existing.schoolId ?? schoolConfig?.id ?? null,
         month: newPeriod.month,
         year: newPeriod.year,
         type: 'advance',
@@ -621,13 +724,14 @@ export async function updateAdvanceTransaction(params: {
     }
 
     if (oldPeriod.month !== newPeriod.month || oldPeriod.year !== newPeriod.year) {
-      await recalculateDriverSalary(tx, existing.driverId, oldPeriod.month, oldPeriod.year);
+      await recalculateDriverSalary(tx, existing.driverId, oldPeriod.month, oldPeriod.year, schoolConfig);
     }
     const salary = await recalculateDriverSalary(
       tx,
       existing.driverId,
       newPeriod.month,
-      newPeriod.year
+      newPeriod.year,
+      schoolConfig
     );
 
     await tx.insert(auditLogs).values({
@@ -657,7 +761,8 @@ export async function deleteAdvanceTransaction(params: {
       .limit(1);
     if (!existing) throw new Error('السلفة غير موجودة');
 
-    const { month, year } = getMonthYearFromDate(existing.date);
+    const schoolConfig = await getDriverSchoolBillingConfig(tx, existing.driverId);
+    const { month, year } = getMonthYearFromDate(existing.date, schoolConfig);
 
     await tx
       .delete(financialTransactions)
@@ -670,7 +775,7 @@ export async function deleteAdvanceTransaction(params: {
 
     await tx.delete(advances).where(eq(advances.id, params.id));
 
-    const salary = await recalculateDriverSalary(tx, existing.driverId, month, year);
+    const salary = await recalculateDriverSalary(tx, existing.driverId, month, year, schoolConfig);
 
     await tx.insert(auditLogs).values({
       actorUserId: params.recordedByUserId,
@@ -709,8 +814,11 @@ export async function updateCoverageTransaction(params: {
       .limit(1);
     if (!existing) throw new Error('سجل التغطية غير موجود');
 
-    const oldPeriod = getMonthYearFromDate(existing.date);
-    const newPeriod = getMonthYearFromDate(params.date);
+    const schoolConfig = existing.schoolId
+      ? await getSchoolBillingConfigById(tx, existing.schoolId)
+      : await getDriverSchoolBillingConfig(tx, existing.absentDriverId);
+    const oldPeriod = getMonthYearFromDate(existing.date, schoolConfig);
+    const newPeriod = getMonthYearFromDate(params.date, schoolConfig);
 
     const [updated] = await tx
       .update(coverageRecords)
@@ -746,6 +854,7 @@ export async function updateCoverageTransaction(params: {
         await tx
           .update(financialTransactions)
           .set({
+            schoolId: existing.schoolId ?? schoolConfig?.id ?? null,
             amount: params.absentDriverDeduction.toFixed(2),
             month: newPeriod.month,
             year: newPeriod.year,
@@ -755,6 +864,7 @@ export async function updateCoverageTransaction(params: {
       } else {
         await tx.insert(financialTransactions).values({
           driverId: existing.absentDriverId,
+          schoolId: existing.schoolId ?? schoolConfig?.id ?? null,
           month: newPeriod.month,
           year: newPeriod.year,
           type: 'coverage_deduction',
@@ -773,13 +883,20 @@ export async function updateCoverageTransaction(params: {
     }
 
     if (oldPeriod.month !== newPeriod.month || oldPeriod.year !== newPeriod.year) {
-      await recalculateDriverSalary(tx, existing.absentDriverId, oldPeriod.month, oldPeriod.year);
+      await recalculateDriverSalary(
+        tx,
+        existing.absentDriverId,
+        oldPeriod.month,
+        oldPeriod.year,
+        schoolConfig
+      );
     }
     const salary = await recalculateDriverSalary(
       tx,
       existing.absentDriverId,
       newPeriod.month,
-      newPeriod.year
+      newPeriod.year,
+      schoolConfig
     );
 
     await tx.insert(auditLogs).values({
@@ -809,7 +926,10 @@ export async function deleteCoverageTransaction(params: {
       .limit(1);
     if (!existing) throw new Error('سجل التغطية غير موجود');
 
-    const { month, year } = getMonthYearFromDate(existing.date);
+    const schoolConfig = existing.schoolId
+      ? await getSchoolBillingConfigById(tx, existing.schoolId)
+      : await getDriverSchoolBillingConfig(tx, existing.absentDriverId);
+    const { month, year } = getMonthYearFromDate(existing.date, schoolConfig);
 
     await tx
       .delete(financialTransactions)
@@ -832,7 +952,13 @@ export async function deleteCoverageTransaction(params: {
 
     await tx.delete(coverageRecords).where(eq(coverageRecords.id, params.id));
 
-    const salary = await recalculateDriverSalary(tx, existing.absentDriverId, month, year);
+    const salary = await recalculateDriverSalary(
+      tx,
+      existing.absentDriverId,
+      month,
+      year,
+      schoolConfig
+    );
 
     await tx.insert(auditLogs).values({
       actorUserId: params.recordedByUserId,
@@ -944,7 +1070,35 @@ export async function deleteAdjustmentTransaction(params: {
 
 const ACTIVE_PERIOD_KEY = 'active_billing_period';
 
-export async function getActiveBillingPeriod(): Promise<{ month: number; year: number }> {
+export function getSchoolBillingPeriodKey(schoolId: number): string {
+  return `school_billing_period_${schoolId}`;
+}
+
+export async function getActiveBillingPeriod(
+  schoolId?: number | null
+): Promise<{ month: number; year: number }> {
+  if (schoolId) {
+    const schoolKey = getSchoolBillingPeriodKey(schoolId);
+    const [schoolPeriodRow] = await db
+      .select()
+      .from(billingPeriods)
+      .where(eq(billingPeriods.key, schoolKey))
+      .limit(1);
+    if (
+      schoolPeriodRow &&
+      schoolPeriodRow.activeMonth >= 1 &&
+      schoolPeriodRow.activeMonth <= 12 &&
+      schoolPeriodRow.activeYear >= 2020
+    ) {
+      return { month: schoolPeriodRow.activeMonth, year: schoolPeriodRow.activeYear };
+    }
+    const schoolCfg = await getSchoolBillingConfigById(db, schoolId);
+    if (schoolCfg) {
+      const auto = getCurrentBillingRangeForSchool(schoolCfg);
+      return { month: auto.month, year: auto.year };
+    }
+  }
+
   const [row] = await db
     .select()
     .from(billingPeriods)
@@ -954,19 +1108,130 @@ export async function getActiveBillingPeriod(): Promise<{ month: number; year: n
   if (row && row.activeMonth >= 1 && row.activeMonth <= 12 && row.activeYear >= 2020) {
     return { month: row.activeMonth, year: row.activeYear };
   }
-  const now = new Date();
-  return { month: now.getMonth() + 1, year: now.getFullYear() };
+  const today = getCairoTodayDateString();
+  const [y, m] = today.split('-').map(Number);
+  return { month: m || new Date().getMonth() + 1, year: y || new Date().getFullYear() };
+}
+
+export interface SupervisorCycleSummary {
+  supervisorId: number;
+  supervisorCode: string;
+  fullName: string;
+  phone: string;
+  schoolId: number | null;
+  schoolName: string;
+  monthlySalary: number;
+  tripsCount: number;
+  morningTripsCount: number;
+  eveningTripsCount: number;
+  completedDaysCount: number;
+  billingRange: SchoolBillingRange;
+  accountStatus: string;
+}
+
+export async function getSupervisorCycleSummaries(params: {
+  month: number;
+  year: number;
+  schoolId?: number | null;
+  allowedSchoolIds?: number[] | null;
+}): Promise<SupervisorCycleSummary[]> {
+  const { month, year, schoolId, allowedSchoolIds } = params;
+  const [allSups, allSchools] = await Promise.all([
+    db.select().from(supervisors).orderBy(supervisors.fullName),
+    db.select().from(schools),
+  ]);
+
+  const schoolMap: Record<number, (typeof allSchools)[number]> = {};
+  for (const s of allSchools) schoolMap[s.id] = s;
+
+  const scopedSups = allSups.filter((sup) => {
+    if (schoolId && sup.schoolId !== schoolId) return false;
+    if (allowedSchoolIds && allowedSchoolIds.length > 0) {
+      return sup.schoolId !== null && allowedSchoolIds.includes(sup.schoolId);
+    }
+    return true;
+  });
+
+  if (scopedSups.length === 0) return [];
+
+  // Determine widest date bounds across involved schools to fetch trips in one query
+  let minStart = '9999-12-31';
+  let maxEnd = '0000-01-01';
+  const rangeBySchoolId = new Map<number | 'none', SchoolBillingRange>();
+  rangeBySchoolId.set('none', getBillingDateRangeForPeriod(month, year, null));
+
+  for (const sup of scopedSups) {
+    const key = sup.schoolId ?? 'none';
+    if (!rangeBySchoolId.has(key)) {
+      const sc = sup.schoolId ? schoolMap[sup.schoolId] : null;
+      rangeBySchoolId.set(key, getBillingDateRangeForPeriod(month, year, sc));
+    }
+    const r = rangeBySchoolId.get(key)!;
+    if (r.startDate < minStart) minStart = r.startDate;
+    if (r.endDate > maxEnd) maxEnd = r.endDate;
+  }
+
+  const supIds = scopedSups.map((s) => s.id);
+  const tripsInWindow = await db
+    .select()
+    .from(supervisorTrips)
+    .where(
+      and(
+        inArray(supervisorTrips.supervisorId, supIds),
+        gte(supervisorTrips.tripDate, minStart),
+        lte(supervisorTrips.tripDate, maxEnd)
+      )
+    );
+
+  const tripsBySup = new Map<number, typeof tripsInWindow>();
+  for (const t of tripsInWindow) {
+    const list = tripsBySup.get(t.supervisorId) || [];
+    list.push(t);
+    tripsBySup.set(t.supervisorId, list);
+  }
+
+  return scopedSups.map((sup) => {
+    const sc = sup.schoolId ? schoolMap[sup.schoolId] : null;
+    const range = rangeBySchoolId.get(sup.schoolId ?? 'none')!;
+    const rawTrips = tripsBySup.get(sup.id) || [];
+    const cycleTrips = rawTrips.filter(
+      (t) => t.tripDate >= range.startDate && t.tripDate <= range.endDate
+    );
+
+    const morningTripsCount = cycleTrips.filter((t) => Boolean(t.morningStartedAt)).length;
+    const eveningTripsCount = cycleTrips.filter((t) => Boolean(t.eveningEndedAt)).length;
+    const completedDaysCount = cycleTrips.filter(
+      (t) => Boolean(t.morningStartedAt) && Boolean(t.eveningEndedAt)
+    ).length;
+
+    return {
+      supervisorId: sup.id,
+      supervisorCode: sup.supervisorCode,
+      fullName: sup.fullName,
+      phone: sup.phone,
+      schoolId: sup.schoolId ?? null,
+      schoolName: sc?.name || 'غير معين',
+      monthlySalary: Number(sup.monthlySalary || 0),
+      tripsCount: morningTripsCount + eveningTripsCount,
+      morningTripsCount,
+      eveningTripsCount,
+      completedDaysCount,
+      billingRange: range,
+      accountStatus: sup.accountStatus,
+    };
+  });
 }
 
 export async function closeMonthAndStartNext(params: {
   month: number;
   year: number;
+  schoolId?: number | null;
   markAllPaid?: boolean;
   notes?: string;
   recordedByUserId: number;
   ipAddress?: string;
 }) {
-  const { month, year } = params;
+  const { month, year, schoolId } = params;
   if (!Number.isFinite(month) || month < 1 || month > 12 || !Number.isFinite(year) || year < 2020) {
     throw new Error('الشهر أو السنة غير صالحة');
   }
@@ -975,14 +1240,19 @@ export async function closeMonthAndStartNext(params: {
   const nextYear = month === 12 ? year + 1 : year;
 
   return await db.transaction(async (tx) => {
+    const allSchools = await tx.select().from(schools);
+    const schoolById: Record<number, (typeof allSchools)[number]> = {};
+    for (const s of allSchools) schoolById[s.id] = s;
+
+    const targetSchool = schoolId ? schoolById[schoolId] || null : null;
+    if (schoolId && !targetSchool) {
+      throw new Error('المدرسة المحددة غير موجودة');
+    }
+
     const activeDrivers = await tx
       .select()
       .from(drivers)
       .where(eq(drivers.accountStatus, 'active'));
-
-    const allSchools = await tx.select().from(schools);
-    const schoolById: Record<number, string> = {};
-    for (const s of allSchools) schoolById[s.id] = s.name;
 
     const currentAssignments = await tx
       .select()
@@ -990,6 +1260,10 @@ export async function closeMonthAndStartNext(params: {
       .where(eq(driverAssignments.isCurrent, true));
     const assignmentByDriver: Record<number, number | null> = {};
     for (const a of currentAssignments) assignmentByDriver[a.driverId] = a.schoolId;
+
+    const targetDrivers = schoolId
+      ? activeDrivers.filter((d) => assignmentByDriver[d.id] === schoolId)
+      : activeDrivers;
 
     const driverSnapshots: Array<{
       driverId: number;
@@ -1012,8 +1286,10 @@ export async function closeMonthAndStartNext(params: {
     let totalBonuses = 0;
     let totalOtherDeductions = 0;
 
-    for (const d of activeDrivers) {
-      let sal = await recalculateDriverSalary(tx, d.id, month, year);
+    for (const d of targetDrivers) {
+      const drvSchoolId = assignmentByDriver[d.id];
+      const drvSchool = drvSchoolId ? schoolById[drvSchoolId] || null : null;
+      let sal = await recalculateDriverSalary(tx, d.id, month, year, drvSchool);
       if (params.markAllPaid !== false && sal.status !== 'paid') {
         const [paidRow] = await tx
           .update(salaries)
@@ -1037,12 +1313,11 @@ export async function closeMonthAndStartNext(params: {
       totalBonuses += bon;
       totalOtherDeductions += oth;
 
-      const sId = assignmentByDriver[d.id];
       driverSnapshots.push({
         driverId: d.id,
         driverCode: d.driverCode,
         fullName: d.fullName,
-        schoolName: (sId && schoolById[sId]) || 'غير معين',
+        schoolName: drvSchool?.name || 'غير معين',
         baseSalary: base,
         totalAdvances: adv,
         totalCoverageDeductions: cov,
@@ -1053,10 +1328,12 @@ export async function closeMonthAndStartNext(params: {
       });
     }
 
-    const activeEmployees = await tx
-      .select()
-      .from(employees)
-      .where(eq(employees.status, 'active'));
+    const activeEmployees = schoolId
+      ? await tx
+          .select()
+          .from(employees)
+          .where(and(eq(employees.status, 'active'), eq(employees.schoolId, schoolId)))
+      : await tx.select().from(employees).where(eq(employees.status, 'active'));
 
     const employeeSnapshots = activeEmployees.map((e) => {
       const base = Number(e.monthlySalary || 0);
@@ -1075,72 +1352,145 @@ export async function closeMonthAndStartNext(params: {
       };
     });
 
+    // Supervisor snapshots scoped to targetSchool (or all schools) within exact school cycle dates
+    const allSupervisors = await tx
+      .select()
+      .from(supervisors)
+      .where(
+        schoolId
+          ? and(eq(supervisors.accountStatus, 'active'), eq(supervisors.schoolId, schoolId))
+          : eq(supervisors.accountStatus, 'active')
+      );
+
+    const supervisorSnapshots: Array<{
+      supervisorId: number;
+      supervisorCode: string;
+      fullName: string;
+      schoolName: string;
+      tripsCount: number;
+      monthlySalary: number;
+    }> = [];
+
+    for (const sup of allSupervisors) {
+      const supSchool = sup.schoolId ? schoolById[sup.schoolId] || null : null;
+      const supRange = getBillingDateRangeForPeriod(month, year, supSchool);
+      const supTrips = await tx
+        .select()
+        .from(supervisorTrips)
+        .where(
+          and(
+            eq(supervisorTrips.supervisorId, sup.id),
+            gte(supervisorTrips.tripDate, supRange.startDate),
+            lte(supervisorTrips.tripDate, supRange.endDate)
+          )
+        );
+      const tripsCount = supTrips.reduce(
+        (cnt, t) => cnt + (t.morningStartedAt ? 1 : 0) + (t.eveningEndedAt ? 1 : 0),
+        0
+      );
+      supervisorSnapshots.push({
+        supervisorId: sup.id,
+        supervisorCode: sup.supervisorCode,
+        fullName: sup.fullName,
+        schoolName: supSchool?.name || 'غير معين',
+        tripsCount,
+        monthlySalary: Number(sup.monthlySalary || 0),
+      });
+    }
+
     const totalEmployeeSalaries = employeeSnapshots.reduce((s, e) => s + e.netSalary, 0);
-    const totalSchoolContracts = allSchools
-      .filter((s) => s.isActive)
-      .reduce((s, sc) => s + Number(sc.monthlyContractValue || 0), 0);
+    const totalSupervisorSalaries = supervisorSnapshots.reduce((s, sup) => s + sup.monthlySalary, 0);
+    const totalSchoolContracts = targetSchool
+      ? targetSchool.isActive
+        ? Number(targetSchool.monthlyContractValue || 0)
+        : 0
+      : allSchools
+          .filter((s) => s.isActive)
+          .reduce((s, sc) => s + Number(sc.monthlyContractValue || 0), 0);
 
-    const netProfit = totalSchoolContracts - (totalDriverBaseSalaries + totalEmployeeSalaries);
+    const netProfit =
+      totalSchoolContracts - (totalDriverBaseSalaries + totalEmployeeSalaries + totalSupervisorSalaries);
 
-    const [closing] = await tx
-      .insert(monthlyClosings)
-      .values({
-        month,
-        year,
-        closedByUserId: params.recordedByUserId,
-        driversCount: activeDrivers.length,
-        employeesCount: activeEmployees.length,
-        totalDriverSalaries: totalDriverNetSalaries.toFixed(2),
-        totalEmployeeSalaries: totalEmployeeSalaries.toFixed(2),
-        totalAdvances: totalAdvances.toFixed(2),
-        totalCoverageDeductions: totalCoverageDeductions.toFixed(2),
-        totalBonuses: totalBonuses.toFixed(2),
-        totalOtherDeductions: totalOtherDeductions.toFixed(2),
-        totalSchoolContracts: totalSchoolContracts.toFixed(2),
-        netProfit: netProfit.toFixed(2),
-        notes: params.notes || '',
-        snapshotJson: { drivers: driverSnapshots, employees: employeeSnapshots },
-        closedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: [monthlyClosings.month, monthlyClosings.year],
-        set: {
-          closedByUserId: params.recordedByUserId,
-          driversCount: activeDrivers.length,
-          employeesCount: activeEmployees.length,
-          totalDriverSalaries: totalDriverNetSalaries.toFixed(2),
-          totalEmployeeSalaries: totalEmployeeSalaries.toFixed(2),
-          totalAdvances: totalAdvances.toFixed(2),
-          totalCoverageDeductions: totalCoverageDeductions.toFixed(2),
-          totalBonuses: totalBonuses.toFixed(2),
-          totalOtherDeductions: totalOtherDeductions.toFixed(2),
-          totalSchoolContracts: totalSchoolContracts.toFixed(2),
-          netProfit: netProfit.toFixed(2),
-          notes: params.notes || '',
-          snapshotJson: { drivers: driverSnapshots, employees: employeeSnapshots },
-          closedAt: new Date(),
-        },
-      })
-      .returning();
+    const targetRange = getBillingDateRangeForPeriod(month, year, targetSchool);
 
-    // Reset monthly bonuses & deductions for non-driver employees so the new month starts on a clean slate
+    const existingClosingRows = await tx
+      .select()
+      .from(monthlyClosings)
+      .where(
+        targetSchool
+          ? and(
+              eq(monthlyClosings.month, month),
+              eq(monthlyClosings.year, year),
+              eq(monthlyClosings.schoolId, targetSchool.id)
+            )
+          : and(
+              eq(monthlyClosings.month, month),
+              eq(monthlyClosings.year, year),
+              isNull(monthlyClosings.schoolId)
+            )
+      )
+      .limit(1);
+
+    const closingPayload = {
+      month,
+      year,
+      schoolId: targetSchool?.id ?? null,
+      schoolName: targetSchool?.name || 'جميع المدارس (تصفية شاملة)',
+      cycleStartDate: targetRange.startDate,
+      cycleEndDate: targetRange.endDate,
+      closedByUserId: params.recordedByUserId,
+      driversCount: targetDrivers.length,
+      employeesCount: activeEmployees.length,
+      totalDriverSalaries: totalDriverNetSalaries.toFixed(2),
+      totalEmployeeSalaries: totalEmployeeSalaries.toFixed(2),
+      totalAdvances: totalAdvances.toFixed(2),
+      totalCoverageDeductions: totalCoverageDeductions.toFixed(2),
+      totalBonuses: totalBonuses.toFixed(2),
+      totalOtherDeductions: totalOtherDeductions.toFixed(2),
+      totalSchoolContracts: totalSchoolContracts.toFixed(2),
+      netProfit: netProfit.toFixed(2),
+      notes: params.notes || '',
+      snapshotJson: {
+        drivers: driverSnapshots,
+        employees: employeeSnapshots,
+        supervisors: supervisorSnapshots,
+      },
+      closedAt: new Date(),
+    };
+
+    const [closing] = existingClosingRows[0]
+      ? await tx
+          .update(monthlyClosings)
+          .set(closingPayload)
+          .where(eq(monthlyClosings.id, existingClosingRows[0].id))
+          .returning()
+      : await tx.insert(monthlyClosings).values(closingPayload).returning();
+
+    // Reset monthly bonuses & deductions for active non-driver employees within this closing scope
     if (activeEmployees.length > 0) {
       await tx
         .update(employees)
         .set({ bonuses: '0.00', deductions: '0.00', updatedAt: new Date() })
-        .where(eq(employees.status, 'active'));
+        .where(
+          targetSchool
+            ? and(eq(employees.status, 'active'), eq(employees.schoolId, targetSchool.id))
+            : eq(employees.status, 'active')
+        );
     }
 
-    // Initialize clean salaries for the new month for every active driver
-    for (const d of activeDrivers) {
-      await recalculateDriverSalary(tx, d.id, nextMonth, nextYear);
+    // Initialize clean salaries for the new month for target drivers
+    for (const d of targetDrivers) {
+      const drvSchoolId = assignmentByDriver[d.id];
+      const drvSchool = drvSchoolId ? schoolById[drvSchoolId] || null : null;
+      await recalculateDriverSalary(tx, d.id, nextMonth, nextYear, drvSchool);
     }
 
-    // Advance active billing period to next month
+    // Advance active billing period for the school (or global)
+    const periodKey = targetSchool ? getSchoolBillingPeriodKey(targetSchool.id) : ACTIVE_PERIOD_KEY;
     await tx
       .insert(billingPeriods)
       .values({
-        key: ACTIVE_PERIOD_KEY,
+        key: periodKey,
         activeMonth: nextMonth,
         activeYear: nextYear,
         updatedByUserId: params.recordedByUserId,
@@ -1156,11 +1506,12 @@ export async function closeMonthAndStartNext(params: {
         },
       });
 
+    const scopeLabel = targetSchool ? `للمدرسة: ${targetSchool.name}` : 'لجميع المدارس';
     await tx.insert(notifications).values({
       targetRole: 'super_admin',
       type: 'salary',
-      title: `تمت تصفية شهر ${month}/${year} وبدء شهر ${nextMonth}/${nextYear}`,
-      body: `تم إقفال وتصفية حسابات ${activeDrivers.length} سائق و${activeEmployees.length} موظف وفتح شهر ${nextMonth}/${nextYear} على بياض بنفس السائقين والمركبات والمدارس.`,
+      title: `تمت تصفية دورة ${month}/${year} (${targetSchool?.name || 'شامل'}) وبدء دورة ${nextMonth}/${nextYear}`,
+      body: `تم إقفال حسابات ${targetDrivers.length} سائق و${supervisorSnapshots.length} مشرف ${scopeLabel} عن الفترة (${targetRange.startDate} → ${targetRange.endDate}).`,
     });
 
     await tx.insert(auditLogs).values({
@@ -1169,9 +1520,11 @@ export async function closeMonthAndStartNext(params: {
       entityType: 'monthly_closings',
       entityId: String(closing.id),
       afterJson: {
-        closedPeriod: { month, year },
+        closedPeriod: { month, year, schoolId: targetSchool?.id ?? null },
         nextPeriod: { month: nextMonth, year: nextYear },
-        driversCount: activeDrivers.length,
+        cycleRange: { startDate: targetRange.startDate, endDate: targetRange.endDate },
+        driversCount: targetDrivers.length,
+        supervisorsCount: supervisorSnapshots.length,
         employeesCount: activeEmployees.length,
         totalDriverNetSalaries,
         totalEmployeeSalaries,
@@ -1190,35 +1543,24 @@ export async function closeMonthAndStartNext(params: {
 export async function resetMonthFinancials(params: {
   month: number;
   year: number;
+  schoolId?: number | null;
   resetEmployees?: boolean;
   recordedByUserId: number;
   ipAddress?: string;
 }) {
-  const { month, year } = params;
+  const { month, year, schoolId } = params;
   if (!Number.isFinite(month) || month < 1 || month > 12 || !Number.isFinite(year) || year < 2020) {
     throw new Error('الشهر أو السنة غير صالحة');
   }
 
-  const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
-
   return await db.transaction(async (tx) => {
-    await tx.delete(advances).where(sql`${advances.date} LIKE ${monthPrefix + '%'}`);
-    await tx.delete(coverageRecords).where(sql`${coverageRecords.date} LIKE ${monthPrefix + '%'}`);
-    await tx
-      .delete(financialTransactions)
-      .where(and(eq(financialTransactions.month, month), eq(financialTransactions.year, year)));
-    await tx
-      .delete(attendance)
-      .where(and(sql`${attendance.date} LIKE ${monthPrefix + '%'}`, eq(attendance.status, 'covered')));
-    await tx
-      .delete(monthlyClosings)
-      .where(and(eq(monthlyClosings.month, month), eq(monthlyClosings.year, year)));
+    const allSchools = await tx.select().from(schools);
+    const schoolById: Record<number, (typeof allSchools)[number]> = {};
+    for (const s of allSchools) schoolById[s.id] = s;
 
-    if (params.resetEmployees !== false) {
-      await tx
-        .update(employees)
-        .set({ bonuses: '0.00', deductions: '0.00', updatedAt: new Date() })
-        .where(eq(employees.status, 'active'));
+    const targetSchool = schoolId ? schoolById[schoolId] || null : null;
+    if (schoolId && !targetSchool) {
+      throw new Error('المدرسة المحددة غير موجودة');
     }
 
     const activeDrivers = await tx
@@ -1226,20 +1568,104 @@ export async function resetMonthFinancials(params: {
       .from(drivers)
       .where(eq(drivers.accountStatus, 'active'));
 
-    // Reset salary status to open and recalculate cleanly to zero deductions/advances/bonuses
-    await tx
-      .update(salaries)
-      .set({ status: 'open', updatedAt: new Date() })
-      .where(and(eq(salaries.month, month), eq(salaries.year, year)));
+    const currentAssignments = await tx
+      .select()
+      .from(driverAssignments)
+      .where(eq(driverAssignments.isCurrent, true));
+    const assignmentByDriver: Record<number, number | null> = {};
+    for (const a of currentAssignments) assignmentByDriver[a.driverId] = a.schoolId;
 
-    for (const d of activeDrivers) {
-      await recalculateDriverSalary(tx, d.id, month, year);
+    const targetDrivers = schoolId
+      ? activeDrivers.filter((d) => assignmentByDriver[d.id] === schoolId)
+      : activeDrivers;
+
+    for (const d of targetDrivers) {
+      const drvSchoolId = assignmentByDriver[d.id];
+      const drvSchool = drvSchoolId ? schoolById[drvSchoolId] || null : null;
+      const range = getBillingDateRangeForPeriod(month, year, drvSchool);
+
+      await tx
+        .delete(advances)
+        .where(
+          and(
+            eq(advances.driverId, d.id),
+            gte(advances.date, range.startDate),
+            lte(advances.date, range.endDate)
+          )
+        );
+      await tx
+        .delete(coverageRecords)
+        .where(
+          and(
+            eq(coverageRecords.absentDriverId, d.id),
+            gte(coverageRecords.date, range.startDate),
+            lte(coverageRecords.date, range.endDate)
+          )
+        );
+      await tx
+        .delete(financialTransactions)
+        .where(
+          and(
+            eq(financialTransactions.driverId, d.id),
+            eq(financialTransactions.month, month),
+            eq(financialTransactions.year, year)
+          )
+        );
+      await tx
+        .delete(attendance)
+        .where(
+          and(
+            eq(attendance.driverId, d.id),
+            gte(attendance.date, range.startDate),
+            lte(attendance.date, range.endDate),
+            eq(attendance.status, 'covered')
+          )
+        );
+      await tx
+        .update(salaries)
+        .set({ status: 'open', updatedAt: new Date() })
+        .where(
+          and(
+            eq(salaries.driverId, d.id),
+            eq(salaries.month, month),
+            eq(salaries.year, year)
+          )
+        );
+      await recalculateDriverSalary(tx, d.id, month, year, drvSchool);
     }
 
+    if (targetSchool) {
+      await tx
+        .delete(monthlyClosings)
+        .where(
+          and(
+            eq(monthlyClosings.month, month),
+            eq(monthlyClosings.year, year),
+            eq(monthlyClosings.schoolId, targetSchool.id)
+          )
+        );
+    } else {
+      await tx
+        .delete(monthlyClosings)
+        .where(and(eq(monthlyClosings.month, month), eq(monthlyClosings.year, year)));
+    }
+
+    if (params.resetEmployees !== false) {
+      await tx
+        .update(employees)
+        .set({ bonuses: '0.00', deductions: '0.00', updatedAt: new Date() })
+        .where(
+          targetSchool
+            ? and(eq(employees.status, 'active'), eq(employees.schoolId, targetSchool.id))
+            : eq(employees.status, 'active')
+        );
+    }
+
+    const periodKey = targetSchool ? getSchoolBillingPeriodKey(targetSchool.id) : ACTIVE_PERIOD_KEY;
     await tx
       .insert(billingPeriods)
       .values({
-        key: ACTIVE_PERIOD_KEY,
+        key: periodKey,
         activeMonth: month,
         activeYear: year,
         updatedByUserId: params.recordedByUserId,
@@ -1259,11 +1685,12 @@ export async function resetMonthFinancials(params: {
       actorUserId: params.recordedByUserId,
       action: 'RESET_MONTH_FINANCIALS',
       entityType: 'salaries',
-      entityId: `${year}-${month}`,
+      entityId: `${year}-${month}${targetSchool ? `-school-${targetSchool.id}` : ''}`,
       afterJson: {
         month,
         year,
-        driversReset: activeDrivers.length,
+        schoolId: targetSchool?.id ?? null,
+        driversReset: targetDrivers.length,
         resetEmployees: params.resetEmployees !== false,
       },
       ipAddress: params.ipAddress || '',
@@ -1271,7 +1698,8 @@ export async function resetMonthFinancials(params: {
 
     return {
       period: { month, year },
-      driversReset: activeDrivers.length,
+      schoolId: targetSchool?.id ?? null,
+      driversReset: targetDrivers.length,
     };
   });
 }
@@ -1280,7 +1708,8 @@ export async function getMonthlyClosingsHistory() {
   return db
     .select()
     .from(monthlyClosings)
-    .orderBy(desc(monthlyClosings.year), desc(monthlyClosings.month));
+    .orderBy(desc(monthlyClosings.year), desc(monthlyClosings.month), desc(monthlyClosings.closedAt));
 }
+
 
 

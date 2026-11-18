@@ -28,6 +28,7 @@ import type {
   FinancialTransaction,
   SalaryRecord,
   SchoolFinanceContract,
+  SupervisorCycleSummaryItem,
 } from '../../types';
 
 interface ClosingSnapshotDriver {
@@ -55,10 +56,23 @@ interface ClosingSnapshotEmployee {
   netSalary: number;
 }
 
+interface ClosingSnapshotSupervisor {
+  supervisorId: number;
+  supervisorCode: string;
+  fullName: string;
+  schoolName: string;
+  monthlySalary: number;
+  tripsCount: number;
+}
+
 interface MonthlyClosingRecord {
   id: number;
   month: number;
   year: number;
+  schoolId?: number | null;
+  schoolName?: string | null;
+  cycleStartDate?: string | null;
+  cycleEndDate?: string | null;
   driversCount: number;
   employeesCount: number;
   totalDriverSalaries: string | number;
@@ -74,11 +88,22 @@ interface MonthlyClosingRecord {
   snapshotJson?: {
     drivers: ClosingSnapshotDriver[];
     employees: ClosingSnapshotEmployee[];
+    supervisors?: ClosingSnapshotSupervisor[];
   };
 }
 
 interface FinanceOverview {
-  period: { month: number; year: number };
+  period: {
+    month: number;
+    year: number;
+    startDate?: string;
+    endDate?: string;
+    labelAr?: string;
+    shortLabelAr?: string;
+    schoolId?: number | null;
+    schoolName?: string | null;
+    isAutoTodayPeriod?: boolean;
+  };
   activePeriod?: { month: number; year: number };
   currentClosing?: MonthlyClosingRecord | null;
   closingsHistory?: MonthlyClosingRecord[];
@@ -92,6 +117,7 @@ interface FinanceOverview {
   };
   grandTotals?: FinanceGrandTotals;
   salaries: SalaryRecord[];
+  supervisors?: SupervisorCycleSummaryItem[];
   advances: AdvanceRecord[];
   coverages: CoverageRecord[];
   ledger: FinancialTransaction[];
@@ -109,7 +135,9 @@ export const FinanceModule: React.FC = () => {
   const canFinanceRead = can('finance:read') || canFinanceWrite;
   const canAdvancesWrite = can('advances:write') || canFinanceWrite;
   const canCoverageWrite = can('coverage:write') || canFinanceWrite;
-  const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const restrictedSchoolCount = restrictedSchoolIds.length;
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolCount === 1;
 
   const allowedTabs: Array<{ id: FinanceTabId; label: string }> = [
     ...(canFinanceRead ? [{ id: 'schools' as const, label: 'المدارس والعقود والأرباح' }] : []),
@@ -127,8 +155,14 @@ export const FinanceModule: React.FC = () => {
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [year, setYear] = useState(new Date().getFullYear());
   const initialSyncedRef = useRef(false);
+  const autoPeriodRef = useRef(false);
   const [tab, setTab] = useState<FinanceTabId>(() => allowedTabs[0]?.id || 'advances');
-  const [selectedSchoolKey, setSelectedSchoolKey] = useState<string>('all');
+  const [selectedSchoolKey, setSelectedSchoolKey] = useState<string>(() =>
+    isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : 'all'
+  );
+  const [closingSchoolId, setClosingSchoolId] = useState<string>(() =>
+    isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : 'all'
+  );
   const [showGrandTotalsBox, setShowGrandTotalsBox] = useState<boolean>(true);
   const [data, setData] = useState<FinanceOverview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -224,26 +258,55 @@ export const FinanceModule: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const url = initialSyncedRef.current
-        ? `/api/finance/overview?month=${month}&year=${year}`
-        : `/api/finance/overview`;
+      const params = new URLSearchParams();
+      if (initialSyncedRef.current && !autoPeriodRef.current) {
+        params.set('month', String(month));
+        params.set('year', String(year));
+      }
+      if (autoPeriodRef.current) {
+        params.set('autoPeriod', 'true');
+      }
+      if (selectedSchoolKey !== 'all' && selectedSchoolKey !== 'unassigned') {
+        params.set('schoolId', selectedSchoolKey);
+      }
+      const qs = params.toString();
+      const url = qs ? `/api/finance/overview?${qs}` : `/api/finance/overview`;
       const fin = await apiFetch<FinanceOverview>(url);
-      if (!initialSyncedRef.current) {
+      if (!initialSyncedRef.current || autoPeriodRef.current) {
         initialSyncedRef.current = true;
+        autoPeriodRef.current = false;
         setMonth(fin.period.month);
         setYear(fin.period.year);
       }
       setData(fin);
     } catch (err: unknown) {
+      autoPeriodRef.current = false;
       setError(err instanceof Error ? err.message : 'تعذر تحميل البيانات المالية');
     } finally {
       setLoading(false);
     }
-  }, [month, year]);
+  }, [month, year, selectedSchoolKey]);
+
+  const handleSelectAutoPeriodToday = () => {
+    autoPeriodRef.current = true;
+    loadFinance();
+  };
 
   useEffect(() => {
     loadFinance();
   }, [loadFinance]);
+
+  useEffect(() => {
+    if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+      const locked = String(restrictedSchoolIds[0]);
+      setSelectedSchoolKey(locked);
+      setClosingSchoolId(locked);
+      return;
+    }
+    if (selectedSchoolKey !== 'all' && selectedSchoolKey !== 'unassigned') {
+      setClosingSchoolId(selectedSchoolKey);
+    }
+  }, [selectedSchoolKey, isSingleSchoolRestricted, restrictedSchoolIds]);
 
   useEffect(() => {
     if (allowedTabs.length > 0 && !allowedTabs.some((t) => t.id === tab)) {
@@ -252,15 +315,24 @@ export const FinanceModule: React.FC = () => {
   }, [tab, canFinanceRead, canFinanceWrite, canAdvancesWrite, canCoverageWrite]);
 
   useEffect(() => {
+    const start = data?.period?.startDate;
+    const end = data?.period?.endDate;
+    const today = getLocalTodayDateString();
+    if (start && end) {
+      const targetDate = today >= start && today <= end ? today : start;
+      setAdvForm((f) => (f.date >= start && f.date <= end ? f : { ...f, date: targetDate }));
+      setCovForm((f) => (f.date >= start && f.date <= end ? f : { ...f, date: targetDate }));
+      return;
+    }
     const curNow = new Date();
     const prefix = `${year}-${String(month).padStart(2, '0')}`;
     const targetDate =
       month === curNow.getMonth() + 1 && year === curNow.getFullYear()
-        ? getLocalTodayDateString()
+        ? today
         : `${prefix}-01`;
     setAdvForm((f) => (f.date.startsWith(prefix) ? f : { ...f, date: targetDate }));
     setCovForm((f) => (f.date.startsWith(prefix) ? f : { ...f, date: targetDate }));
-  }, [month, year]);
+  }, [month, year, data?.period?.startDate, data?.period?.endDate]);
 
   const handleRecordAdvance = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -497,6 +569,7 @@ export const FinanceModule: React.FC = () => {
     setBusyClosing(true);
     setError(null);
     setSuccessMsg(null);
+    const parsedClosingSchoolId = closingSchoolId !== 'all' ? Number(closingSchoolId) : null;
     try {
       const res = await apiFetch<{
         closing: MonthlyClosingRecord;
@@ -506,6 +579,7 @@ export const FinanceModule: React.FC = () => {
         body: JSON.stringify({
           month,
           year,
+          schoolId: parsedClosingSchoolId,
           markAllPaid: markAllPaidOnClose,
           notes: closingNotes.trim(),
         }),
@@ -515,9 +589,11 @@ export const FinanceModule: React.FC = () => {
       initialSyncedRef.current = true;
       setMonth(res.nextPeriod.month);
       setYear(res.nextPeriod.year);
+      const scopeLabel = res.closing.schoolName || 'جميع المدارس';
       setSuccessMsg(
-        `تمت تصفية شهر ${month}/${year} بنجاح وفتح شهر ${res.nextPeriod.month}/${res.nextPeriod.year} على بياض بنفس السائقين والمركبات والمدارس.`
+        `تمت تصفية دورة ${month}/${year} (${scopeLabel}) بنجاح وفتح دورة ${res.nextPeriod.month}/${res.nextPeriod.year} على بياض بنفس السائقين والمشرفات والمركبات.`
       );
+      await loadFinance();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تنفيذ التصفية الشهرية');
     } finally {
@@ -529,14 +605,24 @@ export const FinanceModule: React.FC = () => {
     setBusyClosing(true);
     setError(null);
     setSuccessMsg(null);
+    const parsedClosingSchoolId = closingSchoolId !== 'all' ? Number(closingSchoolId) : null;
     try {
       await apiFetch('/api/finance/reset-month', {
         method: 'POST',
-        body: JSON.stringify({ month, year, resetEmployees: true }),
+        body: JSON.stringify({
+          month,
+          year,
+          schoolId: parsedClosingSchoolId,
+          resetEmployees: true,
+        }),
       });
       setConfirmResetOpen(false);
+      const scopeName =
+        parsedClosingSchoolId !== null
+          ? schoolContracts.find((s) => s.schoolId === parsedClosingSchoolId)?.schoolName || 'المدرسة المحددة'
+          : 'جميع المدارس';
       setSuccessMsg(
-        `تم تصفير مالية شهر ${month}/${year} بالكامل وبدؤه على بياض مع الإبقاء على جميع السائقين والموظفين والمدارس والمركبات.`
+        `تم تصفير مالية شهر ${month}/${year} (${scopeName}) وبدؤه على بياض مع الإبقاء على جميع السائقين والمشرفات والمدارس والمركبات.`
       );
       await loadFinance();
     } catch (err: unknown) {
@@ -555,11 +641,18 @@ export const FinanceModule: React.FC = () => {
     selectedSchoolKey === 'all'
       ? null
       : schoolContracts.find((sc) => getSchoolKey(sc.schoolId) === selectedSchoolKey) || null;
+  const closingTargetSchool =
+    closingSchoolId === 'all'
+      ? null
+      : schoolContracts.find((sc) => getSchoolKey(sc.schoolId) === closingSchoolId) || null;
 
   const matchesSchoolFilter = (sId?: number | null) =>
     selectedSchoolKey === 'all' || getSchoolKey(sId) === selectedSchoolKey;
 
   const filteredSalaries = (data?.salaries || []).filter((s) => matchesSchoolFilter(s.schoolId));
+  const filteredSupervisors = (data?.supervisors || []).filter((sv) =>
+    matchesSchoolFilter(sv.schoolId)
+  );
   const filteredAdvances = (data?.advances || []).filter((a) => matchesSchoolFilter(a.schoolId));
   const filteredCoverages = (data?.coverages || []).filter((c) => matchesSchoolFilter(c.schoolId));
   const filteredLedger = (data?.ledger || []).filter((t) => matchesSchoolFilter(t.schoolId));
@@ -683,6 +776,14 @@ export const FinanceModule: React.FC = () => {
               className="w-16 bg-transparent font-mono text-xs font-semibold text-center focus:outline-none"
             />
           </div>
+          <button
+            type="button"
+            onClick={handleSelectAutoPeriodToday}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-[#C89B3C]" />
+            الفترة التلقائية لليوم
+          </button>
           {canFinanceWrite && (
             <button
               type="button"
@@ -695,6 +796,39 @@ export const FinanceModule: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Active School Billing Cycle Info Strip */}
+      {data?.period?.labelAr && (
+        <div className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-[#0B1F3A] font-semibold">
+            <CalendarCheck className="w-4 h-4 text-[#C89B3C] shrink-0" />
+            <span>
+              {selectedSchoolContract
+                ? `نطاق دورة ${selectedSchoolContract.schoolName}: `
+                : 'الدورة المالية المعروضة: '}
+              <strong className="font-mono">{data.period.labelAr}</strong>
+            </span>
+          </div>
+          {!selectedSchoolContract && schoolContracts.some((s) => s.billingRange) && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {schoolContracts
+                .filter((s) => s.schoolId !== null && s.billingRange)
+                .map((s) => (
+                  <span
+                    key={getSchoolKey(s.schoolId)}
+                    className={`rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                      s.billingRange?.cycleType === 'shifted'
+                        ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                        : 'bg-slate-100 text-slate-700 border border-slate-200'
+                    }`}
+                  >
+                    {s.schoolName}: {s.billingRange?.shortLabelAr}
+                  </span>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {canFinanceRead ? (
         <>
@@ -740,16 +874,31 @@ export const FinanceModule: React.FC = () => {
               <div className="text-[11px] text-slate-500">تصفية المدرسة الحالية</div>
               <select
                 value={selectedSchoolKey}
+                disabled={isSingleSchoolRestricted}
                 onChange={(e) => setSelectedSchoolKey(e.target.value)}
                 aria-label="تصفية حسب المدرسة"
-                className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C]"
+                className="mt-1.5 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C] disabled:opacity-80"
               >
-                <option value="all">جميع المدارس ({schoolContracts.length})</option>
+                {!isSingleSchoolRestricted && (
+                  <option value="all">
+                    {!isSuperAdmin && restrictedSchoolCount > 0
+                      ? `جميع مدارسي (${schoolContracts.length})`
+                      : `جميع المدارس (${schoolContracts.length})`}
+                  </option>
+                )}
                 {schoolContracts.map((sc) => (
                   <option key={getSchoolKey(sc.schoolId)} value={getSchoolKey(sc.schoolId)}>
                     {sc.schoolName} ({sc.driversCount} سائق)
                   </option>
                 ))}
+                {isSingleSchoolRestricted &&
+                  !schoolContracts.some(
+                    (sc) => getSchoolKey(sc.schoolId) === String(restrictedSchoolIds[0])
+                  ) && (
+                    <option value={String(restrictedSchoolIds[0])}>
+                      {dbUser?.assignedSchoolNames?.[0] || 'المدرسة المخصصة'}
+                    </option>
+                  )}
               </select>
             </div>
           </div>
@@ -839,12 +988,15 @@ export const FinanceModule: React.FC = () => {
                   </div>
 
                   <div className="p-3.5 border-t border-slate-100">
-                    <div className="text-slate-500">6. الموظفون (غير السائقين)</div>
+                    <div className="text-slate-500">6. الموظفون والمشرفات</div>
                     <div className="font-mono text-sm font-bold text-[#0B1F3A] mt-1 tabular-nums">
-                      {formatEGP(gt?.totalEmployeeNetSalaries ?? 0)}
+                      {formatEGP(
+                        (gt?.totalEmployeeNetSalaries ?? 0) + (gt?.totalSupervisorSalaries ?? 0)
+                      )}
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5">
-                      {gt?.employeesCount ?? 0} موظف نشط
+                    <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                      {gt?.employeesCount ?? 0} موظف · {gt?.supervisorsCount ?? 0} مشرفة (
+                      {formatEGP(gt?.totalSupervisorSalaries ?? 0)})
                     </div>
                   </div>
 
@@ -908,11 +1060,14 @@ export const FinanceModule: React.FC = () => {
           {schoolContracts.length > 0 && (
             <select
               value={selectedSchoolKey}
+              disabled={isSingleSchoolRestricted}
               onChange={(e) => setSelectedSchoolKey(e.target.value)}
               aria-label="تصفية حسب المدرسة"
-              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C]"
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C] disabled:opacity-80"
             >
-              <option value="all">جميع المدارس المتاحة ({schoolContracts.length})</option>
+              {!isSingleSchoolRestricted && (
+                <option value="all">جميع المدارس المتاحة ({schoolContracts.length})</option>
+              )}
               {schoolContracts.map((sc) => (
                 <option key={getSchoolKey(sc.schoolId)} value={getSchoolKey(sc.schoolId)}>
                   {sc.schoolName} ({sc.driversCount} سائق)
@@ -1007,7 +1162,7 @@ export const FinanceModule: React.FC = () => {
                   اختر المدرسة لعرض عقودها وسائقيها وأرباحها بشكل مستقل
                 </h2>
               </div>
-              {selectedSchoolKey !== 'all' && (
+              {selectedSchoolKey !== 'all' && !isSingleSchoolRestricted && (
                 <button
                   type="button"
                   onClick={() => setSelectedSchoolKey('all')}
@@ -1035,7 +1190,9 @@ export const FinanceModule: React.FC = () => {
                     <button
                       key={key}
                       type="button"
-                      onClick={() => setSelectedSchoolKey(isSelected ? 'all' : key)}
+                      onClick={() =>
+                        setSelectedSchoolKey(isSelected && !isSingleSchoolRestricted ? 'all' : key)
+                      }
                       className={`text-right rounded-xl border p-4 transition-all cursor-pointer ${
                         isSelected
                           ? 'border-[#C89B3C] bg-[#0B1F3A] text-white shadow-md'
@@ -1048,12 +1205,27 @@ export const FinanceModule: React.FC = () => {
                             {sc.schoolName}
                           </div>
                           <div
-                            className={`text-[11px] mt-0.5 flex items-center gap-1.5 ${
+                            className={`text-[11px] mt-0.5 flex flex-wrap items-center gap-1.5 ${
                               isSelected ? 'text-slate-300' : 'text-slate-500'
                             }`}
                           >
                             <Users className="w-3 h-3 text-[#C89B3C]" />
-                            <span>{sc.driversCount} سائق مرتبط</span>
+                            <span>
+                              {sc.driversCount} سائق · {sc.supervisorsCount ?? 0} مشرفة
+                            </span>
+                            {sc.billingRange && (
+                              <span
+                                className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${
+                                  isSelected
+                                    ? 'bg-white/15 text-[#ebd089]'
+                                    : sc.billingRange.cycleType === 'shifted'
+                                    ? 'bg-amber-50 text-amber-800'
+                                    : 'bg-slate-200/70 text-slate-700'
+                                }`}
+                              >
+                                {sc.billingRange.shortLabelAr}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <span
@@ -1136,6 +1308,11 @@ export const FinanceModule: React.FC = () => {
                         <h3 className="font-display text-base font-bold truncate">
                           {sc.schoolName}
                         </h3>
+                        {sc.billingRange && (
+                          <span className="rounded bg-white/10 px-2 py-0.5 text-[10px] font-mono text-[#ebd089]">
+                            {sc.billingRange.labelAr}
+                          </span>
+                        )}
                         {!sc.isActive && (
                           <span className="rounded bg-red-500/20 px-2 py-0.5 text-[10px] text-red-200">
                             غير نشطة
@@ -1143,7 +1320,8 @@ export const FinanceModule: React.FC = () => {
                         )}
                       </div>
                       <p className="text-[11px] text-slate-300 mt-0.5">
-                        شهر {month}/{year} · {sc.driversCount} سائق مرتبط
+                        شهر {month}/{year} · {sc.driversCount} سائق · {sc.supervisorsCount ?? 0} مشرفة (
+                        {formatEGP(sc.totalSupervisorSalaries ?? 0)})
                         {sc.contactPerson ? ` · المسؤول: ${sc.contactPerson}` : ''}
                       </p>
                     </div>
@@ -1505,7 +1683,7 @@ export const FinanceModule: React.FC = () => {
                 كشف رواتب السائقين ({filteredSalaries.length})
                 {selectedSchoolContract ? ` — ${selectedSchoolContract.schoolName}` : ''}
               </span>
-              {selectedSchoolKey !== 'all' && (
+              {selectedSchoolKey !== 'all' && !isSingleSchoolRestricted && (
                 <button
                   type="button"
                   onClick={() => setSelectedSchoolKey('all')}
@@ -1637,6 +1815,66 @@ export const FinanceModule: React.FC = () => {
                     </tr>
                   </tfoot>
                 )}
+              </table>
+            </div>
+          </div>
+
+          {/* Supervisors Cycle Dues Table */}
+          <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-bold text-[#0B1F3A]">
+                مستحقات المشرفات وسجل الرحلات حسب دورة المدرسة ({filteredSupervisors.length})
+              </span>
+              <span className="font-mono font-bold text-[#0B1F3A] tabular-nums">
+                إجمالي رواتب المشرفات:{' '}
+                {formatEGP(filteredSupervisors.reduce((s, sv) => s + Number(sv.monthlySalary || 0), 0))}
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                  <tr>
+                    <th className="py-3 px-4 font-semibold">الكود</th>
+                    <th className="py-3 px-4 font-semibold">المشرفة والمدرسة</th>
+                    <th className="py-3 px-4 font-semibold">نطاق الدورة المالية</th>
+                    <th className="py-3 px-4 font-semibold">رحلات الصباح</th>
+                    <th className="py-3 px-4 font-semibold">رحلات المساء</th>
+                    <th className="py-3 px-4 font-semibold">إجمالي الرحلات</th>
+                    <th className="py-3 px-4 font-semibold">الراتب الشهري</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredSupervisors.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-6 text-center text-slate-400">
+                        لا توجد مشرفات مطابقة للتصفية الحالية
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredSupervisors.map((sv) => (
+                      <tr key={sv.supervisorId} className="hover:bg-slate-50/70">
+                        <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A]">
+                          {sv.supervisorCode}
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-semibold text-slate-900">{sv.fullName}</div>
+                          <div className="text-slate-500">{sv.schoolName}</div>
+                        </td>
+                        <td className="py-3 px-4 font-mono text-[11px] text-slate-700 tabular-nums">
+                          {sv.billingRange.startDate} ← {sv.billingRange.endDate}
+                        </td>
+                        <td className="py-3 px-4 font-mono tabular-nums">{sv.morningTripsCount}</td>
+                        <td className="py-3 px-4 font-mono tabular-nums">{sv.eveningTripsCount}</td>
+                        <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                          {sv.tripsCount} ({sv.completedDaysCount} يوم مكتمل)
+                        </td>
+                        <td className="py-3 px-4 font-mono font-bold text-emerald-700 tabular-nums">
+                          {formatEGP(sv.monthlySalary)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
               </table>
             </div>
           </div>
@@ -2470,9 +2708,40 @@ export const FinanceModule: React.FC = () => {
                 <span>1. تصفية الشهر والانتقال للشهر التالي على بياض</span>
               </div>
               <p className="text-xs text-slate-600 leading-relaxed">
-                يُقفل شهر <strong>{month}/{year}</strong> ويُحفظ تقريره المالي بالكامل في سجل التصفيات، وتُصفَّر مكافآت وخصومات الموظفين الشهرية، ويُفتح شهر{' '}
-                <strong>{nextMonthPreview}/{nextYearPreview}</strong> بأرصدة صفرية للسلف والتغطيات مع بقاء كافة السائقين والمدارس والمركبات.
+                يُقفل شهر <strong>{month}/{year}</strong> (
+                <strong>{closingTargetSchool?.schoolName || 'جميع المدارس'}</strong>
+                {closingTargetSchool?.billingRange
+                  ? ` — من ${closingTargetSchool.billingRange.startDate} إلى ${closingTargetSchool.billingRange.endDate}`
+                  : ''}
+                ) ويُحفظ تقريره المالي بالكامل للموظفين والسائقين والمشرفات في سجل التصفيات، ثم يُفتح شهر{' '}
+                <strong>{nextMonthPreview}/{nextYearPreview}</strong> بأرصدة صفرية للسلف والتغطيات.
               </p>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  نطاق المدرسة للتصفية والإغلاق
+                </label>
+                <select
+                  value={closingSchoolId}
+                  disabled={isSingleSchoolRestricted}
+                  onChange={(e) => setClosingSchoolId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-[#0B1F3A] disabled:opacity-80"
+                >
+                  {(isSuperAdmin || restrictedSchoolCount === 0) && (
+                    <option value="all">جميع المدارس (تصفية شاملة لكل الأسطول)</option>
+                  )}
+                  {!isSuperAdmin && restrictedSchoolCount > 1 && (
+                    <option value="all">جميع المدارس المخصصة لي</option>
+                  )}
+                  {schoolContracts
+                    .filter((sc) => sc.schoolId !== null)
+                    .map((sc) => (
+                      <option key={getSchoolKey(sc.schoolId)} value={getSchoolKey(sc.schoolId)}>
+                        {sc.schoolName} — {sc.billingRange?.shortLabelAr || `شهر ${month}/${year}`}
+                      </option>
+                    ))}
+                </select>
+              </div>
 
               <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
                 <input
@@ -2481,7 +2750,7 @@ export const FinanceModule: React.FC = () => {
                   onChange={(e) => setMarkAllPaidOnClose(e.target.checked)}
                   className="rounded border-slate-300"
                 />
-                <span>تحديد جميع رواتب شهر {month}/{year} كـ «تم الصرف» عند التصفية</span>
+                <span>تحديد رواتب شهر {month}/{year} في هذا النطاق كـ «تم الصرف» عند التصفية</span>
               </label>
 
               <div>
@@ -2502,7 +2771,7 @@ export const FinanceModule: React.FC = () => {
                 onClick={() => setConfirmCloseOpen(true)}
                 className="w-full rounded-xl bg-[#0B1F3A] hover:bg-[#13325c] py-3 px-4 text-xs font-bold text-white cursor-pointer"
               >
-                اعتماد تصفية شهر {month}/{year} وبدء شهر {nextMonthPreview}/{nextYearPreview} على بياض
+                اعتماد تصفية {closingTargetSchool ? closingTargetSchool.schoolName : 'جميع المدارس'} ({month}/{year})
               </button>
             </div>
 
@@ -2513,18 +2782,20 @@ export const FinanceModule: React.FC = () => {
                 <span>2. تصفير مالية شهر {month}/{year} فقط (إعادة ضبط على بياض)</span>
               </div>
               <p className="text-xs text-slate-600 leading-relaxed">
-                استخدم هذا الخيار إذا أردت مسح جميع السلف والتغطيات والمكافآت والخصومات الخاصة بشهر{' '}
-                <strong>{month}/{year}</strong> فقط والبدء فيه على بياض من جديد — مع الحفاظ الكامل على كل السائقين والموظفين والمدارس والمركبات وخطوط السير دون حذف أي شخص أو مركبة.
+                استخدم هذا الخيار إذا أردت مسح السلف والتغطيات والمكافآت والخصومات الخاصة بـ{' '}
+                <strong>{closingTargetSchool?.schoolName || 'جميع المدارس'}</strong> في دورة{' '}
+                <strong>{month}/{year}</strong> والبدء فيها على بياض من جديد — مع الحفاظ الكامل على كل السائقين والمشرفات والموظفين والمدارس والمركبات.
               </p>
               <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-900">
-                تنبيه: لن تتأثر الأشهر الأخرى أو ملفات السائقين والمدارس؛ التصفير يطال الحركات المالية لشهر {month}/{year} فقط.
+                تنبيه: لن تتأثر المدارس أو الأشهر الأخرى؛ التصفير يطال الحركات المالية لـ{' '}
+                <strong>{closingTargetSchool?.schoolName || 'جميع المدارس'}</strong> في دورة {month}/{year} فقط.
               </div>
               <button
                 type="button"
                 onClick={() => setConfirmResetOpen(true)}
                 className="w-full rounded-xl border border-red-300 bg-red-50 hover:bg-red-100 py-3 px-4 text-xs font-bold text-red-800 cursor-pointer"
               >
-                تصفير مالية شهر {month}/{year} على بياض الآن
+                تصفير مالية {closingTargetSchool ? closingTargetSchool.schoolName : 'الشهر'} ({month}/{year}) على بياض الآن
               </button>
             </div>
           </div>
@@ -2547,7 +2818,7 @@ export const FinanceModule: React.FC = () => {
                 <table className="w-full text-right text-xs">
                   <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
                     <tr>
-                      <th className="py-3 px-4">الشهر المصفى</th>
+                      <th className="py-3 px-4">الدورة والمدرسة</th>
                       <th className="py-3 px-4">تاريخ التصفية</th>
                       <th className="py-3 px-4">السائقون / الموظفون</th>
                       <th className="py-3 px-4">صافي رواتب السائقين</th>
@@ -2560,8 +2831,15 @@ export const FinanceModule: React.FC = () => {
                   <tbody className="divide-y divide-slate-100">
                     {data.closingsHistory.map((c) => (
                       <tr key={c.id} className="hover:bg-slate-50">
-                        <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A]">
-                          {c.month} / {c.year}
+                        <td className="py-3 px-4">
+                          <div className="font-mono font-bold text-[#0B1F3A]">
+                            {c.month} / {c.year} — {c.schoolName || 'جميع المدارس'}
+                          </div>
+                          {(c.cycleStartDate || c.cycleEndDate) && (
+                            <div className="font-mono text-[10px] text-slate-500 mt-0.5 tabular-nums">
+                              {c.cycleStartDate} ← {c.cycleEndDate}
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-slate-500">
                           {new Date(c.closedAt).toLocaleDateString('ar-EG')}
@@ -2597,6 +2875,7 @@ export const FinanceModule: React.FC = () => {
                                 initialSyncedRef.current = true;
                                 setMonth(c.month);
                                 setYear(c.year);
+                                if (c.schoolId) setSelectedSchoolKey(String(c.schoolId));
                                 setTab('salaries');
                               }}
                               className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-3 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
@@ -2698,9 +2977,13 @@ export const FinanceModule: React.FC = () => {
             <div className="px-6 py-4 bg-[#0B1F3A] text-white flex items-center justify-between shrink-0">
               <div>
                 <h3 className="font-display text-base font-bold">
-                  كشف تصفية شهر {inspectClosing.month} / {inspectClosing.year}
+                  كشف تصفية دورة {inspectClosing.month} / {inspectClosing.year} —{' '}
+                  {inspectClosing.schoolName || 'جميع المدارس'}
                 </h3>
                 <p className="text-xs text-slate-300 mt-0.5">
+                  {inspectClosing.cycleStartDate && inspectClosing.cycleEndDate
+                    ? `نطاق الدورة: ${inspectClosing.cycleStartDate} ← ${inspectClosing.cycleEndDate} · `
+                    : ''}
                   تاريخ التصفية: {new Date(inspectClosing.closedAt).toLocaleString('ar-EG')}
                   {inspectClosing.notes ? ` · ${inspectClosing.notes}` : ''}
                 </p>
@@ -2758,6 +3041,42 @@ export const FinanceModule: React.FC = () => {
                   </table>
                 </div>
               </div>
+
+              {Boolean(inspectClosing.snapshotJson?.supervisors?.length) && (
+                <div>
+                  <h4 className="font-bold text-sm text-[#0B1F3A] mb-2">
+                    المشرفات وقت التصفية ({inspectClosing.snapshotJson?.supervisors?.length})
+                  </h4>
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-right">
+                      <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                        <tr>
+                          <th className="py-2.5 px-3">الكود</th>
+                          <th className="py-2.5 px-3">المشرفة</th>
+                          <th className="py-2.5 px-3">المدرسة</th>
+                          <th className="py-2.5 px-3">عدد الرحلات</th>
+                          <th className="py-2.5 px-3">الراتب الشهري</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {inspectClosing.snapshotJson?.supervisors?.map((sv) => (
+                          <tr key={sv.supervisorId}>
+                            <td className="py-2 px-3 font-mono font-bold text-[#0B1F3A]">
+                              {sv.supervisorCode}
+                            </td>
+                            <td className="py-2 px-3 font-semibold">{sv.fullName}</td>
+                            <td className="py-2 px-3">{sv.schoolName}</td>
+                            <td className="py-2 px-3 font-mono">{sv.tripsCount}</td>
+                            <td className="py-2 px-3 font-mono font-bold text-[#0B1F3A]">
+                              {formatEGP(sv.monthlySalary)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {Boolean(inspectClosing.snapshotJson?.employees?.length) && (
                 <div>

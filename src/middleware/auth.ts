@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import {
@@ -17,7 +17,7 @@ import {
 } from '../lib/permissions.ts';
 import { db } from '../db/index.ts';
 import { runWithRlsContext } from '../db/rls-context.ts';
-import { drivers, supervisors, userRoles, users } from '../db/schema.ts';
+import { drivers, schools, supervisors, userRoles, users } from '../db/schema.ts';
 
 export interface DbUserContext {
   id: number;
@@ -31,6 +31,7 @@ export interface DbUserContext {
   permissions: string[];
   customPermissions: string[] | null;
   assignedSchoolIds: number[];
+  assignedSchoolNames: string[];
   staffCode: string | null;
   employeeId: number | null;
   isActive: boolean;
@@ -66,7 +67,7 @@ const DEFAULT_ROLES = [
   {
     slug: 'movement_manager',
     nameAr: 'مشرف حركة',
-    description: 'إدارة المسارات والمركبات والتغطيات والسلف والوصول للسائقين في المدارس المخصصة له',
+    description: 'إدارة المسارات والمركبات والتغطيات والحضور والوصول للسائقين في المدارس المخصصة له',
     permissions: ROLE_DEFAULT_PERMISSIONS.movement_manager,
   },
   {
@@ -75,6 +76,12 @@ const DEFAULT_ROLES = [
     description: 'إدارة المرتبات والسلف والتغطيات والخصومات والمكافآت والتقارير المالية للمدارس المخصصة له',
     permissions: ROLE_DEFAULT_PERMISSIONS.accountant,
   },
+  {
+    slug: 'employee',
+    nameAr: 'موظف عادي / ميداني',
+    description: 'صلاحيات عامة لإرسال التقارير اليومية ومتابعة العمل الميداني في المدرسة المخصصة له',
+    permissions: ROLE_DEFAULT_PERMISSIONS.employee,
+  },
 ];
 
 let rolesSeeded = false;
@@ -82,13 +89,14 @@ let rolesSeeded = false;
 export async function ensureRolesExist() {
   if (rolesSeeded) return;
   for (const r of DEFAULT_ROLES) {
-    if (r.slug === 'movement_manager' || r.slug === 'accountant') {
+    if (r.slug === 'movement_manager' || r.slug === 'accountant' || r.slug === 'employee') {
       await db
         .insert(userRoles)
         .values(r)
         .onConflictDoUpdate({
           target: userRoles.slug,
           set: {
+            nameAr: r.nameAr,
             description: r.description,
             permissions: r.permissions,
           },
@@ -101,6 +109,16 @@ export async function ensureRolesExist() {
     }
   }
   rolesSeeded = true;
+}
+
+export async function resolveAssignedSchoolNames(schoolIds: number[]): Promise<string[]> {
+  if (!schoolIds || schoolIds.length === 0) return [];
+  const rows = await db
+    .select({ id: schools.id, name: schools.name })
+    .from(schools)
+    .where(inArray(schools.id, schoolIds));
+  const byId = new Map(rows.map((r) => [r.id, r.name]));
+  return schoolIds.map((id) => byId.get(id)).filter((n): n is string => Boolean(n));
 }
 
 export function buildEffectivePermissions(
@@ -285,6 +303,7 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
   );
   const assignedSchoolIds =
     role.slug === 'super_admin' ? [] : normalizeSchoolIds(userRow.assignedSchoolIds);
+  const assignedSchoolNames = await resolveAssignedSchoolNames(assignedSchoolIds);
 
   return {
     dbUser: {
@@ -301,6 +320,7 @@ async function resolveUserContext(decoded: DecodedIdToken): Promise<{
         ? userRow.customPermissions
         : null,
       assignedSchoolIds,
+      assignedSchoolNames,
       staffCode: userRow.staffCode || null,
       employeeId: userRow.employeeId ?? null,
       isActive: userRow.isActive,
@@ -421,6 +441,7 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         permissions: Array.isArray(role.permissions) ? role.permissions : [],
         customPermissions: null,
         assignedSchoolIds: [],
+        assignedSchoolNames: [],
         staffCode: null,
         employeeId: null,
         isActive: resolved.userRow.isActive,
@@ -505,6 +526,7 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         permissions: ['supervisor:self_read', 'supervisor:gps_read'],
         customPermissions: null,
         assignedSchoolIds: [],
+        assignedSchoolNames: [],
         staffCode: null,
         employeeId: null,
         isActive: resolved.userRow.isActive,
@@ -561,7 +583,13 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
           .where(eq(userRoles.id, userRow.roleId))
           .limit(1);
 
-        return { userRow, role };
+        const roleSlug = role?.slug || 'accountant';
+        const assignedSchoolIds =
+          roleSlug === 'super_admin'
+            ? []
+            : normalizeSchoolIds(userRow.assignedSchoolIds);
+        const assignedSchoolNames = await resolveAssignedSchoolNames(assignedSchoolIds);
+        return { userRow, role, roleSlug, assignedSchoolIds, assignedSchoolNames };
       });
 
       if (!resolved) {
@@ -572,7 +600,7 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         return res.status(403).json({ error: 'تم إيقاف صلاحية هذا الحساب من قبل المدير العام' });
       }
 
-      const roleSlug = resolved.role?.slug || 'accountant';
+      const roleSlug = resolved.roleSlug;
       if (roleSlug === 'driver' || roleSlug === 'supervisor') {
         return res.status(403).json({ error: 'تم تغيير دور هذا الحساب، يرجى تسجيل الدخول من البوابة المناسبة' });
       }
@@ -582,10 +610,6 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         resolved.role?.permissions,
         resolved.userRow.customPermissions
       );
-      const assignedSchoolIds =
-        roleSlug === 'super_admin'
-          ? []
-          : normalizeSchoolIds(resolved.userRow.assignedSchoolIds);
 
       const dbUser: DbUserContext = {
         id: resolved.userRow.id,
@@ -600,7 +624,8 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         customPermissions: Array.isArray(resolved.userRow.customPermissions)
           ? resolved.userRow.customPermissions
           : null,
-        assignedSchoolIds,
+        assignedSchoolIds: resolved.assignedSchoolIds,
+        assignedSchoolNames: resolved.assignedSchoolNames,
         staffCode: resolved.userRow.staffCode || null,
         employeeId: resolved.userRow.employeeId ?? null,
         isActive: resolved.userRow.isActive,

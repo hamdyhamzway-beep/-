@@ -65,6 +65,31 @@ interface NavItem {
   visible: boolean;
 }
 
+function getDefaultTabForUser(
+  roleSlug: string | undefined,
+  availableTabs: NavItem[]
+): AdminTabId {
+  const hasTab = (id: AdminTabId) => availableTabs.some((n) => n.id === id);
+  if (roleSlug === 'super_admin') {
+    return hasTab('overview') ? 'overview' : availableTabs[0]?.id || 'overview';
+  }
+  if (roleSlug === 'accountant') {
+    if (hasTab('finance')) return 'finance';
+    if (hasTab('reports')) return 'reports';
+    if (hasTab('overview')) return 'overview';
+  }
+  if (roleSlug === 'movement_manager') {
+    if (hasTab('drivers')) return 'drivers';
+    if (hasTab('map')) return 'map';
+    if (hasTab('overview')) return 'overview';
+  }
+  if (roleSlug === 'employee') {
+    if (hasTab('daily_reports')) return 'daily_reports';
+    if (hasTab('chat')) return 'chat';
+  }
+  return availableTabs[0]?.id || 'overview';
+}
+
 const AppShell: React.FC = () => {
   const { isAuthenticated, dbUser, loading, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<AdminTabId>('overview');
@@ -84,6 +109,8 @@ const AppShell: React.FC = () => {
   activeTabRef.current = activeTab;
   const adminModeRef = React.useRef<'admin' | 'driver_preview' | 'supervisor_preview'>('admin');
   adminModeRef.current = adminMode;
+  const defaultTabRef = React.useRef<AdminTabId>('overview');
+  const lastAutoRoutedUserIdRef = React.useRef<number | null>(null);
 
   useEffect(() => {
     const onPopState = () => {
@@ -98,8 +125,8 @@ const AppShell: React.FC = () => {
         setActiveTab(prevTab);
         return;
       }
-      if (activeTabRef.current !== 'overview') {
-        setActiveTab('overview');
+      if (activeTabRef.current !== defaultTabRef.current) {
+        setActiveTab(defaultTabRef.current);
       }
     };
     window.addEventListener('popstate', onPopState);
@@ -115,6 +142,12 @@ const AppShell: React.FC = () => {
   const perms = dbUser?.permissions || [];
   const can = (perm: string) => isSuperAdmin || perms.includes('*') || perms.includes(perm);
   const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
+  const schoolScopeLabel =
+    restrictedSchoolCount > 0
+      ? dbUser?.assignedSchoolNames && dbUser.assignedSchoolNames.length > 0
+        ? dbUser.assignedSchoolNames.join(' · ')
+        : `${restrictedSchoolCount} مدرسة محددة`
+      : '';
 
   const navItems: NavItem[] = useMemo(
     () => [
@@ -169,7 +202,8 @@ const AppShell: React.FC = () => {
           can('finance:read') ||
           can('dashboard:read') ||
           dbUser?.roleSlug === 'accountant' ||
-          dbUser?.roleSlug === 'movement_manager',
+          dbUser?.roleSlug === 'movement_manager' ||
+          dbUser?.roleSlug === 'employee',
       },
       {
         id: 'map',
@@ -213,17 +247,29 @@ const AppShell: React.FC = () => {
         visible: isSuperAdmin,
       },
     ],
-    [isSuperAdmin, perms]
+    [isSuperAdmin, perms, dbUser?.roleSlug]
   );
 
   const visibleNav = navItems.filter((n) => n.visible);
+  const defaultTab = getDefaultTabForUser(dbUser?.roleSlug, visibleNav);
+  defaultTabRef.current = defaultTab;
 
   useEffect(() => {
-    if (!dbUser || dbUser.roleSlug === 'driver' || dbUser.roleSlug === 'supervisor') return;
-    if (visibleNav.length > 0 && !visibleNav.some((n) => n.id === activeTab)) {
-      setActiveTab(visibleNav[0].id);
+    if (!dbUser) {
+      lastAutoRoutedUserIdRef.current = null;
+      return;
     }
-  }, [dbUser, visibleNav, activeTab]);
+    if (dbUser.roleSlug === 'driver' || dbUser.roleSlug === 'supervisor') return;
+    if (lastAutoRoutedUserIdRef.current !== dbUser.id) {
+      lastAutoRoutedUserIdRef.current = dbUser.id;
+      setTabHistory([]);
+      setActiveTab(defaultTab);
+      return;
+    }
+    if (visibleNav.length > 0 && !visibleNav.some((n) => n.id === activeTab)) {
+      setActiveTab(defaultTab);
+    }
+  }, [dbUser, visibleNav, activeTab, defaultTab]);
 
   if (loading || !splashElapsed) {
     return (
@@ -346,8 +392,8 @@ const AppShell: React.FC = () => {
       const prevTab = nextHistory.pop()!;
       setTabHistory(nextHistory);
       setActiveTab(prevTab);
-    } else if (activeTab !== 'overview') {
-      setActiveTab('overview');
+    } else if (activeTab !== defaultTab) {
+      setActiveTab(defaultTab);
     }
   };
 
@@ -431,7 +477,7 @@ const AppShell: React.FC = () => {
               <p className="font-bold text-white truncate">{dbUser.fullName}</p>
               <p className="text-[11px] text-[#C89B3C] truncate">
                 {dbUser.roleNameAr}
-                {restrictedSchoolCount > 0 ? ` · ${restrictedSchoolCount} مدرسة محددة` : ''}
+                {schoolScopeLabel ? ` · ${schoolScopeLabel}` : ''}
               </p>
             </div>
             <button
@@ -559,7 +605,7 @@ const AppShell: React.FC = () => {
             >
               <Menu className="w-5 h-5" />
             </button>
-            {(tabHistory.length > 0 || activeTab !== 'overview') && (
+            {(tabHistory.length > 0 || activeTab !== defaultTab) && (
               <button
                 type="button"
                 onClick={handleGoBack}
@@ -592,9 +638,7 @@ const AppShell: React.FC = () => {
               <span className="text-slate-400">·</span>
               <span className="text-[11px] font-medium text-slate-700">
                 {dbUser.roleNameAr}
-                {restrictedSchoolCount > 0
-                  ? ` (نطاق الصلاحية: ${restrictedSchoolCount} مدرسة محددة)`
-                  : ''}
+                {schoolScopeLabel ? ` · ${schoolScopeLabel}` : ''}
               </span>
             </div>
           </div>

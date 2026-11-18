@@ -121,15 +121,15 @@ export const ROLE_DEFAULT_PERMISSIONS: Record<string, string[]> = {
   movement_manager: [
     'dashboard:read',
     'drivers:read',
-    'advances:write',
+    'drivers:write',
+    'attendance:write',
     'coverage:write',
-    'finance:read',
     'vehicles:read',
     'vehicles:write',
     'schools:read',
     'routes:write',
-    'attendance:write',
     'gps:read',
+    'reports:read',
   ],
   accountant: [
     'dashboard:read',
@@ -140,7 +140,9 @@ export const ROLE_DEFAULT_PERMISSIONS: Record<string, string[]> = {
     'finance:read',
     'finance:write',
     'reports:read',
+    'employees:read',
   ],
+  employee: ['dashboard:read'],
 };
 
 export function normalizeSchoolIds(raw: unknown): number[] {

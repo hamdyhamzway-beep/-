@@ -70,9 +70,12 @@ export const DriversModule: React.FC<{
   const canFinanceWrite = can('finance:write');
   const canFinanceRead = can('finance:read') || canFinanceWrite;
   const canViewFinancialDetails = canFinanceRead || canAdvancesWrite || canCoverageWrite;
-  const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const restrictedSchoolCount = restrictedSchoolIds.length;
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolCount === 1;
 
   const [driversList, setDriversList] = useState<EnrichedDriver[]>([]);
+  const [mySchools, setMySchools] = useState<Array<{ id: number; name: string }>>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -193,8 +196,14 @@ export const DriversModule: React.FC<{
     setLoading(true);
     setError(null);
     try {
-      const dRes = await apiFetch<{ drivers: EnrichedDriver[] }>('/api/drivers');
+      const [dRes, schoolsRes] = await Promise.all([
+        apiFetch<{ drivers: EnrichedDriver[] }>('/api/drivers'),
+        apiFetch<{ schools: Array<{ id: number; name: string }> }>('/api/my-schools').catch(() => ({
+          schools: [],
+        })),
+      ]);
       setDriversList(dRes.drivers);
+      setMySchools(schoolsRes.schools || []);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات السائقين');
     } finally {
@@ -210,6 +219,13 @@ export const DriversModule: React.FC<{
     setEditingDriver(null);
     setFormError(null);
     setShowRouteTimings(false);
+    const defaultSchoolName = isSingleSchoolRestricted
+      ? mySchools.find((s) => s.id === restrictedSchoolIds[0])?.name ||
+        dbUser?.assignedSchoolNames?.[0] ||
+        ''
+      : !isSuperAdmin && mySchools.length > 0
+      ? mySchools[0].name
+      : '';
     setFormState({
       driverCode: '',
       fullName: '',
@@ -222,7 +238,7 @@ export const DriversModule: React.FC<{
       photoUrl: '',
       licensePhotos: [] as DriverLicensePhoto[],
       notes: '',
-      schoolName: '',
+      schoolName: defaultSchoolName,
       busNumber: '',
       routeId: '',
       routeName: '',
@@ -1211,16 +1227,44 @@ export const DriversModule: React.FC<{
                 <h3 className="font-semibold text-slate-800 mb-3">التعيين التشغيلي</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-slate-600 mb-1">اسم المدرسة</label>
-                    <input
-                      type="text"
-                      value={formState.schoolName}
-                      onChange={(e) =>
-                        setFormState({ ...formState, schoolName: e.target.value })
-                      }
-                      placeholder="اكتب اسم المدرسة"
-                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
-                    />
+                    <label className="block text-slate-600 mb-1">
+                      المدرسة {!isSuperAdmin && restrictedSchoolCount > 0 ? '*' : ''}
+                    </label>
+                    {mySchools.length > 0 || restrictedSchoolCount > 0 ? (
+                      <select
+                        required={!isSuperAdmin && restrictedSchoolCount > 0}
+                        disabled={isSingleSchoolRestricted}
+                        value={formState.schoolName}
+                        onChange={(e) =>
+                          setFormState({ ...formState, schoolName: e.target.value })
+                        }
+                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none disabled:bg-slate-100"
+                      >
+                        {(isSuperAdmin || restrictedSchoolCount === 0) && (
+                          <option value="">غير معين بمدرسة</option>
+                        )}
+                        {mySchools.map((s) => (
+                          <option key={s.id} value={s.name}>
+                            {s.name}
+                          </option>
+                        ))}
+                        {isSuperAdmin &&
+                          formState.schoolName &&
+                          !mySchools.some((s) => s.name === formState.schoolName) && (
+                            <option value={formState.schoolName}>{formState.schoolName}</option>
+                          )}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={formState.schoolName}
+                        onChange={(e) =>
+                          setFormState({ ...formState, schoolName: e.target.value })
+                        }
+                        placeholder="اكتب اسم المدرسة"
+                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 focus:border-[#0B1F3A] focus:outline-none"
+                      />
+                    )}
                   </div>
                   <div>
                     <label className="block text-slate-600 mb-1">الباص / المركبة</label>

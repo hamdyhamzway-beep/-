@@ -101,8 +101,14 @@ export const EmployeeDailyReportModal: React.FC<EmployeeDailyReportModalProps> =
 }) => {
   const { dbUser } = useAuth();
   useEscapeKey(isOpen, onClose);
+  const isSuperAdmin =
+    dbUser?.roleSlug === 'super_admin' || (dbUser?.permissions || []).includes('*');
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolIds.length === 1;
 
   // Core Inputs
+  const [mySchools, setMySchools] = useState<Array<{ id: number; name: string }>>([]);
+  const [schoolId, setSchoolId] = useState<string>('');
   const [rawText, setRawText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -139,7 +145,7 @@ export const EmployeeDailyReportModal: React.FC<EmployeeDailyReportModalProps> =
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Reset when opened
+  // Reset when opened & load allowed schools
   useEffect(() => {
     if (isOpen) {
       setRawText('');
@@ -155,8 +161,22 @@ export const EmployeeDailyReportModal: React.FC<EmployeeDailyReportModalProps> =
       setIsPlayingAudio(false);
       setIsTranscribingAi(false);
       setPreviewImageUrl(null);
+      const lockedId = isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : '';
+      setSchoolId(lockedId);
+
+      apiFetch<{ schools: Array<{ id: number; name: string }> }>('/api/my-schools')
+        .then((res) => {
+          const list = res.schools || [];
+          setMySchools(list);
+          if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+            setSchoolId(String(restrictedSchoolIds[0]));
+          } else if (!isSuperAdmin && list.length === 1) {
+            setSchoolId(String(list[0].id));
+          }
+        })
+        .catch(() => setMySchools([]));
     }
-  }, [isOpen]);
+  }, [isOpen, isSingleSchoolRestricted, isSuperAdmin]);
 
   // Clean up audio on close
   useEffect(() => {
@@ -510,6 +530,7 @@ export const EmployeeDailyReportModal: React.FC<EmployeeDailyReportModalProps> =
           audioDataUrl: audioDataUrl || null,
           audioDurationSec: recordingSeconds,
           reportDate,
+          schoolId: schoolId ? Number(schoolId) : null,
           targetAudience,
           reportType,
           financialAmount: extractedAmount,
@@ -591,7 +612,25 @@ export const EmployeeDailyReportModal: React.FC<EmployeeDailyReportModalProps> =
               <span className="text-slate-500">{dbUser?.roleNameAr || 'إدارة وتشغيل'}</span>
             </div>
 
-            <div className="flex items-center gap-2 text-slate-600">
+            <div className="flex flex-wrap items-center gap-2 text-slate-600">
+              {mySchools.length > 0 && (
+                <select
+                  value={schoolId}
+                  disabled={isSingleSchoolRestricted}
+                  onChange={(e) => setSchoolId(e.target.value)}
+                  aria-label="المدرسة المختصة بالتقرير"
+                  className="bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-xs font-bold text-[#0B1F3A] disabled:bg-slate-100"
+                >
+                  {(isSuperAdmin || restrictedSchoolIds.length === 0) && (
+                    <option value="">الإدارة العامة (تلقائي)</option>
+                  )}
+                  {mySchools.map((s) => (
+                    <option key={s.id} value={String(s.id)}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              )}
               <Clock className="w-3.5 h-3.5 text-slate-400" />
               <span>التاريخ:</span>
               <input

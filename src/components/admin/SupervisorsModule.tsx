@@ -20,6 +20,7 @@ import {
 import {
   apiFetch,
   formatArabicTimestampTime,
+  formatEGP,
   formatRelativeArabicTime,
   normalizeLookupText,
 } from '../../lib/api';
@@ -74,6 +75,7 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
     routeName: '',
     pickupArea: '',
     dropoffArea: '',
+    monthlySalary: '',
     accountStatus: 'active',
     notes: '',
   });
@@ -139,6 +141,7 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
       routeName: '',
       pickupArea: '',
       dropoffArea: '',
+      monthlySalary: '',
       accountStatus: 'active',
       notes: '',
     });
@@ -159,6 +162,7 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
       routeName: cleanEditableField(s.routeName),
       pickupArea: s.pickupArea || '',
       dropoffArea: s.dropoffArea || '',
+      monthlySalary: String(s.monthlySalary ?? 0),
       accountStatus: s.accountStatus || 'active',
       notes: s.notes || '',
     });
@@ -263,6 +267,7 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
       routeName: cleanRoute,
       pickupArea: cleanPickupArea,
       dropoffArea: cleanDropoffArea,
+      monthlySalary: Math.max(0, Number(form.monthlySalary || 0)),
       accountStatus: cleanStatus,
       notes: cleanNotes,
     };
@@ -479,6 +484,7 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                   <th className="py-3 px-4">الكود</th>
                   <th className="py-3 px-4">المشرفة والموبايل</th>
                   <th className="py-3 px-4">خط السير والباص</th>
+                  <th className="py-3 px-4">الراتب والدورة المالية</th>
                   <th className="py-3 px-4">اللايف لوكيشن ومهام اليوم</th>
                   <th className="py-3 px-4">الحالة</th>
                   <th className="py-3 px-4">إجراءات</th>
@@ -509,6 +515,15 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                       </div>
                       <div className="mt-0.5 text-slate-500 tabular-nums">
                         {s.schoolName} · باص {s.busNumber}
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4 tabular-nums">
+                      <div className="font-mono font-bold text-[#0B1F3A]">
+                        {formatEGP(s.monthlySalary ?? 0)}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-slate-500">
+                        {s.cycleTripsCount ?? 0} رحلة مسجلة
+                        {s.billingRange?.shortLabelAr ? ` · ${s.billingRange.shortLabelAr}` : ''}
                       </div>
                     </td>
                     <td className="py-3.5 px-4 tabular-nums">
@@ -709,6 +724,19 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                     <option value="active">نشط</option>
                     <option value="inactive">موقوف مؤقتاً</option>
                   </select>
+                </div>
+                <div>
+                  <label className="block font-bold text-[#0B1F3A] mb-1">الراتب الشهري (ج.م)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    dir="ltr"
+                    value={form.monthlySalary}
+                    onChange={(e) => setForm((p) => ({ ...p, monthlySalary: e.target.value }))}
+                    placeholder="0"
+                    className="w-full rounded-xl border border-slate-300 px-3 py-2.5 font-mono text-right"
+                  />
                 </div>
                 <div className="sm:col-span-2">
                   <label className="block font-bold text-[#0B1F3A] mb-1">اسم خط السير</label>

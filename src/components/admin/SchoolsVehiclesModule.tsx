@@ -33,7 +33,9 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const canVehiclesRead = can('vehicles:read') || canVehiclesWrite;
   const canRoutesWrite = can('routes:write');
   const canFinanceRead = can('finance:read') || can('finance:write');
-  const restrictedSchoolCount = dbUser?.assignedSchoolIds?.length || 0;
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const restrictedSchoolCount = restrictedSchoolIds.length;
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolCount === 1;
 
   const allowedSubTabs: Array<{ id: SubTabId; label: string; icon: typeof Building2 }> = [
     ...(canSchoolsRead ? [{ id: 'schools' as const, label: 'المدارس والعقود', icon: Building2 }] : []),
@@ -48,7 +50,9 @@ export const SchoolsVehiclesModule: React.FC = () => {
 
   const [tab, setTab] = useState<SubTabId>(() => allowedSubTabs[0]?.id || 'schools');
   const [tabHistory, setTabHistory] = useState<Array<{ tab: SubTabId; schoolId: number | 'all' }>>([]);
-  const [selectedSchoolId, setSelectedSchoolId] = useState<number | 'all'>('all');
+  const [selectedSchoolId, setSelectedSchoolId] = useState<number | 'all'>(() =>
+    isSingleSchoolRestricted ? restrictedSchoolIds[0] : 'all'
+  );
   const [billingPeriod, setBillingPeriod] = useState<{ month: number; year: number } | null>(null);
   const [schoolsList, setSchoolsList] = useState<SchoolItem[]>([]);
   const [routesList, setRoutesList] = useState<RouteItem[]>([]);
@@ -90,6 +94,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
     monthlyContractValue: '',
     contractStartDate: '',
     contractEndDate: '',
+    billingCycleType: 'calendar' as 'calendar' | 'shifted',
+    billingCycleStartDay: '1',
     notes: '',
   });
 
@@ -100,6 +106,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
     ownerName: '',
     monthlyOwnerCost: '',
     operationalStatus: 'active',
+    schoolId: '',
   });
 
   const [ownerForm, setOwnerForm] = useState({
@@ -164,22 +171,34 @@ export const SchoolsVehiclesModule: React.FC = () => {
     }
   }, [tab, canSchoolsRead, canVehiclesRead, canRoutesWrite]);
 
+  useEffect(() => {
+    if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+      setSelectedSchoolId(restrictedSchoolIds[0]);
+    } else if (!isSuperAdmin && schoolsList.length === 1) {
+      setSelectedSchoolId(schoolsList[0].id);
+    }
+  }, [isSingleSchoolRestricted, isSuperAdmin, restrictedSchoolIds, schoolsList]);
+
   const navigateSubView = (nextTab: SubTabId, nextSchoolId: number | 'all' = selectedSchoolId) => {
-    if (nextTab === tab && nextSchoolId === selectedSchoolId) return;
+    const safeSchoolId =
+      isSingleSchoolRestricted && nextSchoolId === 'all' ? restrictedSchoolIds[0] : nextSchoolId;
+    if (nextTab === tab && safeSchoolId === selectedSchoolId) return;
     setTabHistory((prev) => [...prev.slice(-14), { tab, schoolId: selectedSchoolId }]);
     setTab(nextTab);
-    setSelectedSchoolId(nextSchoolId);
+    setSelectedSchoolId(safeSchoolId);
   };
 
   const goBackSubView = () => {
     setTabHistory((prev) => {
       if (prev.length === 0) {
-        if (selectedSchoolId !== 'all') setSelectedSchoolId('all');
+        if (selectedSchoolId !== 'all' && !isSingleSchoolRestricted) setSelectedSchoolId('all');
         return prev;
       }
       const last = prev[prev.length - 1];
       setTab(last.tab);
-      setSelectedSchoolId(last.schoolId);
+      setSelectedSchoolId(
+        isSingleSchoolRestricted && last.schoolId === 'all' ? restrictedSchoolIds[0] : last.schoolId
+      );
       return prev.slice(0, -1);
     });
   };
@@ -192,6 +211,10 @@ export const SchoolsVehiclesModule: React.FC = () => {
       const payload = {
         ...schoolForm,
         monthlyContractValue: Number(schoolForm.monthlyContractValue || 0),
+        billingCycleStartDay:
+          schoolForm.billingCycleType === 'calendar'
+            ? 1
+            : Math.min(28, Math.max(2, Number(schoolForm.billingCycleStartDay || 13))),
       };
       if (editingSchoolId) {
         await apiFetch(`/api/schools/${editingSchoolId}`, {
@@ -214,6 +237,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
         monthlyContractValue: '',
         contractStartDate: '',
         contractEndDate: '',
+        billingCycleType: 'calendar',
+        billingCycleStartDay: '1',
         notes: '',
       });
       await loadData();
@@ -233,6 +258,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
         ...vehicleForm,
         ownerName: vehicleForm.ownerName.trim(),
         monthlyOwnerCost: Number(vehicleForm.monthlyOwnerCost || 0),
+        schoolId: vehicleForm.schoolId ? Number(vehicleForm.schoolId) : null,
       };
       if (editingVehicleId) {
         await apiFetch(`/api/vehicles/${editingVehicleId}`, {
@@ -254,6 +280,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
         ownerName: '',
         monthlyOwnerCost: '',
         operationalStatus: 'active',
+        schoolId: '',
       });
       await loadData();
     } catch (err: unknown) {
@@ -367,6 +394,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
       monthlyContractValue: '',
       contractStartDate: '',
       contractEndDate: '',
+      billingCycleType: 'calendar',
+      billingCycleStartDay: '1',
       notes: '',
     });
     setShowSchoolModal(true);
@@ -375,6 +404,9 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const openEditSchool = (s: SchoolItem) => {
     setModalError(null);
     setEditingSchoolId(s.id);
+    const resolvedType = s.billingCycleType === 'shifted' ? 'shifted' : 'calendar';
+    const resolvedDay =
+      resolvedType === 'shifted' ? String(s.billingCycleStartDay && s.billingCycleStartDay > 1 ? s.billingCycleStartDay : 13) : '1';
     setSchoolForm({
       name: s.name,
       contactName: s.contactName || '',
@@ -383,6 +415,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
       monthlyContractValue: String(s.monthlyContractValue || 0),
       contractStartDate: s.contractStartDate || '',
       contractEndDate: s.contractEndDate || '',
+      billingCycleType: resolvedType,
+      billingCycleStartDay: resolvedDay,
       notes: s.notes || '',
     });
     setShowSchoolModal(true);
@@ -391,6 +425,13 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const openAddVehicle = () => {
     setModalError(null);
     setEditingVehicleId(null);
+    const defaultSchoolId = isSingleSchoolRestricted
+      ? String(restrictedSchoolIds[0])
+      : selectedSchoolId !== 'all'
+      ? String(selectedSchoolId)
+      : !isSuperAdmin && schoolsList.length > 0
+      ? String(schoolsList[0].id)
+      : '';
     setVehicleForm({
       busNumber: '',
       registrationNumber: '',
@@ -398,6 +439,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
       ownerName: '',
       monthlyOwnerCost: '',
       operationalStatus: 'active',
+      schoolId: defaultSchoolId,
     });
     setShowVehicleModal(true);
   };
@@ -412,6 +454,11 @@ export const SchoolsVehiclesModule: React.FC = () => {
       ownerName: v.ownerName && v.ownerName !== '—' ? v.ownerName : '',
       monthlyOwnerCost: String(v.monthlyOwnerCost || 0),
       operationalStatus: v.operationalStatus || 'active',
+      schoolId: v.schoolId
+        ? String(v.schoolId)
+        : isSingleSchoolRestricted
+        ? String(restrictedSchoolIds[0])
+        : '',
     });
     setShowVehicleModal(true);
   };
@@ -438,9 +485,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const openAddRoute = () => {
     setModalError(null);
     setEditingRouteId(null);
+    const defaultSchoolName = isSingleSchoolRestricted
+      ? schoolsList.find((s) => s.id === restrictedSchoolIds[0])?.name || schoolsList[0]?.name || ''
+      : selectedSchoolId !== 'all'
+      ? schoolsList.find((s) => s.id === selectedSchoolId)?.name || ''
+      : !isSuperAdmin && schoolsList.length > 0
+      ? schoolsList[0].name
+      : '';
     setRouteForm({
       name: '',
-      schoolName: '',
+      schoolName: defaultSchoolName,
       pickupArea: '',
       dropoffArea: '',
       pickupTime: '',
@@ -545,7 +599,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
           return (
             <button
               key={item.id}
-              onClick={() => navigateSubView(item.id, item.id === 'schools' ? selectedSchoolId : 'all')}
+              onClick={() =>
+                navigateSubView(
+                  item.id,
+                  item.id === 'schools'
+                    ? selectedSchoolId
+                    : isSingleSchoolRestricted
+                    ? restrictedSchoolIds[0]
+                    : 'all'
+                )
+              }
               className={`flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
                 tab === item.id
                   ? 'bg-white text-[#0B1F3A] shadow-xs'
@@ -574,17 +637,19 @@ export const SchoolsVehiclesModule: React.FC = () => {
           {/* School Selector Bar (Isolate per school or view all) */}
           <div className="bg-white border border-slate-200 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => navigateSubView('schools', 'all')}
-                className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
-                  selectedSchoolId === 'all'
-                    ? 'bg-[#0B1F3A] text-white'
-                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                كل المدارس ({schoolsList.length})
-              </button>
+              {(isSuperAdmin || (restrictedSchoolCount !== 1 && schoolsList.length > 1)) && (
+                <button
+                  type="button"
+                  onClick={() => navigateSubView('schools', 'all')}
+                  className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                    selectedSchoolId === 'all'
+                      ? 'bg-[#0B1F3A] text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  كل المدارس ({schoolsList.length})
+                </button>
+              )}
               {schoolsList.map((s) => (
                 <button
                   key={s.id}
@@ -621,7 +686,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
               <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <Building2 className="w-5 h-5 text-[#C89B3C]" />
                       <h2 className="font-display text-xl font-bold text-[#0B1F3A]">
                         {selectedSchoolObj.name}
@@ -635,6 +700,17 @@ export const SchoolsVehiclesModule: React.FC = () => {
                       >
                         {selectedSchoolObj.isActive ? 'عقد ساري' : 'غير نشط'}
                       </span>
+                      {selectedSchoolObj.currentBillingRange && (
+                        <span
+                          className={`text-[11px] font-bold px-2.5 py-0.5 rounded-md ${
+                            selectedSchoolObj.currentBillingRange.cycleType === 'shifted'
+                              ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                              : 'bg-slate-100 text-slate-700 border border-slate-200'
+                          }`}
+                        >
+                          {selectedSchoolObj.currentBillingRange.labelAr}
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-slate-500 mt-1.5 flex flex-wrap items-center gap-3">
                       {selectedSchoolObj.contactName && <span>المسؤول: {selectedSchoolObj.contactName}</span>}
@@ -860,7 +936,22 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 <div key={s.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <h3 className="font-display text-base font-bold text-[#0B1F3A]">{s.name}</h3>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-display text-base font-bold text-[#0B1F3A]">{s.name}</h3>
+                        {s.currentBillingRange && (
+                          <span
+                            className={`rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                              s.currentBillingRange.cycleType === 'shifted'
+                                ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                : 'bg-slate-100 text-slate-700 border border-slate-200'
+                            }`}
+                          >
+                            {s.currentBillingRange.cycleType === 'shifted'
+                              ? `دورة مرحّلة (${s.currentBillingRange.shortLabelAr})`
+                              : `دورة ميلادية (${s.currentBillingRange.shortLabelAr})`}
+                          </span>
+                        )}
+                      </div>
                       <div className="text-xs text-slate-500 mt-1">
                         {s.contactName} · <span className="font-mono">{s.contactPhone}</span>
                       </div>
@@ -1201,7 +1292,19 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 required
                 placeholder="اسم المدرسة *"
                 value={schoolForm.name}
-                onChange={(e) => setSchoolForm({ ...schoolForm, name: e.target.value })}
+                onChange={(e) => {
+                  const nextName = e.target.value;
+                  setSchoolForm((prev) => {
+                    const isHilal = !editingSchoolId && (nextName.includes('الهلالي') || nextName.toLowerCase().includes('hilal'));
+                    return {
+                      ...prev,
+                      name: nextName,
+                      ...(isHilal && prev.billingCycleType === 'calendar'
+                        ? { billingCycleType: 'shifted' as const, billingCycleStartDay: '13' }
+                        : {}),
+                    };
+                  });
+                }}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1244,6 +1347,85 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 }
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
               />
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2.5">
+                <div className="font-bold text-[#0B1F3A]">نظام إغلاق الشهر المالي للمدرسة</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSchoolForm((prev) => ({
+                        ...prev,
+                        billingCycleType: 'calendar',
+                        billingCycleStartDay: '1',
+                      }))
+                    }
+                    className={`rounded-lg border p-2.5 text-right transition-colors cursor-pointer ${
+                      schoolForm.billingCycleType === 'calendar'
+                        ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    <div className="font-bold">دورة ميلادية عادية</div>
+                    <div
+                      className={`text-[10px] mt-0.5 ${
+                        schoolForm.billingCycleType === 'calendar' ? 'text-slate-300' : 'text-slate-500'
+                      }`}
+                    >
+                      من يوم 1 إلى آخر الشهر (مثل: إشراقة الغد)
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSchoolForm((prev) => ({
+                        ...prev,
+                        billingCycleType: 'shifted',
+                        billingCycleStartDay:
+                          Number(prev.billingCycleStartDay) > 1 ? prev.billingCycleStartDay : '13',
+                      }))
+                    }
+                    className={`rounded-lg border p-2.5 text-right transition-colors cursor-pointer ${
+                      schoolForm.billingCycleType === 'shifted'
+                        ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    <div className="font-bold">دورة مرحّلة (نصف شهرية)</div>
+                    <div
+                      className={`text-[10px] mt-0.5 ${
+                        schoolForm.billingCycleType === 'shifted' ? 'text-[#ebd089]' : 'text-slate-500'
+                      }`}
+                    >
+                      من يوم 13 إلى 12 الشهر التالي (مثل: الهلالية)
+                    </div>
+                  </button>
+                </div>
+                {schoolForm.billingCycleType === 'shifted' && (
+                  <div className="flex items-center justify-between gap-3 pt-1">
+                    <label className="text-[11px] font-semibold text-slate-700">
+                      يوم بداية الدورة المالية في الشهر:
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={2}
+                        max={28}
+                        value={schoolForm.billingCycleStartDay}
+                        onChange={(e) =>
+                          setSchoolForm((prev) => ({
+                            ...prev,
+                            billingCycleStartDay: e.target.value,
+                          }))
+                        }
+                        className="w-16 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center font-mono font-bold"
+                      />
+                      <span className="text-[11px] text-slate-500 font-mono">
+                        ← ينتهي يوم {Math.max(1, (Number(schoolForm.billingCycleStartDay) || 13) - 1)} التالي
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <input
                   type="date"
@@ -1334,6 +1516,29 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
                 />
               </div>
+              {schoolsList.length > 0 && (
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    المدرسة التابع لها المركبة {!isSuperAdmin && restrictedSchoolCount > 0 ? '*' : ''}
+                  </label>
+                  <select
+                    required={!isSuperAdmin && restrictedSchoolCount > 0}
+                    disabled={isSingleSchoolRestricted}
+                    value={vehicleForm.schoolId}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, schoolId: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] disabled:bg-slate-100"
+                  >
+                    {(isSuperAdmin || restrictedSchoolCount === 0) && (
+                      <option value="">غير معينة بمدرسة محددة</option>
+                    )}
+                    {schoolsList.map((s) => (
+                      <option key={s.id} value={String(s.id)}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <button
                 type="submit"
                 className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
@@ -1473,13 +1678,32 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 onChange={(e) => setRouteForm({ ...routeForm, name: e.target.value })}
                 className="w-full rounded-lg border border-slate-200 px-3 py-2"
               />
-              <input
-                type="text"
-                placeholder="اكتب اسم المدرسة (اختياري)"
-                value={routeForm.schoolName}
-                onChange={(e) => setRouteForm({ ...routeForm, schoolName: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
+              {schoolsList.length > 0 ? (
+                <select
+                  required={!isSuperAdmin && restrictedSchoolCount > 0}
+                  disabled={isSingleSchoolRestricted}
+                  value={routeForm.schoolName}
+                  onChange={(e) => setRouteForm({ ...routeForm, schoolName: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] disabled:bg-slate-100"
+                >
+                  {(isSuperAdmin || restrictedSchoolCount === 0) && (
+                    <option value="">بدون ربط بمدرسة (اختياري)</option>
+                  )}
+                  {schoolsList.map((s) => (
+                    <option key={s.id} value={s.name}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  placeholder="اكتب اسم المدرسة (اختياري)"
+                  value={routeForm.schoolName}
+                  onChange={(e) => setRouteForm({ ...routeForm, schoolName: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              )}
               <input
                 placeholder="نقطة بداية الرحلة (التجمع / الانطلاق)"
                 value={routeForm.pickupArea}

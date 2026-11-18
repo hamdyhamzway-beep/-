@@ -13,13 +13,25 @@ import {
 } from './StaffAccessModal';
 import type { EmployeeRecord } from '../../types';
 
+interface MySchoolOption {
+  id: number;
+  name: string;
+  isActive?: boolean;
+}
+
 export const EmployeesModule: React.FC = () => {
   const { dbUser } = useAuth();
   const perms = dbUser?.permissions || [];
   const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || perms.includes('*');
   const canWriteEmployees = isSuperAdmin || perms.includes('employees:write');
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolIds.length === 1;
 
   const [employeesList, setEmployeesList] = useState<EmployeeRecord[]>([]);
+  const [mySchools, setMySchools] = useState<MySchoolOption[]>([]);
+  const [schoolFilter, setSchoolFilter] = useState<string>(() =>
+    isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : 'all'
+  );
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +53,7 @@ export const EmployeesModule: React.FC = () => {
     fullName: '',
     jobTitle: '',
     phone: '',
+    schoolId: '',
     monthlySalary: '',
     bonuses: '',
     deductions: '',
@@ -57,12 +70,19 @@ export const EmployeesModule: React.FC = () => {
     else if (showModal) setShowModal(false);
   });
 
+  useEffect(() => {
+    if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+      setSchoolFilter(String(restrictedSchoolIds[0]));
+    }
+  }, [isSingleSchoolRestricted, restrictedSchoolIds]);
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [res, usersMeta] = await Promise.all([
+      const [res, schoolsRes, usersMeta] = await Promise.all([
         apiFetch<{ employees: EmployeeRecord[] }>('/api/employees'),
+        apiFetch<{ schools: MySchoolOption[] }>('/api/my-schools').catch(() => ({ schools: [] })),
         isSuperAdmin
           ? apiFetch<{ roles: StaffRoleOption[]; schools: StaffSchoolOption[] }>('/api/users').catch(
               () => null
@@ -70,6 +90,7 @@ export const EmployeesModule: React.FC = () => {
           : Promise.resolve(null),
       ]);
       setEmployeesList(res.employees);
+      setMySchools(schoolsRes.schools || []);
       if (usersMeta) {
         setStaffRoles(usersMeta.roles || []);
         setStaffSchools(usersMeta.schools || []);
@@ -117,11 +138,19 @@ export const EmployeesModule: React.FC = () => {
   const openAdd = () => {
     setEditing(null);
     setFormError(null);
+    const defaultSchoolId = isSingleSchoolRestricted
+      ? String(restrictedSchoolIds[0])
+      : schoolFilter !== 'all'
+      ? schoolFilter
+      : !isSuperAdmin && mySchools.length > 0
+      ? String(mySchools[0].id)
+      : '';
     setFormState({
       employeeCode: '',
       fullName: '',
       jobTitle: '',
       phone: '',
+      schoolId: defaultSchoolId,
       monthlySalary: '',
       bonuses: '',
       deductions: '',
@@ -140,6 +169,11 @@ export const EmployeesModule: React.FC = () => {
       fullName: emp.fullName,
       jobTitle: emp.jobTitle || '',
       phone: emp.phone || '',
+      schoolId: emp.schoolId
+        ? String(emp.schoolId)
+        : isSingleSchoolRestricted
+        ? String(restrictedSchoolIds[0])
+        : '',
       monthlySalary: String(emp.monthlySalary ?? 0),
       bonuses: emp.bonuses ? String(emp.bonuses) : '',
       deductions: emp.deductions ? String(emp.deductions) : '',
@@ -157,6 +191,7 @@ export const EmployeesModule: React.FC = () => {
     try {
       const payload = {
         ...formState,
+        schoolId: formState.schoolId ? Number(formState.schoolId) : null,
         monthlySalary: Number(formState.monthlySalary || 0),
         bonuses: Number(formState.bonuses || 0),
         deductions: Number(formState.deductions || 0),
@@ -208,6 +243,13 @@ export const EmployeesModule: React.FC = () => {
   };
 
   const filtered = employeesList.filter((e) => {
+    if (schoolFilter !== 'all') {
+      if (schoolFilter === 'general') {
+        if (e.schoolId) return false;
+      } else if (String(e.schoolId ?? '') !== schoolFilter) {
+        return false;
+      }
+    }
     const q = normalizeLookupText(search);
     if (!q) return true;
     const digitsOnly = q.replace(/\D/g, '');
@@ -215,12 +257,13 @@ export const EmployeesModule: React.FC = () => {
       normalizeLookupText(e.fullName).includes(q) ||
       normalizeLookupText(e.employeeCode).includes(q) ||
       normalizeLookupText(e.jobTitle).includes(q) ||
+      normalizeLookupText(e.schoolName || '').includes(q) ||
       normalizeLookupText(e.phone).includes(q) ||
       (digitsOnly.length >= 2 && normalizeLookupText(e.phone).replace(/\D/g, '').includes(digitsOnly))
     );
   });
 
-  const activeStaff = employeesList.filter((e) => e.status === 'active');
+  const activeStaff = filtered.filter((e) => e.status === 'active');
   const totalNetPayroll = activeStaff.reduce((sum, e) => sum + Math.max(0, e.netSalary), 0);
 
   return (
@@ -231,7 +274,7 @@ export const EmployeesModule: React.FC = () => {
             إدارة الموظفين (غير السائقين)
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            المشرفات، الإداريون، المحاسبون، موظفو الحركة، والفنيون — وتُحسب رواتبهم تلقائياً ضمن إجمالي الرواتب والربحية
+            المشرفات، الإداريون، المحاسبون، موظفو الحركة، والفنيون — مع عزل كامل لكل مدرسة وحساب الرواتب ضمن دورتها
           </p>
         </div>
         {canWriteEmployees && (
@@ -248,9 +291,9 @@ export const EmployeesModule: React.FC = () => {
       {/* Summary Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="text-xs text-slate-500">إجمالي الموظفين المسجلين</div>
+          <div className="text-xs text-slate-500">إجمالي الموظفين بالنطاق</div>
           <div className="mt-1.5 font-mono text-2xl font-bold text-[#0B1F3A] tabular-nums">
-            {employeesList.length}
+            {filtered.length}
           </div>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4">
@@ -267,15 +310,15 @@ export const EmployeesModule: React.FC = () => {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4">
-        <div className="relative max-w-md">
+      {/* Search & School Filter */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="relative flex-1 max-w-md">
           <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="بحث بالاسم، الكود، الوظيفة، أو الهاتف..."
+            placeholder="بحث بالاسم، الكود، الوظيفة، المدرسة، أو الهاتف..."
             className="w-full rounded-lg border border-slate-200 bg-slate-50 pr-9 pl-8 py-2 text-xs focus:border-[#0B1F3A] focus:outline-none"
           />
           {search && (
@@ -288,6 +331,28 @@ export const EmployeesModule: React.FC = () => {
               <X className="w-3.5 h-3.5" />
             </button>
           )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <select
+            value={schoolFilter}
+            disabled={isSingleSchoolRestricted}
+            onChange={(e) => setSchoolFilter(e.target.value)}
+            aria-label="تصفية الموظفين حسب المدرسة"
+            className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none disabled:opacity-80"
+          >
+            {!isSingleSchoolRestricted && (
+              <option value="all">
+                {!isSuperAdmin && restrictedSchoolIds.length > 0 ? 'جميع مدارسي المخصصة' : 'جميع المدارس'}
+              </option>
+            )}
+            {mySchools.map((s) => (
+              <option key={s.id} value={String(s.id)}>
+                {s.name}
+              </option>
+            ))}
+            {isSuperAdmin && <option value="general">الإدارة العامة (غير معين بمدرسة)</option>}
+          </select>
         </div>
       </div>
 
@@ -313,6 +378,7 @@ export const EmployeesModule: React.FC = () => {
               <tr>
                 <th className="py-3 px-4 font-semibold">الكود</th>
                 <th className="py-3 px-4 font-semibold">الاسم والوظيفة</th>
+                <th className="py-3 px-4 font-semibold">المدرسة</th>
                 <th className="py-3 px-4 font-semibold">الهاتف</th>
                 <th className="py-3 px-4 font-semibold">الراتب الأساسي</th>
                 <th className="py-3 px-4 font-semibold">مكافآت</th>
@@ -327,7 +393,7 @@ export const EmployeesModule: React.FC = () => {
               {loading ? (
                 <tr>
                   <td
-                    colSpan={7 + (isSuperAdmin ? 1 : 0) + (canWriteEmployees ? 1 : 0)}
+                    colSpan={9 + (isSuperAdmin ? 1 : 0) + (canWriteEmployees ? 1 : 0)}
                     className="py-10 text-center text-slate-400"
                   >
                     جاري التحميل...
@@ -336,7 +402,7 @@ export const EmployeesModule: React.FC = () => {
               ) : filtered.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={7 + (isSuperAdmin ? 1 : 0) + (canWriteEmployees ? 1 : 0)}
+                    colSpan={9 + (isSuperAdmin ? 1 : 0) + (canWriteEmployees ? 1 : 0)}
                     className="py-10 text-center text-slate-400"
                   >
                     لا يوجد موظفون مسجلون حالياً
@@ -356,6 +422,9 @@ export const EmployeesModule: React.FC = () => {
                           <div className="text-slate-500">{emp.jobTitle || '—'}</div>
                         </div>
                       </div>
+                    </td>
+                    <td className="py-3.5 px-4 text-slate-700 font-medium">
+                      {emp.schoolName || 'الإدارة العامة'}
                     </td>
                     <td className="py-3.5 px-4 font-mono text-slate-600">{emp.phone || '—'}</td>
                     <td className="py-3.5 px-4 font-mono tabular-nums">
@@ -554,6 +623,27 @@ export const EmployeesModule: React.FC = () => {
                     placeholder="0"
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
                   />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    المدرسة التابع لها الموظف {!isSuperAdmin && restrictedSchoolIds.length > 0 ? '*' : ''}
+                  </label>
+                  <select
+                    required={!isSuperAdmin && restrictedSchoolIds.length > 0}
+                    disabled={isSingleSchoolRestricted}
+                    value={formState.schoolId}
+                    onChange={(e) => setFormState({ ...formState, schoolId: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] disabled:bg-slate-100"
+                  >
+                    {(isSuperAdmin || restrictedSchoolIds.length === 0) && (
+                      <option value="">الإدارة العامة (غير معين بمدرسة)</option>
+                    )}
+                    {mySchools.map((s) => (
+                      <option key={s.id} value={String(s.id)}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 

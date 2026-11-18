@@ -31,16 +31,28 @@ import { apiFetch, formatEGP, formatRelativeArabicTime } from '../../lib/api';
 import { EmployeeDailyReportModal } from '../employee/EmployeeDailyReportModal';
 import type { DailyReportRecord } from '../../types';
 
+interface MySchoolOption {
+  id: number;
+  name: string;
+}
+
 export const DailyReportsModule: React.FC = () => {
   const { dbUser } = useAuth();
   const isSuperAdmin = dbUser?.roleSlug === 'super_admin' || dbUser?.permissions?.includes('*');
   const isAccountant = dbUser?.roleSlug === 'accountant' || dbUser?.permissions?.includes('finance:read');
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolIds.length === 1;
 
   const [reports, setReports] = useState<DailyReportRecord[]>([]);
+  const [mySchools, setMySchools] = useState<MySchoolOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Filters
+  const [schoolFilter, setSchoolFilter] = useState<string>(() =>
+    isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : 'all'
+  );
   const [dateFilter, setDateFilter] = useState('');
   const [audienceFilter, setAudienceFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -59,11 +71,24 @@ export const DailyReportsModule: React.FC = () => {
   const [reviewNote, setReviewNote] = useState('');
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
 
+  useEffect(() => {
+    if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+      setSchoolFilter(String(restrictedSchoolIds[0]));
+    }
+  }, [isSingleSchoolRestricted, restrictedSchoolIds]);
+
+  useEffect(() => {
+    apiFetch<{ schools: MySchoolOption[] }>('/api/my-schools')
+      .then((res) => setMySchools(res.schools || []))
+      .catch(() => setMySchools([]));
+  }, []);
+
   const loadReports = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
+      if (schoolFilter !== 'all') params.set('schoolId', schoolFilter);
       if (dateFilter) params.set('reportDate', dateFilter);
       if (audienceFilter !== 'all') params.set('targetAudience', audienceFilter);
       if (statusFilter !== 'all') params.set('status', statusFilter);
@@ -77,7 +102,7 @@ export const DailyReportsModule: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [dateFilter, audienceFilter, statusFilter]);
+  }, [schoolFilter, dateFilter, audienceFilter, statusFilter]);
 
   useEffect(() => {
     loadReports();
@@ -108,6 +133,7 @@ export const DailyReportsModule: React.FC = () => {
   // Review & Approval Handler
   const handleReviewReport = async (reportId: number, nextStatus: string, role: 'accountant' | 'manager') => {
     setReviewActionBusy(true);
+    setActionError(null);
     try {
       const payload: any = { status: nextStatus };
       if (role === 'accountant') {
@@ -125,7 +151,7 @@ export const DailyReportsModule: React.FC = () => {
       setReviewingId(null);
       setReviewNote('');
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'تعذر تحديث حالة التقرير');
+      setActionError(err instanceof Error ? err.message : 'تعذر تحديث حالة التقرير');
     } finally {
       setReviewActionBusy(false);
     }
@@ -268,6 +294,28 @@ export const DailyReportsModule: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* School Filter */}
+            {mySchools.length > 0 && (
+              <select
+                value={schoolFilter}
+                disabled={isSingleSchoolRestricted}
+                onChange={(e) => setSchoolFilter(e.target.value)}
+                aria-label="تصفية التقارير حسب المدرسة"
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-[#0B1F3A] cursor-pointer disabled:opacity-80"
+              >
+                {!isSingleSchoolRestricted && (
+                  <option value="all">
+                    {!isSuperAdmin && restrictedSchoolIds.length > 0 ? 'جميع مدارسي' : 'كافة المدارس'}
+                  </option>
+                )}
+                {mySchools.map((s) => (
+                  <option key={s.id} value={String(s.id)}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+
             {/* Target Audience Filter */}
             <select
               value={audienceFilter}
@@ -304,6 +352,23 @@ export const DailyReportsModule: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {actionError && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-800 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+            <span>{actionError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            aria-label="إغلاق التنبيه"
+            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Reports Feed */}
       {loading ? (
@@ -358,11 +423,15 @@ export const DailyReportsModule: React.FC = () => {
                           ({rep.employeeRoleOrTitle || 'موظف'})
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400 mt-0.5 tabular-nums">
                         <Clock className="w-3 h-3" />
                         <span>التاريخ: {rep.reportDate}</span>
                         <span>·</span>
                         <span>{formatRelativeArabicTime(rep.createdAt)}</span>
+                        <span>·</span>
+                        <span className="font-semibold text-[#0B1F3A]">
+                          {rep.schoolName || 'الإدارة العامة'}
+                        </span>
                       </div>
                     </div>
                   </div>

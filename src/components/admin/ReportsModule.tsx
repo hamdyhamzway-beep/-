@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Copy, Download, FileSpreadsheet, Loader2, MessageCircle, X } from 'lucide-react';
+import { Check, Copy, Download, FileSpreadsheet, Loader2, MessageCircle, Sparkles, X } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, exportRowsToExcel, formatEGP, formatRelativeArabicTime } from '../../lib/api';
 import {
   buildWhatsAppUrl,
@@ -14,11 +15,24 @@ import type {
   EnrichedDriver,
   FleetVehicle,
   SalaryRecord,
+  SchoolBillingRange,
   SchoolItem,
+  SupervisorCycleSummaryItem,
 } from '../../types';
 
 interface ReportsResponse {
-  period: { month: number; year: number };
+  period: {
+    month: number;
+    year: number;
+    startDate?: string;
+    endDate?: string;
+    labelAr?: string;
+    shortLabelAr?: string;
+    schoolId?: number | null;
+    schoolName?: string | null;
+  };
+  schoolBillingRanges?: Array<{ schoolId: number; schoolName: string; range: SchoolBillingRange }>;
+  supervisors?: SupervisorCycleSummaryItem[];
   drivers: EnrichedDriver[];
   salaries: SalaryRecord[];
   advances: AdvanceRecord[];
@@ -30,6 +44,7 @@ interface ReportsResponse {
 
 type ReportKind =
   | 'salaries'
+  | 'supervisors'
   | 'advances'
   | 'coverage'
   | 'statements'
@@ -40,9 +55,19 @@ type ReportKind =
   | 'profitability';
 
 export const ReportsModule: React.FC = () => {
+  const { dbUser } = useAuth();
+  const isSuperAdmin =
+    dbUser?.roleSlug === 'super_admin' || (dbUser?.permissions || []).includes('*');
+  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolIds.length === 1;
+
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [year, setYear] = useState(new Date().getFullYear());
+  const [selectedSchoolId, setSelectedSchoolId] = useState<string>(() =>
+    isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : 'all'
+  );
   const initialPeriodSyncedRef = useRef(false);
+  const autoTodayPeriodRef = useRef(false);
   const [reportType, setReportType] = useState<ReportKind>('salaries');
   const [data, setData] = useState<ReportsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,22 +94,45 @@ export const ReportsModule: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const url = initialPeriodSyncedRef.current
-        ? `/api/reports/summary?month=${month}&year=${year}`
-        : `/api/reports/summary`;
+      const params = new URLSearchParams();
+      if (initialPeriodSyncedRef.current && !autoTodayPeriodRef.current) {
+        params.set('month', String(month));
+        params.set('year', String(year));
+      }
+      if (autoTodayPeriodRef.current) {
+        params.set('autoPeriod', 'true');
+      }
+      if (selectedSchoolId !== 'all') {
+        params.set('schoolId', selectedSchoolId);
+      }
+      const qs = params.toString();
+      const url = qs ? `/api/reports/summary?${qs}` : `/api/reports/summary`;
       const res = await apiFetch<ReportsResponse>(url);
-      if (!initialPeriodSyncedRef.current && res.period) {
+      if ((!initialPeriodSyncedRef.current || autoTodayPeriodRef.current) && res.period) {
         initialPeriodSyncedRef.current = true;
+        autoTodayPeriodRef.current = false;
         setMonth(res.period.month);
         setYear(res.period.year);
       }
       setData(res);
     } catch (err: unknown) {
+      autoTodayPeriodRef.current = false;
       setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات التقارير');
     } finally {
       setLoading(false);
     }
-  }, [month, year]);
+  }, [month, year, selectedSchoolId]);
+
+  const handleAutoTodayPeriod = () => {
+    autoTodayPeriodRef.current = true;
+    loadReports();
+  };
+
+  useEffect(() => {
+    if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+      setSelectedSchoolId(String(restrictedSchoolIds[0]));
+    }
+  }, [isSingleSchoolRestricted, restrictedSchoolIds]);
 
   useEffect(() => {
     clearWhatsappPreview();
@@ -122,6 +170,21 @@ export const ReportsModule: React.FC = () => {
             Number(s.netSalary),
           ];
         })
+      );
+    } else if (reportType === 'supervisors') {
+      exportRowsToExcel(
+        `alwaleed-supervisors-${year}-${month}`,
+        ['الكود', 'المشرفة', 'المدرسة', 'نطاق الدورة', 'رحلات الصباح', 'رحلات المساء', 'أيام مكتملة', 'الراتب الشهري'],
+        (data.supervisors || []).map((sv) => [
+          sv.supervisorCode,
+          sv.fullName,
+          sv.schoolName,
+          `${sv.billingRange.startDate} -> ${sv.billingRange.endDate}`,
+          sv.morningTripsCount,
+          sv.eveningTripsCount,
+          sv.completedDaysCount,
+          Number(sv.monthlySalary || 0),
+        ])
       );
     } else if (reportType === 'advances') {
       exportRowsToExcel(
@@ -180,6 +243,7 @@ export const ReportsModule: React.FC = () => {
 
   const reportTabs: Array<{ id: ReportKind; label: string }> = [
     { id: 'salaries', label: 'تقرير الرواتب الشهري' },
+    { id: 'supervisors', label: 'تقرير رحلات ومستحقات المشرفات' },
     { id: 'advances', label: 'تقرير السلف' },
     { id: 'coverage', label: 'تقرير تغطيات الغياب' },
     { id: 'statements', label: 'كشوف حساب السائقين' },
@@ -203,7 +267,9 @@ export const ReportsModule: React.FC = () => {
       const blob = await captureElementAsPngBlob(reportCaptureRef.current);
       const label = reportTabs.find((r) => r.id === reportType)?.label || 'تقرير';
       const filename = `تقرير-${reportType}-${month}-${year}.png`;
-      const caption = `الوليد ترافيل — ${label} (شهر ${month}/${year})`;
+      const schoolLabel = data.period?.schoolName ? ` — ${data.period.schoolName}` : '';
+      const rangeLabel = data.period?.labelAr ? ` — ${data.period.labelAr}` : ` (شهر ${month}/${year})`;
+      const caption = `الوليد ترافيل — ${label}${schoolLabel}${rangeLabel}`;
       const whatsappUrl = buildWhatsAppUrl('', caption);
 
       const webShareResult = await shareImageFileViaWebShare(blob, filename, caption, caption);
@@ -255,6 +321,34 @@ export const ReportsModule: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <select
+            value={selectedSchoolId}
+            disabled={isSingleSchoolRestricted}
+            onChange={(e) => setSelectedSchoolId(e.target.value)}
+            aria-label="تصفية التقارير حسب المدرسة"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C] disabled:bg-slate-100"
+          >
+            {!isSingleSchoolRestricted && (
+              <option value="all">
+                {!isSuperAdmin && restrictedSchoolIds.length > 0
+                  ? 'جميع مدارسي المخصصة (كل دورة حسب مدرستها)'
+                  : 'جميع المدارس (كل دورة حسب مدرستها)'}
+              </option>
+            )}
+            {(data?.schoolBillingRanges || []).map((sb) => (
+              <option key={sb.schoolId} value={String(sb.schoolId)}>
+                {sb.schoolName} ({sb.range.shortLabelAr})
+              </option>
+            ))}
+            {isSingleSchoolRestricted &&
+              !(data?.schoolBillingRanges || []).some(
+                (sb) => String(sb.schoolId) === String(restrictedSchoolIds[0])
+              ) && (
+                <option value={String(restrictedSchoolIds[0])}>
+                  {dbUser?.assignedSchoolNames?.[0] || 'المدرسة المخصصة'}
+                </option>
+              )}
+          </select>
           <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs">
             <span className="text-slate-500">شهر</span>
             <input
@@ -262,7 +356,10 @@ export const ReportsModule: React.FC = () => {
               min={1}
               max={12}
               value={month}
-              onChange={(e) => setMonth(Math.min(12, Math.max(1, Number(e.target.value) || 1)))}
+              onChange={(e) => {
+                initialPeriodSyncedRef.current = true;
+                setMonth(Math.min(12, Math.max(1, Number(e.target.value) || 1)));
+              }}
               className="w-12 font-mono font-semibold text-center focus:outline-none"
             />
           </div>
@@ -273,10 +370,21 @@ export const ReportsModule: React.FC = () => {
               min={2020}
               max={2050}
               value={year}
-              onChange={(e) => setYear(Number(e.target.value) || new Date().getFullYear())}
+              onChange={(e) => {
+                initialPeriodSyncedRef.current = true;
+                setYear(Number(e.target.value) || new Date().getFullYear());
+              }}
               className="w-16 font-mono font-semibold text-center focus:outline-none"
             />
           </div>
+          <button
+            type="button"
+            onClick={handleAutoTodayPeriod}
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-[#C89B3C]" />
+            الفترة التلقائية لليوم
+          </button>
           <button
             onClick={handleExportExcel}
             className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 cursor-pointer"
@@ -396,15 +504,33 @@ export const ReportsModule: React.FC = () => {
       )}
 
       <div ref={reportCaptureRef} dir="rtl" className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+        <div className="px-6 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="font-display text-base font-bold text-[#0B1F3A]">
               الوليد ترافيل — {reportTabs.find((r) => r.id === reportType)?.label}
+              {data?.period?.schoolName ? ` (${data.period.schoolName})` : ''}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
               الفترة: شهر {month} / {year}
+              {data?.period?.labelAr ? ` · ${data.period.labelAr}` : ''}
             </p>
           </div>
+          {selectedSchoolId === 'all' && Boolean(data?.schoolBillingRanges?.length) && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {data?.schoolBillingRanges?.map((sb) => (
+                <span
+                  key={sb.schoolId}
+                  className={`rounded-md px-2 py-0.5 text-[10px] font-bold ${
+                    sb.range.cycleType === 'shifted'
+                      ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                      : 'bg-slate-100 text-slate-700 border border-slate-200'
+                  }`}
+                >
+                  {sb.schoolName}: {sb.range.shortLabelAr}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         {loading || !data ? (
@@ -449,6 +575,49 @@ export const ReportsModule: React.FC = () => {
                       </tr>
                     );
                   })}
+                </tbody>
+              </table>
+            )}
+
+            {reportType === 'supervisors' && (
+              <table className="w-full text-right text-xs">
+                <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                  <tr>
+                    <th className="py-3 px-4">الكود</th>
+                    <th className="py-3 px-4">المشرفة</th>
+                    <th className="py-3 px-4">المدرسة</th>
+                    <th className="py-3 px-4">نطاق الدورة</th>
+                    <th className="py-3 px-4">صباحاً</th>
+                    <th className="py-3 px-4">مساءً</th>
+                    <th className="py-3 px-4">أيام مكتملة</th>
+                    <th className="py-3 px-4">الراتب الشهري</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(data.supervisors || []).length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="py-8 text-center text-slate-400">
+                        لا توجد مشرفات مسجلات في هذا النطاق
+                      </td>
+                    </tr>
+                  ) : (
+                    (data.supervisors || []).map((sv) => (
+                      <tr key={sv.supervisorId}>
+                        <td className="py-3 px-4 font-mono font-bold">{sv.supervisorCode}</td>
+                        <td className="py-3 px-4 font-semibold">{sv.fullName}</td>
+                        <td className="py-3 px-4">{sv.schoolName}</td>
+                        <td className="py-3 px-4 font-mono tabular-nums">
+                          {sv.billingRange.startDate} ← {sv.billingRange.endDate}
+                        </td>
+                        <td className="py-3 px-4 font-mono tabular-nums">{sv.morningTripsCount}</td>
+                        <td className="py-3 px-4 font-mono tabular-nums">{sv.eveningTripsCount}</td>
+                        <td className="py-3 px-4 font-mono tabular-nums">{sv.completedDaysCount}</td>
+                        <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                          {formatEGP(sv.monthlySalary)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             )}

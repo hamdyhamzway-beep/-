@@ -70,7 +70,7 @@ export const SignInScreen: React.FC = () => {
     const trimmedId = staffIdentifier.trim();
     const trimmedCode = staffCode.trim();
     if (!trimmedId || !trimmedCode) {
-      setLocalError('يرجى إدخال الاسم أو الموبايل أو البريد الإلكتروني مع كود الموظف');
+      setLocalError('يرجى إدخال رقم الموبايل (أو الاسم) مع كود الدخول الخاص بك');
       return;
     }
     setSubmitting(true);
@@ -194,12 +194,14 @@ export const SignInScreen: React.FC = () => {
                     {activeTab === 'supervisor'
                       ? 'دخول المشرفات - الوليد ترافيل'
                       : activeTab === 'admin'
-                      ? 'بوابة الإدارة - الوليد ترافيل'
+                      ? 'دخول الموظفين والإدارة - الوليد ترافيل'
                       : 'تسجيل دخول السائقين - الوليد ترافيل'}
                   </h2>
                   <p className="text-[11px] text-[#ebd089] mt-0.5 leading-relaxed">
                     {activeTab === 'supervisor'
                       ? 'متابعة خط السير والموقع المباشر للباص بكل أمان.'
+                      : activeTab === 'admin'
+                      ? 'للمحاسبين ومشرفي الحركة والموظفين برقم الموبايل وكود الدخول.'
                       : 'شريكنا في النجاح.. طريقك آمن، وحساباتك منظمة بين إيديك.'}
                   </p>
                 </div>
@@ -210,7 +212,7 @@ export const SignInScreen: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleTabSwitch('driver')}
-                  className={`min-h-[40px] rounded-lg py-2 px-2 text-xs font-bold transition-colors cursor-pointer ${
+                  className={`min-h-[44px] rounded-lg py-2 px-2 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                     activeTab === 'driver'
                       ? 'bg-[#C89B3C] text-[#0B1F3A]'
                       : 'text-slate-200 hover:text-white'
@@ -221,7 +223,7 @@ export const SignInScreen: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleTabSwitch('supervisor')}
-                  className={`min-h-[40px] rounded-lg py-2 px-2 text-xs font-bold transition-colors cursor-pointer ${
+                  className={`min-h-[44px] rounded-lg py-2 px-2 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                     activeTab === 'supervisor'
                       ? 'bg-[#C89B3C] text-[#0B1F3A]'
                       : 'text-slate-200 hover:text-white'
@@ -232,13 +234,13 @@ export const SignInScreen: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => handleTabSwitch('admin')}
-                  className={`min-h-[40px] rounded-lg py-2 px-2 text-xs font-bold transition-colors cursor-pointer ${
+                  className={`min-h-[44px] rounded-lg py-2 px-2 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
                     activeTab === 'admin'
                       ? 'bg-[#C89B3C] text-[#0B1F3A]'
                       : 'text-slate-200 hover:text-white'
                   }`}
                 >
-                  الإدارة
+                  الموظفين والإدارة
                 </button>
               </div>
 
@@ -266,6 +268,7 @@ export const SignInScreen: React.FC = () => {
                       <User className="w-4 h-4 text-slate-400 absolute right-3 top-3 pointer-events-none" />
                       <input
                         type="text"
+                        inputMode="tel"
                         autoComplete="username"
                         required
                         dir="auto"
@@ -276,17 +279,17 @@ export const SignInScreen: React.FC = () => {
                             ? '01012345678 أو أ. منى'
                             : '01012345678 أو أحمد محمد'
                         }
-                        className="w-full rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2.5 text-sm text-white placeholder:text-slate-400 focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none"
+                        className="w-full min-h-[44px] rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2.5 text-sm text-white placeholder:text-slate-400 focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none tabular-nums"
                       />
                     </div>
                   </div>
 
                   <div>
                     <label className="block text-xs font-semibold text-slate-200 mb-1.5">
-                      {activeTab === 'supervisor' ? 'كود المشرفة' : 'كود السائق'}
+                      {activeTab === 'supervisor' ? 'كود المشرفة (PIN)' : 'كود السائق (PIN)'}
                     </label>
                     <div className="relative">
-                      <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-3 pointer-events-none" />
+                      <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-3.5 pointer-events-none" />
                       <input
                         type="text"
                         autoComplete="off"
@@ -296,7 +299,7 @@ export const SignInScreen: React.FC = () => {
                         value={accessCode}
                         onChange={(e) => setAccessCode(e.target.value)}
                         placeholder={activeTab === 'supervisor' ? 'SUP-101' : '1025'}
-                        className="w-full rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2.5 text-sm font-mono text-white placeholder:text-slate-400 text-right focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none"
+                        className="w-full min-h-[44px] rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2.5 text-sm font-mono tabular-nums text-white placeholder:text-slate-400 text-right focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none"
                       />
                     </div>
                   </div>
@@ -304,7 +307,7 @@ export const SignInScreen: React.FC = () => {
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#C89B3C] px-5 py-3 text-sm font-bold text-[#0B1F3A] hover:bg-[#d6aa4c] disabled:opacity-60 transition-colors cursor-pointer"
+                    className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#C89B3C] px-5 py-3 text-sm font-bold text-[#0B1F3A] hover:bg-[#d6aa4c] disabled:opacity-60 transition-colors cursor-pointer whitespace-nowrap"
                   >
                     {submitting ? (
                       <>
@@ -325,59 +328,38 @@ export const SignInScreen: React.FC = () => {
                 </form>
               ) : (
                 <div className="mt-5 space-y-5">
-                  <div>
+                  <form onSubmit={handleStaffCodeSubmit} className="space-y-3.5">
                     <p className="text-xs text-slate-300 leading-relaxed">
-                      دخول المدير العام أو الموظفين المرتبطين بحساب Google:
+                      سجّل دخولك برقم الموبايل وكود الدخول (PIN) وسيقوم النظام بتوجيهك تلقائياً
+                      لشاشات صلاحيتك ومدرستك (محاسب · مشرف حركة · موظف).
                     </p>
 
-                    <button
-                      type="button"
-                      onClick={loginWithGoogle}
-                      className="mt-3 w-full flex items-center justify-center gap-3 rounded-xl bg-[#C89B3C] px-5 py-3 text-sm font-bold text-[#0B1F3A] hover:bg-[#d6aa4c] transition-colors cursor-pointer"
-                    >
-                      <svg className="w-5 h-5" viewBox="0 0 24 24">
-                        <path
-                          fill="currentColor"
-                          d="M21.35 11.1h-9.17v2.73h6.51c-.33 3.81-3.5 5.44-6.5 5.44C8.36 19.27 5 16.25 5 12c0-4.1 3.2-7.27 7.2-7.27c3.09 0 4.9 1.97 4.9 1.97L19 4.72S16.56 2 12.1 2C6.42 2 2.03 6.8 2.03 12c0 5.05 4.13 10 10.22 10c5.35 0 9.25-3.67 9.25-9.09c0-1.15-.15-1.81-.15-1.81Z"
-                        />
-                      </svg>
-                      الدخول باستخدام حساب Google
-                    </button>
-                  </div>
-
-                  <div className="relative flex items-center py-1">
-                    <div className="flex-grow border-t border-white/15" />
-                    <span className="mx-3 shrink text-[11px] font-semibold text-[#ebd089]">
-                      أو دخول المحاسب / مشرف الحركة بالكود
-                    </span>
-                    <div className="flex-grow border-t border-white/15" />
-                  </div>
-
-                  <form onSubmit={handleStaffCodeSubmit} className="space-y-3">
                     <div>
-                      <label className="block text-xs font-semibold text-slate-200 mb-1">
-                        الاسم أو الموبايل أو البريد الإلكتروني
+                      <label className="block text-xs font-semibold text-slate-200 mb-1.5">
+                        رقم الموبايل (أو الاسم / البريد)
                       </label>
                       <div className="relative">
-                        <User className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
+                        <User className="w-4 h-4 text-slate-400 absolute right-3 top-3.5 pointer-events-none" />
                         <input
                           type="text"
+                          inputMode="tel"
+                          autoComplete="username"
                           required
                           dir="auto"
                           value={staffIdentifier}
                           onChange={(e) => setStaffIdentifier(e.target.value)}
                           placeholder="01012345678 أو اسم الموظف"
-                          className="w-full rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2 text-sm text-white placeholder:text-slate-400 focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none"
+                          className="w-full min-h-[44px] rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2.5 text-sm text-white placeholder:text-slate-400 focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none tabular-nums"
                         />
                       </div>
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold text-slate-200 mb-1">
-                        كود الموظف (من المدير العام)
+                      <label className="block text-xs font-semibold text-slate-200 mb-1.5">
+                        كود الدخول (PIN / Code)
                       </label>
                       <div className="relative">
-                        <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-2.5 pointer-events-none" />
+                        <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-3.5 pointer-events-none" />
                         <input
                           type="text"
                           autoComplete="off"
@@ -387,7 +369,7 @@ export const SignInScreen: React.FC = () => {
                           value={staffCode}
                           onChange={(e) => setStaffCode(e.target.value)}
                           placeholder="STF-101"
-                          className="w-full rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2 text-sm font-mono text-white placeholder:text-slate-400 text-right focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none"
+                          className="w-full min-h-[44px] rounded-xl bg-white/10 border border-white/20 pr-10 pl-3 py-2.5 text-sm font-mono tabular-nums text-white placeholder:text-slate-400 text-right focus:border-[#C89B3C] focus:bg-white/15 focus:outline-none"
                         />
                       </div>
                     </div>
@@ -395,18 +377,44 @@ export const SignInScreen: React.FC = () => {
                     <button
                       type="submit"
                       disabled={submitting}
-                      className="w-full min-h-[42px] flex items-center justify-center gap-2 rounded-xl border border-[#C89B3C]/60 bg-white/10 hover:bg-white/15 px-4 py-2.5 text-xs font-bold text-[#ebd089] disabled:opacity-60 transition-colors cursor-pointer"
+                      className="w-full min-h-[46px] flex items-center justify-center gap-2 rounded-xl bg-[#C89B3C] px-5 py-3 text-sm font-bold text-[#0B1F3A] hover:bg-[#d6aa4c] disabled:opacity-60 transition-colors cursor-pointer whitespace-nowrap"
                     >
                       {submitting ? (
                         <>
                           <Loader2 className="w-4 h-4 animate-spin" />
-                          جاري التحقق...
+                          جاري التحقق من الصلاحيات...
                         </>
                       ) : (
-                        'دخول المحاسب / مشرف الحركة بالكود'
+                        'دخول برقم الموبايل والكود'
                       )}
                     </button>
+
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      يتم حفظ الجلسة تلقائياً على جهازك وتوجيهك لشاشتك فور تسجيل الدخول.
+                    </p>
                   </form>
+
+                  <div className="relative flex items-center py-0.5">
+                    <div className="flex-grow border-t border-white/15" />
+                    <span className="mx-3 shrink text-[11px] font-semibold text-[#ebd089]">
+                      أو الدخول بحساب Google — للمدير العام
+                    </span>
+                    <div className="flex-grow border-t border-white/15" />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={loginWithGoogle}
+                    className="w-full min-h-[44px] flex items-center justify-center gap-2.5 rounded-xl border border-white/25 bg-white/10 hover:bg-white/15 px-4 py-2.5 text-xs font-bold text-white transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24">
+                      <path
+                        fill="currentColor"
+                        d="M21.35 11.1h-9.17v2.73h6.51c-.33 3.81-3.5 5.44-6.5 5.44C8.36 19.27 5 16.25 5 12c0-4.1 3.2-7.27 7.2-7.27c3.09 0 4.9 1.97 4.9 1.97L19 4.72S16.56 2 12.1 2C6.42 2 2.03 6.8 2.03 12c0 5.05 4.13 10 10.22 10c5.35 0 9.25-3.67 9.25-9.09c0-1.15-.15-1.81-.15-1.81Z"
+                      />
+                    </svg>
+                    الدخول بحساب Google (الإدارة العليا)
+                  </button>
                 </div>
               )}
             </div>
