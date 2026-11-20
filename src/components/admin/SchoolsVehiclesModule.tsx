@@ -833,8 +833,15 @@ export const SchoolsVehiclesModule: React.FC = () => {
                                 <td className="py-3 px-4 font-mono font-semibold text-slate-900 tabular-nums">
                                   {formatEGP(drv.baseSalary)}
                                 </td>
-                                <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                                  {formatEGP(drv.totalAdvances + drv.totalCoverageDeductions)}
+                                <td className="py-3 px-4 font-mono tabular-nums">
+                                  <div className="text-red-700">
+                                    {formatEGP(drv.totalAdvances + drv.totalCoverageDeductions)}
+                                  </div>
+                                  {Number(drv.totalCoverageAdditions || 0) > 0 && (
+                                    <div className="text-[11px] font-semibold text-emerald-700">
+                                      +{formatEGP(drv.totalCoverageAdditions || 0)} بديل
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="py-3 px-4 font-mono tabular-nums">
                                   <span className="text-emerald-700">+{formatEGP(drv.bonuses)}</span>

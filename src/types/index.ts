@@ -70,6 +70,7 @@ export interface SchoolDriverSalarySummary {
   baseSalary: number;
   totalAdvances: number;
   totalCoverageDeductions: number;
+  totalCoverageAdditions?: number;
   otherDeductions: number;
   bonuses: number;
   netSalary: number;
@@ -158,6 +159,7 @@ export interface SalaryRecord {
   baseSalary: number;
   totalAdvances: number;
   totalCoverageDeductions: number;
+  totalCoverageAdditions?: number;
   otherDeductions: number;
   bonuses: number;
   netSalary: number;
@@ -181,6 +183,7 @@ export interface SchoolFinanceContract {
   totalBaseSalaries: number;
   totalAdvances: number;
   totalCoverageDeductions: number;
+  totalCoverageAdditions?: number;
   totalOtherDeductions: number;
   totalBonuses: number;
   totalNetSalaries: number;
@@ -217,6 +220,8 @@ export interface CoverageRecord {
   vehicleId: number | null;
   schoolId: number | null;
   date: string;
+  coverageAmount?: number;
+  coverageRole?: 'absent' | 'replacement';
   actualReplacementCost: number;
   absentDriverDeduction: number;
   reason: string;
@@ -483,8 +488,10 @@ export interface FinanceGrandTotals {
   totalSchoolContracts: number;
   totalDriverBaseSalaries: number;
   totalDriverAdvances: number;
+  totalCoverageAmount?: number;
   totalCoverageReplacementCost: number;
   totalCoverageDriverDeductions: number;
+  totalCoverageAdditions?: number;
   totalOtherDeductions: number;
   totalBonuses: number;
   totalDriverNetSalaries: number;

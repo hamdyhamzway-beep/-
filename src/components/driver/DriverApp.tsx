@@ -1568,9 +1568,15 @@ export const DriverApp: React.FC<{
                       </p>
                     </div>
                     <div className="p-4">
-                      <p className="text-xs text-red-700">خصم تغطية الغياب (-)</p>
+                      <p className="text-xs text-red-700">خصم التغطيات (-)</p>
                       <p className="text-base font-bold text-red-700 tabular-nums mt-1">
                         {formatEGP(salary?.totalCoverageDeductions || 0)}
+                      </p>
+                    </div>
+                    <div className="p-4">
+                      <p className="text-xs text-emerald-800">مستحق التغطيات (+)</p>
+                      <p className="text-base font-bold text-emerald-700 tabular-nums mt-1">
+                        {formatEGP(salary?.totalCoverageAdditions || 0)}
                       </p>
                     </div>
                     <div className="p-4">
@@ -1585,7 +1591,7 @@ export const DriverApp: React.FC<{
                         {formatEGP(salary?.bonuses || 0)}
                       </p>
                     </div>
-                    <div className="p-4 bg-[#0B1F3A] text-white">
+                    <div className="p-4 bg-[#0B1F3A] text-white col-span-2 sm:col-span-3">
                       <p className="text-xs text-slate-300">صافي الراتب المستحق</p>
                       <p className="text-base font-bold text-[#C89B3C] tabular-nums mt-1">
                         {formatEGP(salary?.netSalary || 0)}
@@ -1627,35 +1633,48 @@ export const DriverApp: React.FC<{
                   )}
                 </section>
 
-                {/* Coverage Deductions List */}
+                {/* Coverages List (Absent Deductions & Replacement Credits) */}
                 <section className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
                   <h2 className="font-display text-base font-bold text-[#0B1F3A]">
-                    خصومات تغطية الغياب ({(data.coverages || []).length})
+                    سجل التغطيات ({(data.coverages || []).length})
                   </h2>
                   {(data.coverages || []).length === 0 ? (
-                    <p className="text-xs text-slate-500">لا توجد خصومات تغطية في هذا الشهر.</p>
+                    <p className="text-xs text-slate-500">لا توجد تغطيات مسجلة في هذا الشهر.</p>
                   ) : (
                     <div className="divide-y divide-slate-100">
-                      {(data.coverages || []).map((c) => (
-                        <div key={c.id} className="py-3 flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-semibold text-[#0B1F3A]">
-                              {c.reason}{' '}
-                              {c.isReversed && (
-                                <span className="text-xs text-slate-400">(تم عكس القيد)</span>
-                              )}
-                            </p>
-                            <p className="text-xs text-slate-500 font-mono mt-0.5">{c.date}</p>
+                      {(data.coverages || []).map((c) => {
+                        const isReplacement = c.coverageRole === 'replacement';
+                        const covVal = Number(
+                          c.coverageAmount ?? c.absentDriverDeduction ?? c.actualReplacementCost ?? 0
+                        );
+                        return (
+                          <div key={c.id} className="py-3 flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-[#0B1F3A]">
+                                {isReplacement
+                                  ? `تغطية عن: ${c.absentDriverName || '—'}`
+                                  : `البديل: ${c.replacementDriverName || c.replacementExternalName || '—'}`}
+                                {c.reason ? ` · ${c.reason}` : ''}{' '}
+                                {c.isReversed && (
+                                  <span className="text-xs text-slate-400">(تم عكس القيد)</span>
+                                )}
+                              </p>
+                              <p className="text-xs text-slate-500 font-mono mt-0.5">{c.date}</p>
+                            </div>
+                            <span
+                              className={`text-sm font-bold tabular-nums ${
+                                c.isReversed
+                                  ? 'line-through text-slate-400'
+                                  : isReplacement
+                                  ? 'text-emerald-700'
+                                  : 'text-red-700'
+                              }`}
+                            >
+                              {isReplacement ? '+' : '−'} {formatEGP(covVal)}
+                            </span>
                           </div>
-                          <span
-                            className={`text-sm font-bold tabular-nums ${
-                              c.isReversed ? 'line-through text-slate-400' : 'text-red-700'
-                            }`}
-                          >
-                            {formatEGP(c.absentDriverDeduction)}
-                          </span>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </section>

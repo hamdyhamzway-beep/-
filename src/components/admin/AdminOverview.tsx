@@ -181,8 +181,7 @@ export const AdminOverview: React.FC<{
   const [covForm, setCovForm] = useState({
     replacementQuery: '',
     date: today,
-    actualReplacementCost: '',
-    absentDriverDeduction: '',
+    coverageAmount: '',
     reason: '',
     notes: '',
   });
@@ -210,8 +209,7 @@ export const AdminOverview: React.FC<{
   const [editCovForm, setEditCovForm] = useState({
     replacementQuery: '',
     date: '',
-    actualReplacementCost: '',
-    absentDriverDeduction: '',
+    coverageAmount: '',
     reason: '',
     notes: '',
   });
@@ -647,8 +645,7 @@ export const AdminOverview: React.FC<{
                 : undefined,
             replacementQuery: covForm.replacementQuery.trim(),
             date: covForm.date,
-            actualReplacementCost: Number(covForm.actualReplacementCost || 0),
-            absentDriverDeduction: Number(covForm.absentDriverDeduction || 0),
+            coverageAmount: Number(covForm.coverageAmount || 0),
             reason: covForm.reason.trim(),
             notes: covForm.notes.trim(),
             idempotencyKey: `dp-cov-${activeDriver.id}-${covForm.date}-${Date.now()}`,
@@ -665,8 +662,7 @@ export const AdminOverview: React.FC<{
       setCovForm((f) => ({
         ...f,
         replacementQuery: '',
-        actualReplacementCost: '',
-        absentDriverDeduction: '',
+        coverageAmount: '',
         reason: '',
         notes: '',
       }));
@@ -695,8 +691,7 @@ export const AdminOverview: React.FC<{
           body: JSON.stringify({
             replacementQuery: editCovForm.replacementQuery.trim(),
             date: editCovForm.date,
-            actualReplacementCost: Number(editCovForm.actualReplacementCost || 0),
-            absentDriverDeduction: Number(editCovForm.absentDriverDeduction || 0),
+            coverageAmount: Number(editCovForm.coverageAmount || 0),
             reason: editCovForm.reason.trim(),
             notes: editCovForm.notes.trim(),
           }),
@@ -1501,7 +1496,7 @@ export const AdminOverview: React.FC<{
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                       <div className="text-slate-500">الراتب الأساسي</div>
                       <div className="mt-1 font-mono text-base font-bold text-[#0B1F3A] tabular-nums">
@@ -1518,6 +1513,12 @@ export const AdminOverview: React.FC<{
                       <div className="text-slate-600">خصم التغطيات</div>
                       <div className="mt-1 font-mono text-base font-bold text-red-700 tabular-nums">
                         − {formatEGP(statement.salary.totalCoverageDeductions)}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-emerald-50/70 p-3">
+                      <div className="text-slate-600">مستحق التغطيات</div>
+                      <div className="mt-1 font-mono text-base font-bold text-emerald-700 tabular-nums">
+                        + {formatEGP(statement.salary.totalCoverageAdditions || 0)}
                       </div>
                     </div>
                     <div className="rounded-xl border border-slate-200 bg-red-50/70 p-3">
@@ -1830,39 +1831,24 @@ export const AdminOverview: React.FC<{
                         className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block font-semibold text-slate-700 mb-1">
-                          تكلفة البديل (ج.م)
-                        </label>
-                        <input
-                          type="number"
-                          required
-                          min={0}
-                          value={covForm.actualReplacementCost}
-                          onChange={(e) =>
-                            setCovForm({ ...covForm, actualReplacementCost: e.target.value })
-                          }
-                          placeholder="0"
-                          className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-semibold text-slate-700 mb-1">
-                          الخصم من السائق (ج.م)
-                        </label>
-                        <input
-                          type="number"
-                          required
-                          min={0}
-                          value={covForm.absentDriverDeduction}
-                          onChange={(e) =>
-                            setCovForm({ ...covForm, absentDriverDeduction: e.target.value })
-                          }
-                          placeholder="0"
-                          className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                        />
-                      </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        مبلغ التغطية (ج.م) *
+                      </label>
+                      <input
+                        type="number"
+                        required
+                        min={0}
+                        value={covForm.coverageAmount}
+                        onChange={(e) =>
+                          setCovForm({ ...covForm, coverageAmount: e.target.value })
+                        }
+                        placeholder="0"
+                        className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                      />
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        يُخصم من السائق الأساسي ويُضاف تلقائياً للسائق البديل
+                      </p>
                     </div>
                     <div>
                       <label className="block font-semibold text-slate-700 mb-1">السبب</label>
@@ -1898,55 +1884,68 @@ export const AdminOverview: React.FC<{
                             لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
                           </div>
                         ) : (
-                          statement.coverages.map((c) => (
-                            <div key={c.id} className={`p-4 space-y-2 text-xs ${c.isReversed ? 'opacity-60' : ''}`}>
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-mono text-slate-500">{c.date}</span>
-                                <span className={`font-mono font-bold text-red-700 ${c.isReversed ? 'line-through' : ''}`}>
-                                  خصم: {formatEGP(c.absentDriverDeduction)}
-                                </span>
-                              </div>
-                              <div className="font-semibold text-slate-800">
-                                البديل: {c.replacementDriverName || c.replacementExternalName || '—'} · تكلفة {formatEGP(c.actualReplacementCost)}
-                              </div>
-                              {c.reason && <div className="text-slate-500">{c.reason}</div>}
-                              {canCoverageWrite && (
-                                <div className="flex items-center gap-2 pt-1">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingCoverage(c);
-                                      setEditCovForm({
-                                        replacementQuery:
-                                          c.replacementDriverId &&
-                                          c.replacementDriverName &&
-                                          c.replacementDriverName !== '—'
-                                            ? c.replacementDriverName
-                                            : c.replacementExternalName || '',
-                                        date: c.date,
-                                        actualReplacementCost: String(c.actualReplacementCost ?? 0),
-                                        absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
-                                        reason: c.reason || '',
-                                        notes: c.notes || '',
-                                      });
-                                    }}
-                                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                          statement.coverages.map((c) => {
+                            const amt =
+                              c.coverageAmount ??
+                              c.absentDriverDeduction ??
+                              c.actualReplacementCost ??
+                              0;
+                            const isReplacement = c.coverageRole === 'replacement';
+                            return (
+                              <div key={c.id} className={`p-4 space-y-2 text-xs ${c.isReversed ? 'opacity-60' : ''}`}>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-mono text-slate-500">{c.date}</span>
+                                  <span
+                                    className={`font-mono font-bold ${
+                                      isReplacement ? 'text-emerald-700' : 'text-red-700'
+                                    } ${c.isReversed ? 'line-through' : ''}`}
                                   >
-                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                    تعديل
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setDeletingCoverage(c)}
-                                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                    حذف
-                                  </button>
+                                    {isReplacement ? `+ ${formatEGP(amt)} (مستحق)` : `− ${formatEGP(amt)} (خصم)`}
+                                  </span>
                                 </div>
-                              )}
-                            </div>
-                          ))
+                                <div className="font-semibold text-slate-800">
+                                  {isReplacement
+                                    ? `تغطية عن السائق: ${c.absentDriverName || '—'}`
+                                    : `البديل: ${c.replacementDriverName || c.replacementExternalName || '—'}`}
+                                </div>
+                                {c.reason && <div className="text-slate-500">{c.reason}</div>}
+                                {canCoverageWrite && !isReplacement && (
+                                  <div className="flex items-center gap-2 pt-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCoverage(c);
+                                        setEditCovForm({
+                                          replacementQuery:
+                                            c.replacementDriverId &&
+                                            c.replacementDriverName &&
+                                            c.replacementDriverName !== '—'
+                                              ? c.replacementDriverName
+                                              : c.replacementExternalName || '',
+                                          date: c.date,
+                                          coverageAmount: String(amt),
+                                          reason: c.reason || '',
+                                          notes: c.notes || '',
+                                        });
+                                      }}
+                                      className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white cursor-pointer"
+                                    >
+                                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                      تعديل
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeletingCoverage(c)}
+                                      className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-700 cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      حذف
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })
                         )}
                       </div>
                       <div className="hidden md:block overflow-x-auto">
@@ -1954,82 +1953,89 @@ export const AdminOverview: React.FC<{
                           <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
                             <tr>
                               <th className="py-3 px-4">التاريخ</th>
-                              <th className="py-3 px-4">البديل والسبب</th>
-                              <th className="py-3 px-4">تكلفة البديل</th>
-                              <th className="py-3 px-4">خصم السائق</th>
+                              <th className="py-3 px-4">الطرف الآخر والسبب</th>
+                              <th className="py-3 px-4">التغطيات (مخصومة من الأساسي)</th>
                               {canCoverageWrite && <th className="py-3 px-4">تعديل / حذف</th>}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
                             {statement.coverages.length === 0 ? (
                               <tr>
-                                <td colSpan={canCoverageWrite ? 5 : 4} className="py-8 text-center text-slate-400">
+                                <td colSpan={canCoverageWrite ? 4 : 3} className="py-8 text-center text-slate-400">
                                   لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
                                 </td>
                               </tr>
                             ) : (
-                              statement.coverages.map((c) => (
-                                <tr key={c.id} className={c.isReversed ? 'opacity-60' : ''}>
-                                  <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
-                                  <td className="py-3 px-4">
-                                    <div className="font-semibold text-slate-800">
-                                      {c.replacementDriverName || c.replacementExternalName || '—'}
-                                    </div>
-                                    <div className="text-slate-400">{c.reason || '—'}</div>
-                                  </td>
-                                  <td className="py-3 px-4 font-mono tabular-nums">
-                                    {formatEGP(c.actualReplacementCost)}
-                                  </td>
-                                  <td
-                                    className={`py-3 px-4 font-mono font-bold text-red-700 tabular-nums ${
-                                      c.isReversed ? 'line-through' : ''
-                                    }`}
-                                  >
-                                    {formatEGP(c.absentDriverDeduction)}
-                                  </td>
-                                  {canCoverageWrite && (
+                              statement.coverages.map((c) => {
+                                const amt =
+                                  c.coverageAmount ??
+                                  c.absentDriverDeduction ??
+                                  c.actualReplacementCost ??
+                                  0;
+                                const isReplacement = c.coverageRole === 'replacement';
+                                return (
+                                  <tr key={c.id} className={c.isReversed ? 'opacity-60' : ''}>
+                                    <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
                                     <td className="py-3 px-4">
-                                      <div className="flex items-center gap-1.5">
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setEditingCoverage(c);
-                                            setEditCovForm({
-                                              replacementQuery:
-                                                c.replacementDriverId &&
-                                                c.replacementDriverName &&
-                                                c.replacementDriverName !== '—'
-                                                  ? c.replacementDriverName
-                                                  : c.replacementExternalName || '',
-                                              date: c.date,
-                                              actualReplacementCost: String(
-                                                c.actualReplacementCost ?? 0
-                                              ),
-                                              absentDriverDeduction: String(
-                                                c.absentDriverDeduction ?? 0
-                                              ),
-                                              reason: c.reason || '',
-                                              notes: c.notes || '',
-                                            });
-                                          }}
-                                          className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                                        >
-                                          <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                          تعديل
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => setDeletingCoverage(c)}
-                                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                                        >
-                                          <Trash2 className="w-3 h-3" />
-                                          حذف
-                                        </button>
+                                      <div className="font-semibold text-slate-800">
+                                        {isReplacement
+                                          ? `تغطية بديلة عن: ${c.absentDriverName || '—'}`
+                                          : `البديل: ${c.replacementDriverName || c.replacementExternalName || '—'}`}
                                       </div>
+                                      <div className="text-slate-400">{c.reason || '—'}</div>
                                     </td>
-                                  )}
-                                </tr>
-                              ))
+                                    <td
+                                      className={`py-3 px-4 font-mono font-bold tabular-nums ${
+                                        isReplacement ? 'text-emerald-700' : 'text-red-700'
+                                      } ${c.isReversed ? 'line-through' : ''}`}
+                                    >
+                                      {isReplacement ? `+ ${formatEGP(amt)} (مستحق)` : `− ${formatEGP(amt)} (خصم)`}
+                                    </td>
+                                    {canCoverageWrite && (
+                                      <td className="py-3 px-4">
+                                        {!isReplacement ? (
+                                          <div className="flex items-center gap-1.5">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setEditingCoverage(c);
+                                                setEditCovForm({
+                                                  replacementQuery:
+                                                    c.replacementDriverId &&
+                                                    c.replacementDriverName &&
+                                                    c.replacementDriverName !== '—'
+                                                      ? c.replacementDriverName
+                                                      : c.replacementExternalName || '',
+                                                  date: c.date,
+                                                  coverageAmount: String(amt),
+                                                  reason: c.reason || '',
+                                                  notes: c.notes || '',
+                                                });
+                                              }}
+                                              className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                                            >
+                                              <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                              تعديل
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setDeletingCoverage(c)}
+                                              className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                                            >
+                                              <Trash2 className="w-3 h-3" />
+                                              حذف
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <span className="text-[11px] text-slate-400">
+                                            من ملف الغائب
+                                          </span>
+                                        )}
+                                      </td>
+                                    )}
+                                  </tr>
+                                );
+                              })
                             )}
                           </tbody>
                         </table>
@@ -2148,11 +2154,15 @@ export const AdminOverview: React.FC<{
                                       {t.type === 'advance'
                                         ? 'سلفة'
                                         : t.type === 'coverage_deduction'
-                                        ? 'خصم تغطية'
+                                        ? 'خصم تغطية (من الأساسي)'
+                                        : t.type === 'coverage_credit'
+                                        ? 'مستحق تغطية (للبديل)'
                                         : t.type === 'bonus'
                                         ? 'مكافأة'
                                         : t.type === 'other_deduction'
                                         ? 'خصم إداري'
+                                        : t.type === 'reversal'
+                                        ? 'عكس قيد'
                                         : t.type}
                                     </td>
                                     <td className="py-3 px-4">{t.description}</td>
@@ -2699,8 +2709,16 @@ export const AdminOverview: React.FC<{
                             </td>
                           )}
                           {(canFinanceRead || canCoverageWrite) && (
-                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                              {formatEGP(sal?.totalCoverageDeductions ?? 0)}
+                            <td className="py-3 px-4 font-mono tabular-nums">
+                              <div className="text-red-700">
+                                {Number(sal?.totalCoverageDeductions ?? 0) > 0 ? '− ' : ''}
+                                {formatEGP(sal?.totalCoverageDeductions ?? 0)}
+                              </div>
+                              {Number(sal?.totalCoverageAdditions ?? 0) > 0 && (
+                                <div className="text-[11px] font-semibold text-emerald-700">
+                                  + {formatEGP(sal?.totalCoverageAdditions ?? 0)} بديل
+                                </div>
+                              )}
                             </td>
                           )}
                           {canFinanceRead && (
@@ -3121,37 +3139,23 @@ export const AdminOverview: React.FC<{
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    تكلفة البديل (ج.م)
-                  </label>
-                  <input
-                    type="number"
-                    required
-                    min={0}
-                    value={editCovForm.actualReplacementCost}
-                    onChange={(e) =>
-                      setEditCovForm({ ...editCovForm, actualReplacementCost: e.target.value })
-                    }
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    خصم السائق (ج.م)
-                  </label>
-                  <input
-                    type="number"
-                    required
-                    min={0}
-                    value={editCovForm.absentDriverDeduction}
-                    onChange={(e) =>
-                      setEditCovForm({ ...editCovForm, absentDriverDeduction: e.target.value })
-                    }
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                  />
-                </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  مبلغ التغطية (ج.م) *
+                </label>
+                <input
+                  type="number"
+                  required
+                  min={0}
+                  value={editCovForm.coverageAmount}
+                  onChange={(e) =>
+                    setEditCovForm({ ...editCovForm, coverageAmount: e.target.value })
+                  }
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  يُخصم من السائق الأساسي ويُضاف للسائق البديل بنفس القيمة
+                </p>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">السبب</label>
@@ -3189,9 +3193,14 @@ export const AdminOverview: React.FC<{
             <h3 className="font-bold text-sm text-[#0B1F3A]">تأكيد حذف التغطية</h3>
             <p className="text-slate-600">
               هل تريد حذف سجل التغطية بتاريخ{' '}
-              <strong className="font-mono">{deletingCoverage.date}</strong> (خصم{' '}
+              <strong className="font-mono">{deletingCoverage.date}</strong> (بقيمة{' '}
               <strong className="font-mono">
-                {formatEGP(deletingCoverage.absentDriverDeduction)}
+                {formatEGP(
+                  deletingCoverage.coverageAmount ??
+                    deletingCoverage.absentDriverDeduction ??
+                    deletingCoverage.actualReplacementCost ??
+                    0
+                )}
               </strong>
               )؟
             </p>

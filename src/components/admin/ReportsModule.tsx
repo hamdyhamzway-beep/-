@@ -157,7 +157,18 @@ export const ReportsModule: React.FC = () => {
     if (reportType === 'salaries' || reportType === 'statements') {
       exportRowsToExcel(
         `alwaleed-salaries-${year}-${month}`,
-        ['كود السائق', 'الاسم', 'المدرسة', 'الأساسي', 'السلف', 'التغطية', 'خصومات أخرى', 'المكافآت', 'الصافي'],
+        [
+          'كود السائق',
+          'الاسم',
+          'المدرسة',
+          'الأساسي',
+          'السلف',
+          'خصم التغطيات (-)',
+          'مستحق التغطيات (+)',
+          'خصومات أخرى',
+          'المكافآت',
+          'الصافي',
+        ],
         data.salaries.map((s) => {
           const d = driverById[s.driverId];
           return [
@@ -167,6 +178,7 @@ export const ReportsModule: React.FC = () => {
             Number(s.baseSalary),
             Number(s.totalAdvances),
             Number(s.totalCoverageDeductions),
+            Number(s.totalCoverageAdditions || 0),
             Number(s.otherDeductions),
             Number(s.bonuses),
             Number(s.netSalary),
@@ -200,10 +212,26 @@ export const ReportsModule: React.FC = () => {
     } else if (reportType === 'coverage') {
       exportRowsToExcel(
         `alwaleed-coverage-${year}-${month}`,
-        ['التاريخ', 'السائق الغائب', 'تكلفة البديل', 'خصم الغائب', 'السبب'],
+        [
+          'التاريخ',
+          'السائق الأساسي (الغائب)',
+          'السائق البديل (المستفيد)',
+          'التغطيات (مخصومة من الأساسي)',
+          'السبب',
+        ],
         data.coverages.map((c) => {
           const d = driverById[c.absentDriverId];
-          return [c.date, d?.fullName || '', Number(c.actualReplacementCost), Number(c.absentDriverDeduction), c.reason];
+          const rep = c.replacementDriverId ? driverById[c.replacementDriverId] : null;
+          const amt = Number(
+            c.coverageAmount ?? c.absentDriverDeduction ?? c.actualReplacementCost ?? 0
+          );
+          return [
+            c.date,
+            d?.fullName || '',
+            rep?.fullName || c.replacementDriverName || c.replacementExternalName || '—',
+            amt,
+            c.reason,
+          ];
         })
       );
     } else if (reportType === 'schools' || reportType === 'profitability') {
@@ -565,8 +593,16 @@ export const ReportsModule: React.FC = () => {
                         <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
                           {formatEGP(s.totalAdvances)}
                         </td>
-                        <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                          {formatEGP(s.totalCoverageDeductions)}
+                        <td className="py-3 px-4 font-mono tabular-nums">
+                          <div className="text-red-700">
+                            {Number(s.totalCoverageDeductions || 0) > 0 ? '− ' : ''}
+                            {formatEGP(s.totalCoverageDeductions)}
+                          </div>
+                          {Number(s.totalCoverageAdditions || 0) > 0 && (
+                            <div className="text-[11px] font-semibold text-emerald-700">
+                              + {formatEGP(s.totalCoverageAdditions || 0)} بديل
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 font-mono text-emerald-700 tabular-nums">
                           {formatEGP(s.bonuses)}
@@ -663,28 +699,31 @@ export const ReportsModule: React.FC = () => {
                 <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
                   <tr>
                     <th className="py-3 px-4">التاريخ</th>
-                    <th className="py-3 px-4">السائق الغائب</th>
+                    <th className="py-3 px-4">السائق الأساسي (الغائب)</th>
+                    <th className="py-3 px-4">السائق البديل (المستفيد)</th>
                     <th className="py-3 px-4">المدرسة</th>
-                    <th className="py-3 px-4">تكلفة البديل الفعلية</th>
-                    <th className="py-3 px-4">المخصوم من الغائب</th>
+                    <th className="py-3 px-4">التغطيات (مخصومة من الأساسي)</th>
                     <th className="py-3 px-4">السبب</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {data.coverages.map((c) => {
                     const d = driverById[c.absentDriverId];
+                    const rep = c.replacementDriverId ? driverById[c.replacementDriverId] : null;
+                    const amt =
+                      c.coverageAmount ?? c.absentDriverDeduction ?? c.actualReplacementCost ?? 0;
                     return (
                       <tr key={c.id}>
                         <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
                         <td className="py-3 px-4 font-semibold">
                           {d?.fullName} ({d?.driverCode})
                         </td>
-                        <td className="py-3 px-4">{d?.schoolName}</td>
-                        <td className="py-3 px-4 font-mono tabular-nums">
-                          {formatEGP(c.actualReplacementCost)}
+                        <td className="py-3 px-4 text-slate-700 font-medium">
+                          {rep ? `${rep.fullName} (${rep.driverCode})` : c.replacementDriverName || c.replacementExternalName || '—'}
                         </td>
-                        <td className="py-3 px-4 font-mono font-bold text-red-700 tabular-nums">
-                          {formatEGP(c.absentDriverDeduction)}
+                        <td className="py-3 px-4">{d?.schoolName}</td>
+                        <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                          {formatEGP(amt)}
                         </td>
                         <td className="py-3 px-4">{c.reason}</td>
                       </tr>

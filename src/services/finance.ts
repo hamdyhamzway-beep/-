@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import {
   advances,
@@ -171,9 +171,25 @@ export async function recalculateDriverSalary(
       )
     );
 
+  const activeReplacementCoverages = await tx
+    .select()
+    .from(coverageRecords)
+    .where(
+      and(
+        eq(coverageRecords.replacementDriverId, driverId),
+        eq(coverageRecords.isReversed, false),
+        gte(coverageRecords.date, range.startDate),
+        lte(coverageRecords.date, range.endDate)
+      )
+    );
+
   const totalAdvances = activeAdvances.reduce((sum, a) => sum + Number(a.amount || 0), 0);
   const totalCoverageDeductions = activeCoverages.reduce(
-    (sum, c) => sum + Number(c.absentDriverDeduction || 0),
+    (sum, c) => sum + Number(c.absentDriverDeduction || c.actualReplacementCost || 0),
+    0
+  );
+  const totalCoverageAdditions = activeReplacementCoverages.reduce(
+    (sum, c) => sum + Number(c.absentDriverDeduction || c.actualReplacementCost || 0),
     0
   );
 
@@ -197,9 +213,14 @@ export async function recalculateDriverSalary(
     }
   }
 
-  // Net Salary = Base Salary - Advances - Coverage Deductions - Other Deductions + Bonuses
+  // Net Salary = Base Salary - Advances - Coverage Deductions + Coverage Additions - Other Deductions + Bonuses
   const netSalary =
-    baseSalary - totalAdvances - totalCoverageDeductions - otherDeductions + bonuses;
+    baseSalary -
+    totalAdvances -
+    totalCoverageDeductions +
+    totalCoverageAdditions -
+    otherDeductions +
+    bonuses;
 
   const [upserted] = await tx
     .insert(salaries)
@@ -211,6 +232,7 @@ export async function recalculateDriverSalary(
       baseSalary: baseSalary.toFixed(2),
       totalAdvances: totalAdvances.toFixed(2),
       totalCoverageDeductions: totalCoverageDeductions.toFixed(2),
+      totalCoverageAdditions: totalCoverageAdditions.toFixed(2),
       otherDeductions: otherDeductions.toFixed(2),
       bonuses: bonuses.toFixed(2),
       netSalary: netSalary.toFixed(2),
@@ -223,6 +245,7 @@ export async function recalculateDriverSalary(
         baseSalary: baseSalary.toFixed(2),
         totalAdvances: totalAdvances.toFixed(2),
         totalCoverageDeductions: totalCoverageDeductions.toFixed(2),
+        totalCoverageAdditions: totalCoverageAdditions.toFixed(2),
         otherDeductions: otherDeductions.toFixed(2),
         bonuses: bonuses.toFixed(2),
         netSalary: netSalary.toFixed(2),
@@ -430,16 +453,23 @@ export async function recordCoverageTransaction(params: {
   targetMonth?: number | null;
   targetYear?: number | null;
   date: string;
-  actualReplacementCost: number;
-  absentDriverDeduction: number;
+  coverageAmount?: number;
+  actualReplacementCost?: number;
+  absentDriverDeduction?: number;
   reason: string;
   notes?: string;
   recordedByUserId: number;
   idempotencyKey?: string;
   ipAddress?: string;
 }) {
-  if (params.actualReplacementCost < 0 || params.absentDriverDeduction < 0) {
-    throw new Error('المبالغ يجب أن تكون موجبة أو صفر');
+  const unifiedAmount = Number(
+    params.coverageAmount ?? params.absentDriverDeduction ?? params.actualReplacementCost ?? 0
+  );
+  if (!Number.isFinite(unifiedAmount) || unifiedAmount < 0) {
+    throw new Error('قيمة التغطية يجب أن تكون موجبة أو صفر');
+  }
+  if (params.replacementDriverId && params.replacementDriverId === params.absentDriverId) {
+    throw new Error('لا يمكن أن يكون السائق البديل هو نفسه السائق الغائب');
   }
   const cleanDate = normalizeIsoDateInput(params.date);
 
@@ -466,6 +496,7 @@ export async function recordCoverageTransaction(params: {
         return {
           coverage: existing[0],
           salary: dupSalary,
+          replacementSalary: null,
           duplicate: true,
           period: dupPeriod,
           billingRange: dupRange,
@@ -479,6 +510,16 @@ export async function recordCoverageTransaction(params: {
       .where(eq(drivers.id, params.absentDriverId))
       .limit(1);
     if (!absentDriver) throw new Error('السائق الغائب غير موجود');
+
+    let replacementDriver: typeof drivers.$inferSelect | null = null;
+    if (params.replacementDriverId) {
+      const [repRow] = await tx
+        .select()
+        .from(drivers)
+        .where(eq(drivers.id, params.replacementDriverId))
+        .limit(1);
+      if (repRow) replacementDriver = repRow;
+    }
 
     let schoolConfig = params.schoolId
       ? await getSchoolBillingConfigById(tx, params.schoolId)
@@ -501,13 +542,13 @@ export async function recordCoverageTransaction(params: {
       .insert(coverageRecords)
       .values({
         absentDriverId: params.absentDriverId,
-        replacementDriverId: params.replacementDriverId || null,
-        replacementExternalName: params.replacementExternalName || '',
+        replacementDriverId: replacementDriver?.id || null,
+        replacementExternalName: replacementDriver ? '' : params.replacementExternalName || '',
         vehicleId: params.vehicleId || null,
         schoolId: effectiveSchoolId,
         date: cleanDate,
-        actualReplacementCost: params.actualReplacementCost.toFixed(2),
-        absentDriverDeduction: params.absentDriverDeduction.toFixed(2),
+        actualReplacementCost: unifiedAmount.toFixed(2),
+        absentDriverDeduction: unifiedAmount.toFixed(2),
         reason: params.reason || '',
         notes: params.notes || '',
         recordedByUserId: params.recordedByUserId,
@@ -519,7 +560,11 @@ export async function recordCoverageTransaction(params: {
     const { month, year } = getMonthYearFromDate(cleanDate, schoolConfig);
     const billingRange = getBillingDateRangeForPeriod(month, year, schoolConfig);
 
-    if (params.absentDriverDeduction > 0) {
+    const repDisplayName = replacementDriver
+      ? replacementDriver.fullName
+      : params.replacementExternalName || '';
+
+    if (unifiedAmount > 0) {
       await tx.insert(financialTransactions).values({
         driverId: params.absentDriverId,
         schoolId: effectiveSchoolId,
@@ -527,10 +572,10 @@ export async function recordCoverageTransaction(params: {
         year,
         type: 'coverage_deduction',
         direction: 'debit',
-        amount: params.absentDriverDeduction.toFixed(2),
+        amount: unifiedAmount.toFixed(2),
         referenceType: 'coverage',
         referenceId: insertedCoverage.id,
-        description: `خصم تغطية غياب بتاريخ ${cleanDate} — ${params.reason || 'تغطية خط'}`,
+        description: `خصم تغطية غياب بتاريخ ${cleanDate}${repDisplayName ? ` (البديل: ${repDisplayName})` : ''}${params.reason ? ` — ${params.reason}` : ''}`,
         recordedByUserId: params.recordedByUserId,
       });
     }
@@ -558,12 +603,50 @@ export async function recordCoverageTransaction(params: {
 
     const salary = await recalculateDriverSalary(tx, params.absentDriverId, month, year, schoolConfig);
 
+    let replacementSalary = null;
+    if (replacementDriver) {
+      const repSchoolConfig = await getDriverSchoolBillingConfig(tx, replacementDriver.id);
+      const repPeriod = getMonthYearFromDate(cleanDate, repSchoolConfig);
+
+      if (unifiedAmount > 0) {
+        await tx.insert(financialTransactions).values({
+          driverId: replacementDriver.id,
+          schoolId: repSchoolConfig?.id ?? effectiveSchoolId,
+          month: repPeriod.month,
+          year: repPeriod.year,
+          type: 'coverage_credit',
+          direction: 'credit',
+          amount: unifiedAmount.toFixed(2),
+          referenceType: 'coverage',
+          referenceId: insertedCoverage.id,
+          description: `مستحق تغطية عن السائق ${absentDriver.fullName} بتاريخ ${cleanDate}${params.reason ? ` — ${params.reason}` : ''}`,
+          recordedByUserId: params.recordedByUserId,
+        });
+      }
+
+      replacementSalary = await recalculateDriverSalary(
+        tx,
+        replacementDriver.id,
+        repPeriod.month,
+        repPeriod.year,
+        repSchoolConfig
+      );
+
+      await tx.insert(notifications).values({
+        recipientDriverId: replacementDriver.id,
+        recipientUserId: replacementDriver.userId || null,
+        type: 'coverage',
+        title: 'إضافة مستحق تغطية خط',
+        body: `تم تسجيل تغطية لك عن السائق ${absentDriver.fullName} بتاريخ ${cleanDate} وإضافة ${unifiedAmount.toLocaleString('ar-EG')} ج.م لمستحقاتك. صافي راتبك الحالي: ${Number(replacementSalary.netSalary).toLocaleString('ar-EG')} ج.م.`,
+      });
+    }
+
     await tx.insert(notifications).values({
       recipientDriverId: params.absentDriverId,
       recipientUserId: absentDriver.userId || null,
       type: 'coverage',
       title: 'تسجيل تغطية غياب وخصم مستحق',
-      body: `تم تسجيل تغطية غياب بتاريخ ${cleanDate} وخصم ${params.absentDriverDeduction.toLocaleString('ar-EG')} ج.م. صافي راتبك الحالي: ${Number(salary.netSalary).toLocaleString('ar-EG')} ج.م.`,
+      body: `تم تسجيل تغطية غياب بتاريخ ${cleanDate} وخصم ${unifiedAmount.toLocaleString('ar-EG')} ج.م. صافي راتبك الحالي: ${Number(salary.netSalary).toLocaleString('ar-EG')} ج.م.`,
     });
 
     await tx.insert(auditLogs).values({
@@ -578,6 +661,7 @@ export async function recordCoverageTransaction(params: {
     return {
       coverage: insertedCoverage,
       salary,
+      replacementSalary,
       duplicate: false,
       period: { month, year },
       billingRange,
@@ -728,6 +812,7 @@ export async function reverseFinancialRecord(params: {
         ? await getSchoolBillingConfigById(tx, cov.schoolId)
         : await getDriverSchoolBillingConfig(tx, cov.absentDriverId);
       const { month, year } = getMonthYearFromDate(cov.date, schoolConfig);
+      const covAmount = Number(cov.absentDriverDeduction || cov.actualReplacementCost || 0);
 
       const [rev] = await tx
         .insert(financialTransactions)
@@ -738,7 +823,7 @@ export async function reverseFinancialRecord(params: {
           year,
           type: 'reversal',
           direction: 'credit',
-          amount: cov.absentDriverDeduction,
+          amount: covAmount.toFixed(2),
           referenceType: 'coverage',
           referenceId: cov.id,
           description: `عكس خصم تغطية #${cov.id}: ${params.reason || 'تصحيح قيد'}`,
@@ -747,6 +832,33 @@ export async function reverseFinancialRecord(params: {
         .returning();
 
       const salary = await recalculateDriverSalary(tx, cov.absentDriverId, month, year, schoolConfig);
+
+      if (cov.replacementDriverId) {
+        const repCfg = await getDriverSchoolBillingConfig(tx, cov.replacementDriverId);
+        const repPeriod = getMonthYearFromDate(cov.date, repCfg);
+        if (covAmount > 0) {
+          await tx.insert(financialTransactions).values({
+            driverId: cov.replacementDriverId,
+            schoolId: repCfg?.id ?? cov.schoolId ?? null,
+            month: repPeriod.month,
+            year: repPeriod.year,
+            type: 'reversal',
+            direction: 'debit',
+            amount: covAmount.toFixed(2),
+            referenceType: 'coverage',
+            referenceId: cov.id,
+            description: `عكس مستحق تغطية #${cov.id}: ${params.reason || 'تصحيح قيد'}`,
+            recordedByUserId: params.recordedByUserId,
+          });
+        }
+        await recalculateDriverSalary(
+          tx,
+          cov.replacementDriverId,
+          repPeriod.month,
+          repPeriod.year,
+          repCfg
+        );
+      }
 
       await tx.insert(auditLogs).values({
         actorUserId: params.recordedByUserId,
@@ -919,15 +1031,19 @@ export async function updateCoverageTransaction(params: {
   replacementDriverId?: number | null;
   replacementExternalName?: string;
   date: string;
-  actualReplacementCost: number;
-  absentDriverDeduction: number;
+  coverageAmount?: number;
+  actualReplacementCost?: number;
+  absentDriverDeduction?: number;
   reason: string;
   notes?: string;
   recordedByUserId: number;
   ipAddress?: string;
 }) {
-  if (params.actualReplacementCost < 0 || params.absentDriverDeduction < 0) {
-    throw new Error('المبالغ يجب أن تكون موجبة أو صفر');
+  const unifiedAmount = Number(
+    params.coverageAmount ?? params.absentDriverDeduction ?? params.actualReplacementCost ?? 0
+  );
+  if (!Number.isFinite(unifiedAmount) || unifiedAmount < 0) {
+    throw new Error('قيمة التغطية يجب أن تكون موجبة أو صفر');
   }
   const cleanDate = normalizeIsoDateInput(params.date);
 
@@ -939,28 +1055,50 @@ export async function updateCoverageTransaction(params: {
       .limit(1);
     if (!existing) throw new Error('سجل التغطية غير موجود');
 
+    if (params.replacementDriverId && params.replacementDriverId === existing.absentDriverId) {
+      throw new Error('لا يمكن أن يكون السائق البديل هو نفسه السائق الغائب');
+    }
+
+    const [absentDriver] = await tx
+      .select()
+      .from(drivers)
+      .where(eq(drivers.id, existing.absentDriverId))
+      .limit(1);
+
+    let newReplacementDriver: typeof drivers.$inferSelect | null = null;
+    if (params.replacementDriverId) {
+      const [repRow] = await tx
+        .select()
+        .from(drivers)
+        .where(eq(drivers.id, params.replacementDriverId))
+        .limit(1);
+      if (repRow) newReplacementDriver = repRow;
+    }
+
     const schoolConfig = existing.schoolId
       ? await getSchoolBillingConfigById(tx, existing.schoolId)
       : await getDriverSchoolBillingConfig(tx, existing.absentDriverId);
     const oldPeriod = getMonthYearFromDate(existing.date, schoolConfig);
     const newPeriod = getMonthYearFromDate(cleanDate, schoolConfig);
 
+    const oldReplacementDriverId = existing.replacementDriverId;
+    const newReplacementDriverId = newReplacementDriver?.id ?? null;
+
     const [updated] = await tx
       .update(coverageRecords)
       .set({
-        replacementDriverId:
-          params.replacementDriverId !== undefined ? params.replacementDriverId : null,
-        replacementExternalName: params.replacementExternalName || '',
+        replacementDriverId: newReplacementDriverId,
+        replacementExternalName: newReplacementDriver ? '' : params.replacementExternalName || '',
         date: cleanDate,
-        actualReplacementCost: params.actualReplacementCost.toFixed(2),
-        absentDriverDeduction: params.absentDriverDeduction.toFixed(2),
+        actualReplacementCost: unifiedAmount.toFixed(2),
+        absentDriverDeduction: unifiedAmount.toFixed(2),
         reason: params.reason || '',
         notes: params.notes || '',
       })
       .where(eq(coverageRecords.id, params.id))
       .returning();
 
-    const existingLedger = await tx
+    const existingDeductionLedger = await tx
       .select()
       .from(financialTransactions)
       .where(
@@ -972,20 +1110,23 @@ export async function updateCoverageTransaction(params: {
       )
       .limit(1);
 
-    const description = `خصم تغطية غياب بتاريخ ${cleanDate} — ${params.reason || 'تغطية خط'}`;
+    const repDisplayName = newReplacementDriver
+      ? newReplacementDriver.fullName
+      : params.replacementExternalName || '';
+    const debitDescription = `خصم تغطية غياب بتاريخ ${cleanDate}${repDisplayName ? ` (البديل: ${repDisplayName})` : ''}${params.reason ? ` — ${params.reason}` : ''}`;
 
-    if (params.absentDriverDeduction > 0 && !existing.isReversed) {
-      if (existingLedger[0]) {
+    if (unifiedAmount > 0 && !existing.isReversed) {
+      if (existingDeductionLedger[0]) {
         await tx
           .update(financialTransactions)
           .set({
             schoolId: existing.schoolId ?? schoolConfig?.id ?? null,
-            amount: params.absentDriverDeduction.toFixed(2),
+            amount: unifiedAmount.toFixed(2),
             month: newPeriod.month,
             year: newPeriod.year,
-            description,
+            description: debitDescription,
           })
-          .where(eq(financialTransactions.id, existingLedger[0].id));
+          .where(eq(financialTransactions.id, existingDeductionLedger[0].id));
       } else {
         await tx.insert(financialTransactions).values({
           driverId: existing.absentDriverId,
@@ -994,17 +1135,71 @@ export async function updateCoverageTransaction(params: {
           year: newPeriod.year,
           type: 'coverage_deduction',
           direction: 'debit',
-          amount: params.absentDriverDeduction.toFixed(2),
+          amount: unifiedAmount.toFixed(2),
           referenceType: 'coverage',
           referenceId: params.id,
-          description,
+          description: debitDescription,
           recordedByUserId: params.recordedByUserId,
         });
       }
-    } else if (existingLedger[0]) {
+    } else if (existingDeductionLedger[0]) {
       await tx
         .delete(financialTransactions)
-        .where(eq(financialTransactions.id, existingLedger[0].id));
+        .where(eq(financialTransactions.id, existingDeductionLedger[0].id));
+    }
+
+    const existingCreditLedger = await tx
+      .select()
+      .from(financialTransactions)
+      .where(
+        and(
+          eq(financialTransactions.referenceType, 'coverage'),
+          eq(financialTransactions.referenceId, params.id),
+          eq(financialTransactions.type, 'coverage_credit')
+        )
+      )
+      .limit(1);
+
+    let newRepSchoolConfig: SchoolBillingConfig | null = null;
+    let newRepPeriod: { month: number; year: number } | null = null;
+    if (newReplacementDriverId) {
+      newRepSchoolConfig = await getDriverSchoolBillingConfig(tx, newReplacementDriverId);
+      newRepPeriod = getMonthYearFromDate(cleanDate, newRepSchoolConfig);
+    }
+
+    if (newReplacementDriverId && newRepPeriod && unifiedAmount > 0 && !existing.isReversed) {
+      const creditDescription = `مستحق تغطية عن السائق ${absentDriver?.fullName || ''} بتاريخ ${cleanDate}${params.reason ? ` — ${params.reason}` : ''}`;
+      if (existingCreditLedger[0]) {
+        await tx
+          .update(financialTransactions)
+          .set({
+            driverId: newReplacementDriverId,
+            schoolId: newRepSchoolConfig?.id ?? existing.schoolId ?? schoolConfig?.id ?? null,
+            amount: unifiedAmount.toFixed(2),
+            month: newRepPeriod.month,
+            year: newRepPeriod.year,
+            description: creditDescription,
+          })
+          .where(eq(financialTransactions.id, existingCreditLedger[0].id));
+      } else {
+        await tx.insert(financialTransactions).values({
+          driverId: newReplacementDriverId,
+          schoolId: newRepSchoolConfig?.id ?? existing.schoolId ?? schoolConfig?.id ?? null,
+          month: newRepPeriod.month,
+          year: newRepPeriod.year,
+          type: 'coverage_credit',
+          direction: 'credit',
+          amount: unifiedAmount.toFixed(2),
+          referenceType: 'coverage',
+          referenceId: params.id,
+          description: creditDescription,
+          recordedByUserId: params.recordedByUserId,
+        });
+      }
+    } else if (existingCreditLedger[0]) {
+      await tx
+        .delete(financialTransactions)
+        .where(eq(financialTransactions.id, existingCreditLedger[0].id));
     }
 
     if (oldPeriod.month !== newPeriod.month || oldPeriod.year !== newPeriod.year) {
@@ -1024,6 +1219,43 @@ export async function updateCoverageTransaction(params: {
       schoolConfig
     );
 
+    if (oldReplacementDriverId) {
+      const oldRepCfg = await getDriverSchoolBillingConfig(tx, oldReplacementDriverId);
+      const oldRepPeriod = getMonthYearFromDate(existing.date, oldRepCfg);
+      await recalculateDriverSalary(
+        tx,
+        oldReplacementDriverId,
+        oldRepPeriod.month,
+        oldRepPeriod.year,
+        oldRepCfg
+      );
+      if (
+        oldReplacementDriverId !== newReplacementDriverId &&
+        newRepPeriod &&
+        (oldRepPeriod.month !== newRepPeriod.month || oldRepPeriod.year !== newRepPeriod.year)
+      ) {
+        const oldRepNewPeriod = getMonthYearFromDate(cleanDate, oldRepCfg);
+        await recalculateDriverSalary(
+          tx,
+          oldReplacementDriverId,
+          oldRepNewPeriod.month,
+          oldRepNewPeriod.year,
+          oldRepCfg
+        );
+      }
+    }
+
+    let replacementSalary = null;
+    if (newReplacementDriverId && newRepPeriod) {
+      replacementSalary = await recalculateDriverSalary(
+        tx,
+        newReplacementDriverId,
+        newRepPeriod.month,
+        newRepPeriod.year,
+        newRepSchoolConfig
+      );
+    }
+
     await tx.insert(auditLogs).values({
       actorUserId: params.recordedByUserId,
       action: 'UPDATE_COVERAGE',
@@ -1034,7 +1266,7 @@ export async function updateCoverageTransaction(params: {
       ipAddress: params.ipAddress || '',
     });
 
-    return { coverage: updated, salary, period: newPeriod };
+    return { coverage: updated, salary, replacementSalary, period: newPeriod };
   });
 }
 
@@ -1084,6 +1316,18 @@ export async function deleteCoverageTransaction(params: {
       year,
       schoolConfig
     );
+
+    if (existing.replacementDriverId) {
+      const repCfg = await getDriverSchoolBillingConfig(tx, existing.replacementDriverId);
+      const repPeriod = getMonthYearFromDate(existing.date, repCfg);
+      await recalculateDriverSalary(
+        tx,
+        existing.replacementDriverId,
+        repPeriod.month,
+        repPeriod.year,
+        repCfg
+      );
+    }
 
     await tx.insert(auditLogs).values({
       actorUserId: params.recordedByUserId,
@@ -1436,6 +1680,7 @@ export async function closeMonthAndStartNext(params: {
       baseSalary: number;
       totalAdvances: number;
       totalCoverageDeductions: number;
+      totalCoverageAdditions: number;
       otherDeductions: number;
       bonuses: number;
       netSalary: number;
@@ -1465,6 +1710,7 @@ export async function closeMonthAndStartNext(params: {
       const base = Number(sal.baseSalary || 0);
       const adv = Number(sal.totalAdvances || 0);
       const cov = Number(sal.totalCoverageDeductions || 0);
+      const covAdd = Number(sal.totalCoverageAdditions || 0);
       const oth = Number(sal.otherDeductions || 0);
       const bon = Number(sal.bonuses || 0);
       const net = Number(sal.netSalary || 0);
@@ -1484,6 +1730,7 @@ export async function closeMonthAndStartNext(params: {
         baseSalary: base,
         totalAdvances: adv,
         totalCoverageDeductions: cov,
+        totalCoverageAdditions: covAdd,
         otherDeductions: oth,
         bonuses: bon,
         netSalary: net,
@@ -1746,10 +1993,43 @@ export async function resetMonthFinancials(params: {
       ? activeDrivers.filter((d) => assignmentByDriver[d.id] === schoolId)
       : activeDrivers;
 
+    const extraRecalcDriverIds = new Set<number>();
+    const targetDriverIdSet = new Set(targetDrivers.map((td) => td.id));
+
     for (const d of targetDrivers) {
       const drvSchoolId = assignmentByDriver[d.id];
       const drvSchool = drvSchoolId ? schoolById[drvSchoolId] || null : null;
       const range = getBillingDateRangeForPeriod(month, year, drvSchool);
+
+      const covsToDelete = await tx
+        .select({
+          id: coverageRecords.id,
+          replacementDriverId: coverageRecords.replacementDriverId,
+        })
+        .from(coverageRecords)
+        .where(
+          and(
+            eq(coverageRecords.absentDriverId, d.id),
+            gte(coverageRecords.date, range.startDate),
+            lte(coverageRecords.date, range.endDate)
+          )
+        );
+      const covIds = covsToDelete.map((c) => c.id);
+      for (const c of covsToDelete) {
+        if (c.replacementDriverId && !targetDriverIdSet.has(c.replacementDriverId)) {
+          extraRecalcDriverIds.add(c.replacementDriverId);
+        }
+      }
+      if (covIds.length > 0) {
+        await tx
+          .delete(financialTransactions)
+          .where(
+            and(
+              eq(financialTransactions.referenceType, 'coverage'),
+              inArray(financialTransactions.referenceId, covIds)
+            )
+          );
+      }
 
       await tx
         .delete(advances)
@@ -1799,6 +2079,12 @@ export async function resetMonthFinancials(params: {
           )
         );
       await recalculateDriverSalary(tx, d.id, month, year, drvSchool);
+    }
+
+    for (const extraId of extraRecalcDriverIds) {
+      const extraSchoolId = assignmentByDriver[extraId];
+      const extraSchool = extraSchoolId ? schoolById[extraSchoolId] || null : null;
+      await recalculateDriverSalary(tx, extraId, month, year, extraSchool);
     }
 
     if (targetSchool) {

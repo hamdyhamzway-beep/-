@@ -196,6 +196,12 @@ export const salaries = pgTable(
     })
       .notNull()
       .default('0'),
+    totalCoverageAdditions: numeric('total_coverage_additions', {
+      precision: 12,
+      scale: 2,
+    })
+      .notNull()
+      .default('0'),
     otherDeductions: numeric('other_deductions', { precision: 12, scale: 2 })
       .notNull()
       .default('0'),
@@ -476,6 +482,7 @@ export const monthlyClosings = pgTable(
           baseSalary: number;
           totalAdvances: number;
           totalCoverageDeductions: number;
+          totalCoverageAdditions?: number;
           otherDeductions: number;
           bonuses: number;
           netSalary: number;

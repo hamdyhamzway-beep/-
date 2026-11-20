@@ -1210,6 +1210,7 @@ async function startServer() {
                     baseSalary: Number(s.baseSalary),
                     totalAdvances: Number(s.totalAdvances),
                     totalCoverageDeductions: Number(s.totalCoverageDeductions),
+                    totalCoverageAdditions: Number(s.totalCoverageAdditions || 0),
                     otherDeductions: Number(s.otherDeductions),
                     bonuses: Number(s.bonuses),
                     netSalary: Number(s.netSalary),
@@ -1222,6 +1223,7 @@ async function startServer() {
                     baseSalary: d.monthlyAgreedSalary,
                     totalAdvances: 0,
                     totalCoverageDeductions: 0,
+                    totalCoverageAdditions: 0,
                     otherDeductions: 0,
                     bonuses: 0,
                     netSalary: d.monthlyAgreedSalary,
@@ -1930,7 +1932,10 @@ async function startServer() {
             .from(coverageRecords)
             .where(
               and(
-                eq(coverageRecords.absentDriverId, driverId),
+                or(
+                  eq(coverageRecords.absentDriverId, driverId),
+                  eq(coverageRecords.replacementDriverId, driverId)
+                ),
                 gte(coverageRecords.date, range.startDate),
                 lte(coverageRecords.date, range.endDate)
               )
@@ -1979,20 +1984,26 @@ async function startServer() {
               baseSalary: Number(salary.baseSalary),
               totalAdvances: Number(salary.totalAdvances),
               totalCoverageDeductions: Number(salary.totalCoverageDeductions),
+              totalCoverageAdditions: Number(salary.totalCoverageAdditions || 0),
               otherDeductions: Number(salary.otherDeductions),
               bonuses: Number(salary.bonuses),
               netSalary: Number(salary.netSalary),
             },
             advances: driverAdvances.map((a) => ({ ...a, amount: Number(a.amount) })),
-            coverages: driverCoverages.map((c) => ({
-              ...c,
-              replacementDriverName: c.replacementDriverId
-                ? driverNameById[c.replacementDriverId] || '—'
-                : c.replacementExternalName || 'سائق خارجي',
-              actualReplacementCost:
-                req.dbUser?.roleSlug === 'driver' ? 0 : Number(c.actualReplacementCost),
-              absentDriverDeduction: Number(c.absentDriverDeduction),
-            })),
+            coverages: driverCoverages.map((c) => {
+              const unifiedAmt = Number(c.absentDriverDeduction || c.actualReplacementCost || 0);
+              return {
+                ...c,
+                coverageRole: c.absentDriverId === driverId ? ('absent' as const) : ('replacement' as const),
+                coverageAmount: unifiedAmt,
+                absentDriverName: driverNameById[c.absentDriverId] || '—',
+                replacementDriverName: c.replacementDriverId
+                  ? driverNameById[c.replacementDriverId] || '—'
+                  : c.replacementExternalName || 'سائق خارجي',
+                actualReplacementCost: unifiedAmt,
+                absentDriverDeduction: unifiedAmt,
+              };
+            }),
             transactions: transactions.map((t) => ({ ...t, amount: Number(t.amount) })),
           },
         };
@@ -2076,6 +2087,7 @@ async function startServer() {
                 const baseSalary = sal ? Number(sal.baseSalary) : Number(d.monthlyAgreedSalary || 0);
                 const totalAdvances = sal ? Number(sal.totalAdvances) : 0;
                 const totalCoverageDeductions = sal ? Number(sal.totalCoverageDeductions) : 0;
+                const totalCoverageAdditions = sal ? Number(sal.totalCoverageAdditions || 0) : 0;
                 const otherDeductions = sal ? Number(sal.otherDeductions) : 0;
                 const bonuses = sal ? Number(sal.bonuses) : 0;
                 const netSalary = sal ? Number(sal.netSalary) : baseSalary;
@@ -2090,6 +2102,7 @@ async function startServer() {
                   baseSalary,
                   totalAdvances,
                   totalCoverageDeductions,
+                  totalCoverageAdditions,
                   otherDeductions,
                   bonuses,
                   netSalary,
@@ -2965,6 +2978,7 @@ async function startServer() {
             baseSalary: Number(s.baseSalary),
             totalAdvances: Number(s.totalAdvances),
             totalCoverageDeductions: Number(s.totalCoverageDeductions),
+            totalCoverageAdditions: Number(s.totalCoverageAdditions || 0),
             otherDeductions: Number(s.otherDeductions),
             bonuses: Number(s.bonuses),
             netSalary: Number(s.netSalary),
@@ -3008,6 +3022,10 @@ async function startServer() {
             (sum, r) => sum + r.totalCoverageDeductions,
             0
           );
+          const totalCoverageAdditions = scDrivers.reduce(
+            (sum, r) => sum + r.totalCoverageAdditions,
+            0
+          );
           const totalOtherDeductions = scDrivers.reduce((sum, r) => sum + r.otherDeductions, 0);
           const totalBonuses = scDrivers.reduce((sum, r) => sum + r.bonuses, 0);
           const totalNetSalaries = scDrivers.reduce((sum, r) => sum + r.netSalary, 0);
@@ -3030,6 +3048,7 @@ async function startServer() {
             totalBaseSalaries,
             totalAdvances,
             totalCoverageDeductions,
+            totalCoverageAdditions,
             totalOtherDeductions,
             totalBonuses,
             totalNetSalaries,
@@ -3053,6 +3072,10 @@ async function startServer() {
             (sum, r) => sum + r.totalCoverageDeductions,
             0
           );
+          const totalCoverageAdditions = unassignedDrivers.reduce(
+            (sum, r) => sum + r.totalCoverageAdditions,
+            0
+          );
           const totalOtherDeductions = unassignedDrivers.reduce(
             (sum, r) => sum + r.otherDeductions,
             0
@@ -3073,6 +3096,7 @@ async function startServer() {
             totalBaseSalaries,
             totalAdvances,
             totalCoverageDeductions,
+            totalCoverageAdditions,
             totalOtherDeductions,
             totalBonuses,
             totalNetSalaries,
@@ -3128,11 +3152,19 @@ async function startServer() {
           (sum, s) => sum + s.totalCoverageDeductions,
           0
         );
+        const totalCoverageAdditions = enrichedSalaries.reduce(
+          (sum, s) => sum + s.totalCoverageAdditions,
+          0
+        );
         const totalOtherDeductions = enrichedSalaries.reduce((sum, s) => sum + s.otherDeductions, 0);
         const totalBonuses = enrichedSalaries.reduce((sum, s) => sum + s.bonuses, 0);
-        const totalCoverageReplacementCost = monthCoverages
+        const unifiedCoverageAmount = monthCoverages
           .filter((c) => !c.isReversed)
-          .reduce((sum, c) => sum + Number(c.actualReplacementCost || 0), 0);
+          .reduce(
+            (sum, c) => sum + Number(c.absentDriverDeduction || c.actualReplacementCost || 0),
+            0
+          );
+        const totalCoverageReplacementCost = unifiedCoverageAmount;
         const totalPaidSalaries = enrichedSalaries
           .filter((s) => s.status === 'paid')
           .reduce((sum, s) => sum + s.netSalary, 0);
@@ -3170,7 +3202,6 @@ async function startServer() {
         );
 
         const activeVehicles = allVehicles.filter((v) => v.operationalStatus !== 'inactive');
-        const totalVehicleOwnerCosts = 0;
 
         const totalLedgerCredits = monthLedger
           .filter((t) => t.direction === 'credit')
@@ -3181,12 +3212,10 @@ async function startServer() {
 
         const totalCombinedPayroll =
           totalAllNetSalaries + totalEmployeeNetSalaries + totalSupervisorSalaries;
+        // Coverage is a transfer from absent driver to replacement driver — must NOT be deducted twice
         const overallNetBalance =
           totalContractsValue -
-          (totalAllBaseSalaries +
-            totalEmployeeNetSalaries +
-            totalSupervisorSalaries +
-            totalCoverageReplacementCost);
+          (totalAllBaseSalaries + totalEmployeeNetSalaries + totalSupervisorSalaries);
 
           return {
             period: {
@@ -3223,8 +3252,10 @@ async function startServer() {
               totalSchoolContracts: totalContractsValue,
               totalDriverBaseSalaries: totalAllBaseSalaries,
               totalDriverAdvances,
+              totalCoverageAmount: unifiedCoverageAmount,
               totalCoverageReplacementCost,
               totalCoverageDriverDeductions,
+              totalCoverageAdditions,
               totalOtherDeductions,
               totalBonuses,
               totalDriverNetSalaries: totalAllNetSalaries,
@@ -3254,22 +3285,26 @@ async function startServer() {
                 driverMap[a.driverId]?.schoolName ||
                 '—',
             })),
-            coverages: monthCoverages.map((c) => ({
-              ...c,
-              actualReplacementCost: Number(c.actualReplacementCost),
-              absentDriverDeduction: Number(c.absentDriverDeduction),
-              absentDriverName: driverMap[c.absentDriverId]?.fullName || '—',
-              absentDriverCode: driverMap[c.absentDriverId]?.driverCode || '—',
-              replacementDriverName: c.replacementDriverId
-                ? driverMap[c.replacementDriverId]?.fullName || '—'
-                : c.replacementExternalName || 'سائق خارجي',
-              schoolId: c.schoolId ?? driverMap[c.absentDriverId]?.schoolId ?? null,
-              schoolName:
-                (c.schoolId && schoolById[c.schoolId]?.name) ||
-                driverMap[c.absentDriverId]?.schoolName ||
-                '—',
-              busNumber: driverMap[c.absentDriverId]?.busNumber || '—',
-            })),
+            coverages: monthCoverages.map((c) => {
+              const unifiedAmt = Number(c.absentDriverDeduction || c.actualReplacementCost || 0);
+              return {
+                ...c,
+                coverageAmount: unifiedAmt,
+                actualReplacementCost: unifiedAmt,
+                absentDriverDeduction: unifiedAmt,
+                absentDriverName: driverMap[c.absentDriverId]?.fullName || '—',
+                absentDriverCode: driverMap[c.absentDriverId]?.driverCode || '—',
+                replacementDriverName: c.replacementDriverId
+                  ? driverMap[c.replacementDriverId]?.fullName || '—'
+                  : c.replacementExternalName || 'سائق خارجي',
+                schoolId: c.schoolId ?? driverMap[c.absentDriverId]?.schoolId ?? null,
+                schoolName:
+                  (c.schoolId && schoolById[c.schoolId]?.name) ||
+                  driverMap[c.absentDriverId]?.schoolName ||
+                  '—',
+                busNumber: driverMap[c.absentDriverId]?.busNumber || '—',
+              };
+            }),
             ledger: monthLedger.map((t) => ({
               ...t,
               amount: Number(t.amount),
@@ -3370,6 +3405,7 @@ async function startServer() {
         targetMonth,
         targetYear,
         date,
+        coverageAmount,
         actualReplacementCost,
         absentDriverDeduction,
         reason,
@@ -3380,6 +3416,9 @@ async function startServer() {
         return res.status(400).json({ error: 'يرجى كتابة اسم أو كود السائق الغائب والتاريخ' });
       }
       const cleanDate = normalizeIsoDateInput(String(date));
+      const unifiedAmount = Number(
+        coverageAmount ?? absentDriverDeduction ?? actualReplacementCost ?? 0
+      );
 
       const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
         const resolvedAbsent = await resolveDriverByIdOrQuery({
@@ -3429,8 +3468,7 @@ async function startServer() {
           targetMonth: targetMonth ? Number(targetMonth) : null,
           targetYear: targetYear ? Number(targetYear) : null,
           date: cleanDate,
-          actualReplacementCost: Number(actualReplacementCost || 0),
-          absentDriverDeduction: Number(absentDriverDeduction || 0),
+          coverageAmount: unifiedAmount,
           reason: reason ? String(reason).trim() : '',
           notes: notes || '',
           recordedByUserId: req.dbUser!.id,
@@ -3653,6 +3691,7 @@ async function startServer() {
         replacementQuery,
         replacementExternalName,
         date,
+        coverageAmount,
         actualReplacementCost,
         absentDriverDeduction,
         reason,
@@ -3662,6 +3701,9 @@ async function startServer() {
         return res.status(400).json({ error: 'بيانات تعديل التغطية غير مكتملة' });
       }
       const cleanDate = normalizeIsoDateInput(String(date));
+      const unifiedAmount = Number(
+        coverageAmount ?? absentDriverDeduction ?? actualReplacementCost ?? 0
+      );
       const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
         if (!isSchoolUnrestricted(req.dbUser)) {
           const [covRow] = await db
@@ -3691,8 +3733,7 @@ async function startServer() {
           replacementDriverId: resolvedRep ? resolvedRep.id : null,
           replacementExternalName: resolvedRep ? '' : repText,
           date: cleanDate,
-          actualReplacementCost: Number(actualReplacementCost || 0),
-          absentDriverDeduction: Number(absentDriverDeduction || 0),
+          coverageAmount: unifiedAmount,
           reason: reason !== undefined ? String(reason).trim() : '',
           notes: notes !== undefined ? String(notes) : '',
           recordedByUserId: req.dbUser!.id,
@@ -5339,12 +5380,13 @@ async function startServer() {
                 baseSalary: Number(sal.baseSalary),
                 totalAdvances: Number(sal.totalAdvances),
                 totalCoverageDeductions: Number(sal.totalCoverageDeductions),
+                totalCoverageAdditions: Number(sal.totalCoverageAdditions || 0),
                 otherDeductions: Number(sal.otherDeductions),
                 bonuses: Number(sal.bonuses),
                 netSalary: Number(sal.netSalary),
               },
             };
-            finalReply = `كشف حساب السائق ${matchedDriver.fullName} (كود ${matchedDriver.driverCode}) للشهر ده: الراتب الأساسي ${Number(sal.baseSalary).toLocaleString('ar-EG')} جنيه، السلف ${Number(sal.totalAdvances).toLocaleString('ar-EG')} جنيه، خصومات التغطية ${Number(sal.totalCoverageDeductions).toLocaleString('ar-EG')} جنيه، المكافآت ${Number(sal.bonuses).toLocaleString('ar-EG')} جنيه، وصافي المستحق حالياً ${Number(sal.netSalary).toLocaleString('ar-EG')} جنيه.`;
+            finalReply = `كشف حساب السائق ${matchedDriver.fullName} (كود ${matchedDriver.driverCode}) للشهر ده: الراتب الأساسي ${Number(sal.baseSalary).toLocaleString('ar-EG')} جنيه، السلف ${Number(sal.totalAdvances).toLocaleString('ar-EG')} جنيه، خصم التغطيات ${Number(sal.totalCoverageDeductions).toLocaleString('ar-EG')} جنيه${Number(sal.totalCoverageAdditions || 0) > 0 ? `، مستحق تغطيات ${Number(sal.totalCoverageAdditions).toLocaleString('ar-EG')} جنيه` : ''}، المكافآت ${Number(sal.bonuses).toLocaleString('ar-EG')} جنيه، وصافي المستحق حالياً ${Number(sal.netSalary).toLocaleString('ar-EG')} جنيه.`;
           }
         } else if (interpreted.intent === 'absent_drivers') {
           const targetDate = interpreted.date || todayDate;
@@ -5600,35 +5642,32 @@ async function startServer() {
 
             const sal = await recalculateDriverSalary(db, matchedDriver.id, month, year);
             const currentNet = Number(sal.netSalary);
-            const oldDeduction = Number(targetCoverage.absentDriverDeduction);
-            const nextDeduction =
+            const oldDeduction = Number(targetCoverage.absentDriverDeduction || targetCoverage.actualReplacementCost || 0);
+            const nextAmount =
               interpreted.intent === 'delete_coverage'
                 ? 0
-                : interpreted.absentDriverDeduction > 0
-                ? Number(interpreted.absentDriverDeduction)
-                : interpreted.amount > 0
-                ? Number(interpreted.amount)
-                : oldDeduction;
-            const nextCost =
-              interpreted.intent === 'delete_coverage'
-                ? 0
-                : interpreted.actualReplacementCost > 0
-                ? Number(interpreted.actualReplacementCost)
-                : interpreted.amount > 0
-                ? Number(interpreted.amount)
-                : Number(targetCoverage.actualReplacementCost);
-            const projectedNet = currentNet + oldDeduction - nextDeduction;
+                : Number(
+                    interpreted.absentDriverDeduction ||
+                      interpreted.actualReplacementCost ||
+                      interpreted.amount ||
+                      oldDeduction
+                  );
+            const projectedNet = currentNet + oldDeduction - nextAmount;
 
-            const availableCoverages = driverCoverages.map((c) => ({
-              id: c.id,
-              date: c.date,
-              actualReplacementCost: Number(c.actualReplacementCost),
-              absentDriverDeduction: Number(c.absentDriverDeduction),
-              reason: c.reason || '',
-              replacementName: c.replacementDriverId
-                ? driverNameMap[c.replacementDriverId] || '—'
-                : c.replacementExternalName || '',
-            }));
+            const availableCoverages = driverCoverages.map((c) => {
+              const amt = Number(c.absentDriverDeduction || c.actualReplacementCost || 0);
+              return {
+                id: c.id,
+                date: c.date,
+                coverageAmount: amt,
+                actualReplacementCost: amt,
+                absentDriverDeduction: amt,
+                reason: c.reason || '',
+                replacementName: c.replacementDriverId
+                  ? driverNameMap[c.replacementDriverId] || '—'
+                  : c.replacementExternalName || '',
+              };
+            });
 
             queryResult = {
               type: 'pending_confirmation',
@@ -5647,13 +5686,11 @@ async function startServer() {
                 vehicleId: matchedDriver.vehicleId,
                 busNumber: matchedDriver.busNumber,
                 replacementQuery: interpreted.replacementDriverQuery || existingRepName,
-                amount: nextDeduction,
+                amount: interpreted.intent === 'delete_coverage' ? oldDeduction : nextAmount,
                 actualReplacementCost:
-                  interpreted.intent === 'delete_coverage'
-                    ? Number(targetCoverage.actualReplacementCost)
-                    : nextCost,
+                  interpreted.intent === 'delete_coverage' ? oldDeduction : nextAmount,
                 absentDriverDeduction:
-                  interpreted.intent === 'delete_coverage' ? oldDeduction : nextDeduction,
+                  interpreted.intent === 'delete_coverage' ? oldDeduction : nextAmount,
                 date:
                   interpreted.date && interpreted.date !== todayDate
                     ? interpreted.date
@@ -5668,8 +5705,8 @@ async function startServer() {
 
             finalReply =
               interpreted.intent === 'delete_coverage'
-                ? `جاهز لحذف سجل التغطية بتاريخ ${targetCoverage.date} للسائق ${matchedDriver.fullName} (خصم ${oldDeduction.toLocaleString('ar-EG')} جنيه). اضغط تأكيد للتنفيذ.`
-                : `جاهز لتعديل تغطية السائق ${matchedDriver.fullName} بتاريخ ${targetCoverage.date}. راجع تكلفة البديل والخصم واضغط تأكيد للحفظ.`;
+                ? `جاهز لحذف سجل التغطية بتاريخ ${targetCoverage.date} للسائق ${matchedDriver.fullName} (قيمة ${oldDeduction.toLocaleString('ar-EG')} جنيه). اضغط تأكيد للتنفيذ.`
+                : `جاهز لتعديل تغطية السائق ${matchedDriver.fullName} بتاريخ ${targetCoverage.date} بقيمة موحدة ${nextAmount.toLocaleString('ar-EG')} جنيه. راجع البيانات واضغط تأكيد للحفظ.`;
           }
         } else if (
           (interpreted.intent === 'record_advance' ||
@@ -5684,7 +5721,7 @@ async function startServer() {
           const currentNet = Number(sal.netSalary);
           const amt =
             interpreted.intent === 'record_coverage'
-              ? Number(interpreted.absentDriverDeduction || 350)
+              ? Number(interpreted.absentDriverDeduction || interpreted.actualReplacementCost || interpreted.amount || 350)
               : Number(interpreted.amount || 0);
 
           const projectedNet =
@@ -5704,15 +5741,10 @@ async function startServer() {
               schoolName: matchedDriver.schoolName,
               vehicleId: matchedDriver.vehicleId,
               busNumber: matchedDriver.busNumber,
+              replacementQuery: interpreted.replacementDriverQuery || '',
               amount: amt,
-              actualReplacementCost:
-                interpreted.intent === 'record_coverage'
-                  ? Number(interpreted.actualReplacementCost || amt)
-                  : 0,
-              absentDriverDeduction:
-                interpreted.intent === 'record_coverage'
-                  ? Number(interpreted.absentDriverDeduction || amt)
-                  : 0,
+              actualReplacementCost: interpreted.intent === 'record_coverage' ? amt : 0,
+              absentDriverDeduction: interpreted.intent === 'record_coverage' ? amt : 0,
               date: interpreted.date || todayDate,
               reason: interpreted.reason || 'أمر صوتي من المدير',
               paymentMethod: interpreted.paymentMethod || 'cash',
@@ -5722,7 +5754,7 @@ async function startServer() {
           if (interpreted.intent === 'record_advance') {
             finalReply = `جاهز لتسجيل سلفة بمبلغ ${amt.toLocaleString('ar-EG')} جنيه للسائق ${matchedDriver.fullName} (كود ${matchedDriver.driverCode}). اضغط تأكيد لتنفيذ العملية وتحديث صافي راتبه إلى ${projectedNet.toLocaleString('ar-EG')} جنيه.`;
           } else if (interpreted.intent === 'record_coverage') {
-            finalReply = `جاهز لتسجيل تغطية غياب للسائق ${matchedDriver.fullName} (كود ${matchedDriver.driverCode}) بتاريخ ${interpreted.date || todayDate}. راجع قيمة التكلفة والخصم واضغط تأكيد للتنفيذ.`;
+            finalReply = `جاهز لتسجيل تغطية غياب للسائق ${matchedDriver.fullName} (كود ${matchedDriver.driverCode}) بتاريخ ${interpreted.date || todayDate} بقيمة ${amt.toLocaleString('ar-EG')} جنيه (تُخصم من الأساسي وتُضاف للبديل). اضغط تأكيد للتنفيذ.`;
           } else if (interpreted.intent === 'record_bonus') {
             finalReply = `جاهز لإضافة مكافأة بمبلغ ${amt.toLocaleString('ar-EG')} جنيه للسائق ${matchedDriver.fullName} (كود ${matchedDriver.driverCode}). اضغط تأكيد للتنفيذ.`;
           } else if (interpreted.intent === 'record_deduction') {
@@ -5791,22 +5823,30 @@ async function startServer() {
           });
           summary = `تم تنفيذ السلفة بنجاح بمبلغ ${Number(payload.amount).toLocaleString('ar-EG')} جنيه للسائق ${payload.driverName}. صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
         } else if (payload.intent === 'record_coverage') {
+          const unifiedAmt = Number(
+            payload.coverageAmount ?? payload.absentDriverDeduction ?? payload.actualReplacementCost ?? payload.amount ?? 0
+          );
+          const repText = String(payload.replacementQuery || payload.replacementExternalName || '').trim();
+          const resolvedRep = payload.replacementDriverId
+            ? await resolveDriverByIdOrQuery({ driverId: payload.replacementDriverId })
+            : repText
+            ? await resolveDriverByIdOrQuery({ driverQuery: repText })
+            : null;
           const result = await recordCoverageTransaction({
             absentDriverId: Number(payload.driverId),
-            replacementDriverId: payload.replacementDriverId ? Number(payload.replacementDriverId) : null,
-            replacementExternalName: payload.replacementExternalName || 'سائق تغطية',
+            replacementDriverId: resolvedRep ? resolvedRep.id : null,
+            replacementExternalName: resolvedRep ? '' : repText || 'سائق تغطية',
             vehicleId: payload.vehicleId ? Number(payload.vehicleId) : null,
             schoolId: payload.schoolId ? Number(payload.schoolId) : null,
             date: cleanVoiceDate,
-            actualReplacementCost: Number(payload.actualReplacementCost || 0),
-            absentDriverDeduction: Number(payload.absentDriverDeduction || 0),
+            coverageAmount: unifiedAmt,
             reason: String(payload.reason || 'تغطية غياب بأمر صوتي'),
             notes: 'تم التنفيذ عبر المساعد الصوتي بعد تأكيد المدير',
             recordedByUserId: req.dbUser!.id,
             idempotencyKey: idempKey,
             ipAddress: req.ip || '',
           });
-          summary = `تم تسجيل تغطية الغياب للسائق ${payload.driverName} وخصم ${Number(payload.absentDriverDeduction).toLocaleString('ar-EG')} جنيه. صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
+          summary = `تم تسجيل تغطية الغياب للسائق ${payload.driverName} بقيمة ${unifiedAmt.toLocaleString('ar-EG')} جنيه. صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
         } else if (payload.intent === 'record_bonus' || payload.intent === 'record_deduction') {
           const schoolCfg = await getDriverSchoolBillingConfig(db, Number(payload.driverId));
           const targetPeriod = getMonthYearFromDate(cleanVoiceDate, schoolCfg);
@@ -5850,6 +5890,9 @@ async function startServer() {
           if (!payload.targetRecordId) {
             throw new Error('لم يتم تحديد سجل التغطية المطلوب تعديله');
           }
+          const unifiedAmt = Number(
+            payload.coverageAmount ?? payload.absentDriverDeduction ?? payload.actualReplacementCost ?? payload.amount ?? 0
+          );
           const repText = String(payload.replacementQuery || payload.replacementExternalName || '').trim();
           const resolvedRep = payload.replacementDriverId
             ? await resolveDriverByIdOrQuery({ driverId: payload.replacementDriverId })
@@ -5862,14 +5905,13 @@ async function startServer() {
             replacementDriverId: resolvedRep ? resolvedRep.id : null,
             replacementExternalName: resolvedRep ? '' : repText,
             date: cleanVoiceDate,
-            actualReplacementCost: Number(payload.actualReplacementCost || 0),
-            absentDriverDeduction: Number(payload.absentDriverDeduction || 0),
+            coverageAmount: unifiedAmt,
             reason: String(payload.reason || ''),
             notes: 'تم التعديل عبر المساعد الصوتي بعد تأكيد المدير',
             recordedByUserId: req.dbUser!.id,
             ipAddress: req.ip || '',
           });
-          summary = `تم تعديل سجل التغطية للسائق ${payload.driverName} بنجاح (الخصم ${Number(payload.absentDriverDeduction || 0).toLocaleString('ar-EG')} جنيه). صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
+          summary = `تم تعديل سجل التغطية للسائق ${payload.driverName} بنجاح بقيمة ${unifiedAmt.toLocaleString('ar-EG')} جنيه. صافي الراتب المحدث: ${Number(result.salary?.netSalary || 0).toLocaleString('ar-EG')} جنيه.`;
         } else if (payload.intent === 'delete_coverage') {
           if (!payload.targetRecordId) {
             throw new Error('لم يتم تحديد سجل التغطية المطلوب حذفه');
@@ -6740,7 +6782,10 @@ async function startServer() {
                 .from(coverageRecords)
                 .where(
                   and(
-                    eq(coverageRecords.absentDriverId, driver.id),
+                    or(
+                      eq(coverageRecords.absentDriverId, driver.id),
+                      eq(coverageRecords.replacementDriverId, driver.id)
+                    ),
                     gte(coverageRecords.date, range.startDate),
                     lte(coverageRecords.date, range.endDate)
                   )
@@ -6776,6 +6821,9 @@ async function startServer() {
                 : Promise.resolve(null),
             ]);
 
+          const driverNameById: Record<number, string> = {};
+          for (const d of enrichedDrivers) driverNameById[d.id] = d.fullName;
+
           let latestGps = null;
           let vehicleGpsStatus = 'offline';
           if (vehicleGpsData) {
@@ -6808,17 +6856,26 @@ async function startServer() {
               baseSalary: Number(salary.baseSalary),
               totalAdvances: Number(salary.totalAdvances),
               totalCoverageDeductions: Number(salary.totalCoverageDeductions),
+              totalCoverageAdditions: Number(salary.totalCoverageAdditions || 0),
               otherDeductions: Number(salary.otherDeductions),
               bonuses: Number(salary.bonuses),
               netSalary: Number(salary.netSalary),
             },
             advances: driverAdvances.map((a) => ({ ...a, amount: Number(a.amount) })),
-            coverages: driverCoverages.map((c) => ({
-              ...c,
-              actualReplacementCost:
-                req.dbUser?.roleSlug === 'driver' ? 0 : Number(c.actualReplacementCost),
-              absentDriverDeduction: Number(c.absentDriverDeduction),
-            })),
+            coverages: driverCoverages.map((c) => {
+              const unifiedAmt = Number(c.absentDriverDeduction || c.actualReplacementCost || 0);
+              return {
+                ...c,
+                coverageRole: c.absentDriverId === driver.id ? ('absent' as const) : ('replacement' as const),
+                coverageAmount: unifiedAmt,
+                absentDriverName: driverNameById[c.absentDriverId] || '—',
+                replacementDriverName: c.replacementDriverId
+                  ? driverNameById[c.replacementDriverId] || '—'
+                  : c.replacementExternalName || 'سائق خارجي',
+                actualReplacementCost: unifiedAmt,
+                absentDriverDeduction: unifiedAmt,
+              };
+            }),
             transactions: transactions.map((t) => ({ ...t, amount: Number(t.amount) })),
             notifications: driverNotifications,
             gps: {

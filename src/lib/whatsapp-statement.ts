@@ -186,6 +186,9 @@ export async function renderStatementFallbackBlob(
 
   // Summary cards (2 rows of 3)
   y += 42;
+  const coverageAdditions = Number(
+    (data.salary as { totalCoverageAdditions?: number }).totalCoverageAdditions || 0
+  );
   const cards = [
     { label: 'الراتب الأساسي', value: formatEGP(data.salary.baseSalary), color: '#0F172A', bg: '#F8FAFC' },
     { label: 'إجمالي السلف', value: `− ${formatEGP(data.salary.totalAdvances)}`, color: '#B91C1C', bg: '#FEF2F2' },
@@ -195,8 +198,32 @@ export async function renderStatementFallbackBlob(
       color: '#B91C1C',
       bg: '#FEF2F2',
     },
-    { label: 'خصومات أخرى', value: `− ${formatEGP(data.salary.otherDeductions)}`, color: '#B91C1C', bg: '#FEF2F2' },
-    { label: 'المكافآت', value: `+ ${formatEGP(data.salary.bonuses)}`, color: '#047857', bg: '#ECFDF5' },
+    ...(coverageAdditions > 0
+      ? [
+          {
+            label: 'مستحق تغطيات (+)',
+            value: `+ ${formatEGP(coverageAdditions)}`,
+            color: '#047857',
+            bg: '#ECFDF5',
+          },
+        ]
+      : [
+          {
+            label: 'خصومات أخرى',
+            value: `− ${formatEGP(data.salary.otherDeductions)}`,
+            color: '#B91C1C',
+            bg: '#FEF2F2',
+          },
+        ]),
+    {
+      label: coverageAdditions > 0 && data.salary.otherDeductions > 0 ? 'مكافآت − خصومات' : 'المكافآت',
+      value:
+        coverageAdditions > 0 && data.salary.otherDeductions > 0
+          ? `${formatEGP(data.salary.bonuses - data.salary.otherDeductions)}`
+          : `+ ${formatEGP(data.salary.bonuses)}`,
+      color: '#047857',
+      bg: '#ECFDF5',
+    },
     { label: 'صافي المستحق', value: formatEGP(data.salary.netSalary), color: '#C89B3C', bg: '#0B1F3A', dark: true },
   ];
 
@@ -264,6 +291,8 @@ export async function renderStatementFallbackBlob(
           ? 'سلفة'
           : t.type === 'coverage_deduction'
           ? 'خصم تغطية'
+          : t.type === 'coverage_credit'
+          ? 'مستحق تغطية'
           : t.type === 'bonus'
           ? 'مكافأة'
           : t.type === 'reversal'

@@ -164,16 +164,14 @@ export const DriversModule: React.FC<{
   const [newCov, setNewCov] = useState({
     replacementQuery: '',
     date: todayStr,
-    actualReplacementCost: '',
-    absentDriverDeduction: '',
+    coverageAmount: '',
     reason: '',
   });
   const [editingCovId, setEditingCovId] = useState<number | null>(null);
   const [editCov, setEditCov] = useState({
     replacementQuery: '',
     date: '',
-    actualReplacementCost: '',
-    absentDriverDeduction: '',
+    coverageAmount: '',
     reason: '',
     notes: '',
   });
@@ -571,8 +569,7 @@ export const DriversModule: React.FC<{
                 : undefined,
             replacementQuery: newCov.replacementQuery.trim(),
             date: newCov.date,
-            actualReplacementCost: Number(newCov.actualReplacementCost || 0),
-            absentDriverDeduction: Number(newCov.absentDriverDeduction || 0),
+            coverageAmount: Number(newCov.coverageAmount || 0),
             reason: newCov.reason.trim(),
             idempotencyKey: `drv-cov-${statementDriverId}-${newCov.date}-${Date.now()}`,
           }),
@@ -588,8 +585,7 @@ export const DriversModule: React.FC<{
       setNewCov((p) => ({
         ...p,
         replacementQuery: '',
-        actualReplacementCost: '',
-        absentDriverDeduction: '',
+        coverageAmount: '',
         reason: '',
       }));
       setFinanceNotice(
@@ -617,8 +613,7 @@ export const DriversModule: React.FC<{
           body: JSON.stringify({
             replacementQuery: editCov.replacementQuery.trim(),
             date: editCov.date,
-            actualReplacementCost: Number(editCov.actualReplacementCost || 0),
-            absentDriverDeduction: Number(editCov.absentDriverDeduction || 0),
+            coverageAmount: Number(editCov.coverageAmount || 0),
             reason: editCov.reason.trim(),
             notes: editCov.notes.trim(),
           }),
@@ -1775,7 +1770,7 @@ export const DriversModule: React.FC<{
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
                         <div className="border border-slate-200 rounded-xl p-3">
                           <div className="text-slate-500">الراتب الأساسي</div>
                           <div className="mt-1 font-mono font-bold text-slate-900 tabular-nums">
@@ -1792,6 +1787,12 @@ export const DriversModule: React.FC<{
                           <div className="text-slate-500">خصم التغطيات</div>
                           <div className="mt-1 font-mono font-bold text-red-700 tabular-nums">
                             − {formatEGP(statementData.salary.totalCoverageDeductions)}
+                          </div>
+                        </div>
+                        <div className="border border-slate-200 rounded-xl p-3">
+                          <div className="text-slate-500">مستحق التغطيات</div>
+                          <div className="mt-1 font-mono font-bold text-emerald-700 tabular-nums">
+                            + {formatEGP(statementData.salary.totalCoverageAdditions || 0)}
                           </div>
                         </div>
                         <div className="border border-slate-200 rounded-xl p-3">
@@ -1845,7 +1846,9 @@ export const DriversModule: React.FC<{
                                       {t.type === 'advance'
                                         ? 'سلفة'
                                         : t.type === 'coverage_deduction'
-                                        ? 'خصم تغطية'
+                                        ? 'خصم تغطية (من الأساسي)'
+                                        : t.type === 'coverage_credit'
+                                        ? 'مستحق تغطية (للبديل)'
                                         : t.type === 'bonus'
                                         ? 'مكافأة'
                                         : t.type === 'reversal'
@@ -2050,7 +2053,7 @@ export const DriversModule: React.FC<{
                           className="rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-3"
                         >
                           <div className="font-bold text-[#0B1F3A]">إضافة تغطية غياب جديدة</div>
-                          <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                             <input
                               value={newCov.replacementQuery}
                               onChange={(e) =>
@@ -2070,22 +2073,11 @@ export const DriversModule: React.FC<{
                               type="number"
                               required
                               min={0}
-                              value={newCov.actualReplacementCost}
+                              value={newCov.coverageAmount}
                               onChange={(e) =>
-                                setNewCov({ ...newCov, actualReplacementCost: e.target.value })
+                                setNewCov({ ...newCov, coverageAmount: e.target.value })
                               }
-                              placeholder="تكلفة البديل *"
-                              className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                            />
-                            <input
-                              type="number"
-                              required
-                              min={0}
-                              value={newCov.absentDriverDeduction}
-                              onChange={(e) =>
-                                setNewCov({ ...newCov, absentDriverDeduction: e.target.value })
-                              }
-                              placeholder="خصم السائق *"
+                              placeholder="مبلغ التغطية (ج.م) *"
                               className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
                             />
                             <input
@@ -2095,6 +2087,9 @@ export const DriversModule: React.FC<{
                               className="rounded-lg border border-slate-200 bg-white px-3 py-2"
                             />
                           </div>
+                          <p className="text-[11px] text-slate-500">
+                            يُخصم مبلغ التغطية من السائق الأساسي ويُضاف تلقائياً لمستحقات السائق البديل.
+                          </p>
                           <button
                             type="submit"
                             disabled={financeBusy}
@@ -2111,15 +2106,21 @@ export const DriversModule: React.FC<{
                             لا توجد تغطيات مسجلة لهذا السائق في هذا الشهر
                           </div>
                         ) : (
-                          statementData.coverages.map((c) =>
-                            editingCovId === c.id ? (
+                          statementData.coverages.map((c) => {
+                            const amt =
+                              c.coverageAmount ??
+                              c.absentDriverDeduction ??
+                              c.actualReplacementCost ??
+                              0;
+                            const isReplacement = c.coverageRole === 'replacement';
+                            return editingCovId === c.id ? (
                               <form
                                 key={c.id}
                                 onSubmit={handleSaveDriverCoverageEdit}
                                 className="p-4 bg-amber-50/60 space-y-3"
                               >
                                 <div className="font-bold text-[#0B1F3A]">تعديل سجل التغطية</div>
-                                <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                                   <input
                                     value={editCov.replacementQuery}
                                     onChange={(e) =>
@@ -2141,28 +2142,14 @@ export const DriversModule: React.FC<{
                                     type="number"
                                     required
                                     min={0}
-                                    value={editCov.actualReplacementCost}
+                                    value={editCov.coverageAmount}
                                     onChange={(e) =>
                                       setEditCov({
                                         ...editCov,
-                                        actualReplacementCost: e.target.value,
+                                        coverageAmount: e.target.value,
                                       })
                                     }
-                                    placeholder="تكلفة البديل"
-                                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
-                                  />
-                                  <input
-                                    type="number"
-                                    required
-                                    min={0}
-                                    value={editCov.absentDriverDeduction}
-                                    onChange={(e) =>
-                                      setEditCov({
-                                        ...editCov,
-                                        absentDriverDeduction: e.target.value,
-                                      })
-                                    }
-                                    placeholder="خصم السائق"
+                                    placeholder="مبلغ التغطية *"
                                     className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
                                   />
                                   <input
@@ -2198,17 +2185,23 @@ export const DriversModule: React.FC<{
                               >
                                 <div>
                                   <div className="font-bold text-slate-900">
-                                    البديل: {c.replacementDriverName || c.replacementExternalName || '—'} ·{' '}
-                                    <span className="font-mono text-red-700">
-                                      خصم {formatEGP(c.absentDriverDeduction)}
+                                    {isReplacement
+                                      ? `تغطية بديلة عن: ${c.absentDriverName || '—'}`
+                                      : `البديل: ${c.replacementDriverName || c.replacementExternalName || '—'}`}{' '}
+                                    ·{' '}
+                                    <span
+                                      className={`font-mono ${
+                                        isReplacement ? 'text-emerald-700' : 'text-red-700'
+                                      } ${c.isReversed ? 'line-through opacity-60' : ''}`}
+                                    >
+                                      {isReplacement ? `+ ${formatEGP(amt)} (مستحق)` : `− ${formatEGP(amt)} (خصم)`}
                                     </span>
                                   </div>
                                   <div className="text-slate-500 mt-0.5">
-                                    <span className="font-mono">{c.date}</span> · تكلفة البديل:{' '}
-                                    {formatEGP(c.actualReplacementCost)} · {c.reason || '—'}
+                                    <span className="font-mono">{c.date}</span> · {c.reason || '—'}
                                   </div>
                                 </div>
-                                {canCoverageWrite && (
+                                {canCoverageWrite && !isReplacement && (
                                   <div className="flex items-center gap-1.5">
                                     <button
                                       type="button"
@@ -2220,8 +2213,7 @@ export const DriversModule: React.FC<{
                                               ? c.replacementDriverName
                                               : c.replacementExternalName || '',
                                           date: c.date,
-                                          actualReplacementCost: String(c.actualReplacementCost ?? 0),
-                                          absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
+                                          coverageAmount: String(amt),
                                           reason: c.reason || '',
                                           notes: c.notes || '',
                                         });
@@ -2243,8 +2235,8 @@ export const DriversModule: React.FC<{
                                   </div>
                                 )}
                               </div>
-                            )
-                          )
+                            );
+                          })
                         )}
                       </div>
                     </div>

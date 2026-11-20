@@ -904,6 +904,8 @@ export const VoiceAssistantModule: React.FC = () => {
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {result.queryResult.availableCoverages.map((cov) => {
                           const selected = editablePayload.targetRecordId === cov.id;
+                          const unifiedCovAmt =
+                            cov.absentDriverDeduction || cov.actualReplacementCost || 0;
                           return (
                             <button
                               key={cov.id}
@@ -914,16 +916,18 @@ export const VoiceAssistantModule: React.FC = () => {
                                   targetRecordId: cov.id,
                                   date: cov.date,
                                   replacementQuery: cov.replacementName,
+                                  amount:
+                                    editablePayload.intent === 'delete_coverage'
+                                      ? unifiedCovAmt
+                                      : editablePayload.amount || unifiedCovAmt,
                                   actualReplacementCost:
                                     editablePayload.intent === 'delete_coverage'
-                                      ? cov.actualReplacementCost
-                                      : editablePayload.actualReplacementCost ||
-                                        cov.actualReplacementCost,
+                                      ? unifiedCovAmt
+                                      : editablePayload.actualReplacementCost || unifiedCovAmt,
                                   absentDriverDeduction:
                                     editablePayload.intent === 'delete_coverage'
-                                      ? cov.absentDriverDeduction
-                                      : editablePayload.absentDriverDeduction ||
-                                        cov.absentDriverDeduction,
+                                      ? unifiedCovAmt
+                                      : editablePayload.absentDriverDeduction || unifiedCovAmt,
                                   reason: cov.reason || '',
                                 })
                               }
@@ -934,7 +938,7 @@ export const VoiceAssistantModule: React.FC = () => {
                               }`}
                             >
                               <div className="flex items-center justify-between font-mono font-bold">
-                                <span>خصم {formatEGP(cov.absentDriverDeduction)}</span>
+                                <span>{formatEGP(unifiedCovAmt)}</span>
                                 <span>{cov.date}</span>
                               </div>
                               <div
@@ -942,8 +946,7 @@ export const VoiceAssistantModule: React.FC = () => {
                                   selected ? 'text-slate-200' : 'text-slate-500'
                                 }`}
                               >
-                                البديل: {cov.replacementName || '—'} · تكلفة{' '}
-                                {formatEGP(cov.actualReplacementCost)}
+                                البديل: {cov.replacementName || '—'} · {cov.reason || 'تغطية'}
                               </div>
                             </button>
                           );
@@ -972,33 +975,25 @@ export const VoiceAssistantModule: React.FC = () => {
                         <>
                           <div>
                             <label className="block font-semibold text-slate-700 mb-1">
-                              التكلفة الفعلية للبديل (ج.م)
+                              مبلغ التغطية (ج.م)
                             </label>
                             <input
                               type="number"
-                              value={editablePayload.actualReplacementCost}
-                              onChange={(e) =>
+                              value={
+                                editablePayload.absentDriverDeduction ||
+                                editablePayload.actualReplacementCost ||
+                                editablePayload.amount ||
+                                0
+                              }
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
                                 setEditablePayload({
                                   ...editablePayload,
-                                  actualReplacementCost: Number(e.target.value),
-                                })
-                              }
-                              className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                            />
-                          </div>
-                          <div>
-                            <label className="block font-semibold text-slate-700 mb-1">
-                              الخصم من السائق الغائب (ج.م)
-                            </label>
-                            <input
-                              type="number"
-                              value={editablePayload.absentDriverDeduction}
-                              onChange={(e) =>
-                                setEditablePayload({
-                                  ...editablePayload,
-                                  absentDriverDeduction: Number(e.target.value),
-                                })
-                              }
+                                  amount: val,
+                                  actualReplacementCost: val,
+                                  absentDriverDeduction: val,
+                                });
+                              }}
                               className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
                             />
                           </div>
@@ -1018,7 +1013,7 @@ export const VoiceAssistantModule: React.FC = () => {
                               className="w-full rounded-lg border border-slate-200 px-3 py-2"
                             />
                           </div>
-                          <div className="sm:col-span-2">
+                          <div className="sm:col-span-3">
                             <label className="block font-semibold text-slate-700 mb-1">السبب</label>
                             <input
                               value={editablePayload.reason}

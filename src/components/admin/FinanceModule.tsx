@@ -39,6 +39,7 @@ interface ClosingSnapshotDriver {
   baseSalary: number;
   totalAdvances: number;
   totalCoverageDeductions: number;
+  totalCoverageAdditions?: number;
   otherDeductions: number;
   bonuses: number;
   netSalary: number;
@@ -193,8 +194,7 @@ export const FinanceModule: React.FC = () => {
     absentDriverQuery: '',
     replacementQuery: '',
     date: getLocalTodayDateString(),
-    actualReplacementCost: '',
-    absentDriverDeduction: '',
+    coverageAmount: '',
     reason: '',
     notes: '',
   });
@@ -224,8 +224,7 @@ export const FinanceModule: React.FC = () => {
   const [editCovForm, setEditCovForm] = useState({
     replacementQuery: '',
     date: '',
-    actualReplacementCost: '',
-    absentDriverDeduction: '',
+    coverageAmount: '',
     reason: '',
     notes: '',
   });
@@ -479,8 +478,7 @@ export const FinanceModule: React.FC = () => {
           schoolId: explicitSchoolId,
           schoolName: selectedSchoolContract?.schoolName || undefined,
           date: covForm.date,
-          actualReplacementCost: Number(covForm.actualReplacementCost || 0),
-          absentDriverDeduction: Number(covForm.absentDriverDeduction || 0),
+          coverageAmount: Number(covForm.coverageAmount || 0),
           reason: covForm.reason,
           notes: covForm.notes,
           idempotencyKey,
@@ -489,8 +487,7 @@ export const FinanceModule: React.FC = () => {
       setCovForm((f) => ({
         ...f,
         replacementQuery: '',
-        actualReplacementCost: '',
-        absentDriverDeduction: '',
+        coverageAmount: '',
         reason: '',
         notes: '',
       }));
@@ -619,14 +616,15 @@ export const FinanceModule: React.FC = () => {
   const openEditCoverage = (c: CoverageRecord) => {
     setEditCovError(null);
     setEditingCoverage(c);
+    const unifiedAmt =
+      c.coverageAmount ?? c.absentDriverDeduction ?? c.actualReplacementCost ?? 0;
     setEditCovForm({
       replacementQuery:
         c.replacementDriverId && c.replacementDriverName && c.replacementDriverName !== '—'
           ? c.replacementDriverName
           : c.replacementExternalName || '',
       date: c.date,
-      actualReplacementCost: String(c.actualReplacementCost ?? 0),
-      absentDriverDeduction: String(c.absentDriverDeduction ?? 0),
+      coverageAmount: String(unifiedAmt),
       reason: c.reason || '',
       notes: c.notes || '',
     });
@@ -645,8 +643,7 @@ export const FinanceModule: React.FC = () => {
           body: JSON.stringify({
             replacementQuery: editCovForm.replacementQuery.trim(),
             date: editCovForm.date,
-            actualReplacementCost: Number(editCovForm.actualReplacementCost || 0),
-            absentDriverDeduction: Number(editCovForm.absentDriverDeduction || 0),
+            coverageAmount: Number(editCovForm.coverageAmount || 0),
             reason: editCovForm.reason,
             notes: editCovForm.notes,
           }),
@@ -831,12 +828,13 @@ export const FinanceModule: React.FC = () => {
   const activeAdvancesSum = filteredAdvances
     .filter((a) => !a.isReversed)
     .reduce((s, a) => s + Number(a.amount || 0), 0);
-  const activeCovCostSum = filteredCoverages
+  const activeCovSum = filteredCoverages
     .filter((c) => !c.isReversed)
-    .reduce((s, c) => s + Number(c.actualReplacementCost || 0), 0);
-  const activeCovDedSum = filteredCoverages
-    .filter((c) => !c.isReversed)
-    .reduce((s, c) => s + Number(c.absentDriverDeduction || 0), 0);
+    .reduce(
+      (s, c) =>
+        s + Number(c.coverageAmount ?? c.absentDriverDeduction ?? c.actualReplacementCost ?? 0),
+      0
+    );
   const ledgerCreditSum = filteredLedger
     .filter((t) => t.direction === 'credit')
     .reduce((s, t) => s + Number(t.amount || 0), 0);
@@ -868,7 +866,7 @@ export const FinanceModule: React.FC = () => {
             الإدارة المالية والمرتبات وعقود المدارس
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            تقسيم العقود حسب كل مدرسة (ربح المدرسة = قيمة العقد الشهري − مجموع رواتب السائقين) · وصافي الراتب = الأساسي − السلف − التغطية − الخصومات + المكافآت
+            تقسيم العقود حسب كل مدرسة (ربح المدرسة = قيمة العقد الشهري − مجموع رواتب السائقين) · وصافي الراتب = الأساسي − السلف − خصم التغطيات + مستحق التغطيات − الخصومات + المكافآت
           </p>
         </div>
 
@@ -1104,12 +1102,16 @@ export const FinanceModule: React.FC = () => {
                   </div>
 
                   <div className="p-3.5">
-                    <div className="text-slate-500">4. التغطيات (بديل / خصم)</div>
+                    <div className="text-slate-500">4. التغطيات (مخصومة من الأساسي)</div>
                     <div className="font-mono text-sm font-bold text-red-700 mt-1 tabular-nums">
-                      {formatEGP(gt?.totalCoverageDriverDeductions ?? monthTotalCoverages)}
+                      {formatEGP(
+                        gt?.totalCoverageAmount ??
+                          gt?.totalCoverageDriverDeductions ??
+                          monthTotalCoverages
+                      )}
                     </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
-                      تكلفة البديل الفعلية: {formatEGP(gt?.totalCoverageReplacementCost ?? 0)}
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      تُخصم من السائق الأساسي وتُضاف للبديل
                     </div>
                   </div>
 
@@ -1531,7 +1533,7 @@ export const FinanceModule: React.FC = () => {
                   <div className="p-4">
                     <div className="text-slate-500">السلف والتغطيات والتسويات</div>
                     <div className="font-mono text-xs font-semibold text-red-700 mt-1 tabular-nums">
-                      سلف: {formatEGP(sc.totalAdvances)} · تغطيات:{' '}
+                      سلف: {formatEGP(sc.totalAdvances)} · تغطيات (مخصومة):{' '}
                       {formatEGP(sc.totalCoverageDeductions)}
                     </div>
                     <div className="font-mono text-[11px] text-emerald-700 mt-0.5 tabular-nums">
@@ -1583,8 +1585,16 @@ export const FinanceModule: React.FC = () => {
                             <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
                               {formatEGP(d.totalAdvances)}
                             </td>
-                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                              {formatEGP(d.totalCoverageDeductions)}
+                            <td className="py-3 px-4 font-mono tabular-nums">
+                              <div className="text-red-700">
+                                {d.totalCoverageDeductions > 0 ? '− ' : ''}
+                                {formatEGP(d.totalCoverageDeductions)}
+                              </div>
+                              {Number(d.totalCoverageAdditions || 0) > 0 && (
+                                <div className="text-[11px] font-semibold text-emerald-700">
+                                  + {formatEGP(d.totalCoverageAdditions || 0)} بديل
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
                               {formatEGP(d.otherDeductions)}
@@ -1878,8 +1888,16 @@ export const FinanceModule: React.FC = () => {
                         <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
                           {formatEGP(s.totalAdvances)}
                         </td>
-                        <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                          {formatEGP(s.totalCoverageDeductions)}
+                        <td className="py-3 px-4 font-mono tabular-nums">
+                          <div className="text-red-700">
+                            {Number(s.totalCoverageDeductions || 0) > 0 ? '− ' : ''}
+                            {formatEGP(s.totalCoverageDeductions)}
+                          </div>
+                          {Number(s.totalCoverageAdditions || 0) > 0 && (
+                            <div className="text-[11px] font-semibold text-emerald-700">
+                              + {formatEGP(s.totalCoverageAdditions || 0)} بديل
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
                           {formatEGP(s.otherDeductions)}
@@ -2262,39 +2280,22 @@ export const FinanceModule: React.FC = () => {
                 className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  التكلفة الفعلية للبديل (ج.م)
-                </label>
-                <input
-                  type="number"
-                  required
-                  min={0}
-                  placeholder="0"
-                  value={covForm.actualReplacementCost}
-                  onChange={(e) =>
-                    setCovForm({ ...covForm, actualReplacementCost: e.target.value })
-                  }
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  الخصم من السائق الغائب (ج.م)
-                </label>
-                <input
-                  type="number"
-                  required
-                  min={0}
-                  placeholder="0"
-                  value={covForm.absentDriverDeduction}
-                  onChange={(e) =>
-                    setCovForm({ ...covForm, absentDriverDeduction: e.target.value })
-                  }
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
-              </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">
+                مبلغ التغطية (ج.م) *
+              </label>
+              <input
+                type="number"
+                required
+                min={0}
+                placeholder="0"
+                value={covForm.coverageAmount}
+                onChange={(e) => setCovForm({ ...covForm, coverageAmount: e.target.value })}
+                className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                يُخصم من راتب السائق الأساسي الغائب ويُضاف لمستحقات السائق البديل تلقائياً
+              </p>
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">السبب</label>
@@ -2328,10 +2329,9 @@ export const FinanceModule: React.FC = () => {
                 <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
                   <tr>
                     <th className="py-3 px-4">التاريخ</th>
-                    <th className="py-3 px-4">السائق الغائب</th>
-                    <th className="py-3 px-4">السائق البديل</th>
-                    <th className="py-3 px-4">تكلفة البديل</th>
-                    <th className="py-3 px-4">خصم الغائب</th>
+                    <th className="py-3 px-4">السائق الأساسي (الغائب)</th>
+                    <th className="py-3 px-4">السائق البديل (المستفيد)</th>
+                    <th className="py-3 px-4">التغطيات (مخصومة من الأساسي)</th>
                     {(canCoverageWrite || canFinanceWrite) && (
                       <th className="py-3 px-4">تعديل / حذف / إجراء</th>
                     )}
@@ -2341,78 +2341,83 @@ export const FinanceModule: React.FC = () => {
                   {!filteredCoverages.length ? (
                     <tr>
                       <td
-                        colSpan={canCoverageWrite || canFinanceWrite ? 6 : 5}
+                        colSpan={canCoverageWrite || canFinanceWrite ? 5 : 4}
                         className="py-8 text-center text-slate-400"
                       >
                         لا توجد تغطيات مسجلة لهذا الشهر
                       </td>
                     </tr>
                   ) : (
-                    filteredCoverages.map((c) => (
-                      <tr key={c.id} className={c.isReversed ? 'opacity-60' : ''}>
-                        <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
-                        <td className="py-3 px-4">
-                          <div className="font-semibold text-slate-900">{c.absentDriverName}</div>
-                          <div className="text-slate-500">
-                            كود {c.absentDriverCode} · {c.busNumber}
-                          </div>
-                        </td>
-                        <td className="py-3 px-4 text-slate-700">{c.replacementDriverName}</td>
-                        <td
-                          className={`py-3 px-4 font-mono text-slate-800 tabular-nums ${
-                            c.isReversed ? 'line-through' : ''
-                          }`}
-                        >
-                          {formatEGP(c.actualReplacementCost)}
-                        </td>
-                        <td
-                          className={`py-3 px-4 font-mono font-bold text-red-700 tabular-nums ${
-                            c.isReversed ? 'line-through' : ''
-                          }`}
-                        >
-                          {formatEGP(c.absentDriverDeduction)}
-                        </td>
-                        {(canCoverageWrite || canFinanceWrite) && (
+                    filteredCoverages.map((c) => {
+                      const amt =
+                        c.coverageAmount ??
+                        c.absentDriverDeduction ??
+                        c.actualReplacementCost ??
+                        0;
+                      return (
+                        <tr key={c.id} className={c.isReversed ? 'opacity-60' : ''}>
+                          <td className="py-3 px-4 font-mono tabular-nums">{c.date}</td>
                           <td className="py-3 px-4">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              {canCoverageWrite && (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => openEditCoverage(c)}
-                                    className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3 h-3 text-[#C89B3C]" />
-                                    تعديل
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setDeletingCoverage(c)}
-                                    className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                    حذف
-                                  </button>
-                                </>
-                              )}
-                              {canFinanceWrite &&
-                                (c.isReversed ? (
-                                  <span className="text-[11px] text-slate-500 px-1">معكوسة</span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleReverse('coverage', c.id)}
-                                    className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
-                                  >
-                                    <RotateCcw className="w-3 h-3" />
-                                    عكس
-                                  </button>
-                                ))}
+                            <div className="font-semibold text-slate-900">{c.absentDriverName}</div>
+                            <div className="text-slate-500">
+                              كود {c.absentDriverCode} · {c.busNumber}
                             </div>
                           </td>
-                        )}
-                      </tr>
-                    ))
+                          <td className="py-3 px-4 text-slate-700 font-medium">
+                            {c.replacementDriverName}
+                          </td>
+                          <td
+                            className={`py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums ${
+                              c.isReversed ? 'line-through' : ''
+                            }`}
+                          >
+                            <div>{formatEGP(amt)}</div>
+                            <div className="text-[10px] font-normal text-slate-500">
+                              خصم من الأساسي / إضافة للبديل
+                            </div>
+                          </td>
+                          {(canCoverageWrite || canFinanceWrite) && (
+                            <td className="py-3 px-4">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {canCoverageWrite && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditCoverage(c)}
+                                      className="inline-flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                                    >
+                                      <Edit3 className="w-3 h-3 text-[#C89B3C]" />
+                                      تعديل
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeletingCoverage(c)}
+                                      className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      حذف
+                                    </button>
+                                  </>
+                                )}
+                                {canFinanceWrite &&
+                                  (c.isReversed ? (
+                                    <span className="text-[11px] text-slate-500 px-1">معكوسة</span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleReverse('coverage', c.id)}
+                                      className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                                    >
+                                      <RotateCcw className="w-3 h-3" />
+                                      عكس
+                                    </button>
+                                  ))}
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
                 {filteredCoverages.length > 0 && (
@@ -2421,11 +2426,8 @@ export const FinanceModule: React.FC = () => {
                       <td colSpan={3} className="py-3 px-4">
                         الجمع الإجمالي للتغطيات النشطة ({filteredCoverages.filter((c) => !c.isReversed).length})
                       </td>
-                      <td className="py-3 px-4 font-mono text-slate-900 tabular-nums">
-                        {formatEGP(activeCovCostSum)}
-                      </td>
-                      <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                        {formatEGP(activeCovDedSum)}
+                      <td className="py-3 px-4 font-mono text-[#0B1F3A] tabular-nums">
+                        {formatEGP(activeCovSum)}
                       </td>
                       {(canCoverageWrite || canFinanceWrite) && (
                         <td className="py-3 px-4 text-[11px] text-slate-500">—</td>
@@ -2471,7 +2473,21 @@ export const FinanceModule: React.FC = () => {
                     <td className="py-3 px-4 font-semibold text-slate-800">
                       {t.driverName} ({t.driverCode})
                     </td>
-                    <td className="py-3 px-4">{t.type}</td>
+                    <td className="py-3 px-4 font-semibold text-slate-700">
+                      {t.type === 'advance'
+                        ? 'سلفة'
+                        : t.type === 'coverage_deduction'
+                        ? 'خصم تغطية (من الأساسي)'
+                        : t.type === 'coverage_credit'
+                        ? 'مستحق تغطية (للبديل)'
+                        : t.type === 'bonus'
+                        ? 'مكافأة'
+                        : t.type === 'other_deduction'
+                        ? 'خصم إداري'
+                        : t.type === 'reversal'
+                        ? 'عكس قيد'
+                        : t.type}
+                    </td>
                     <td className="py-3 px-4 text-slate-700">{t.description}</td>
                     <td
                       className={`py-3 px-4 font-mono font-bold tabular-nums ${
@@ -2682,37 +2698,23 @@ export const FinanceModule: React.FC = () => {
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    التكلفة الفعلية للبديل (ج.م)
-                  </label>
-                  <input
-                    type="number"
-                    required
-                    min={0}
-                    value={editCovForm.actualReplacementCost}
-                    onChange={(e) =>
-                      setEditCovForm({ ...editCovForm, actualReplacementCost: e.target.value })
-                    }
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    الخصم من السائق الغائب (ج.م)
-                  </label>
-                  <input
-                    type="number"
-                    required
-                    min={0}
-                    value={editCovForm.absentDriverDeduction}
-                    onChange={(e) =>
-                      setEditCovForm({ ...editCovForm, absentDriverDeduction: e.target.value })
-                    }
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                  />
-                </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  مبلغ التغطية (ج.م) *
+                </label>
+                <input
+                  type="number"
+                  required
+                  min={0}
+                  value={editCovForm.coverageAmount}
+                  onChange={(e) =>
+                    setEditCovForm({ ...editCovForm, coverageAmount: e.target.value })
+                  }
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  يُخصم من السائق الأساسي ويُضاف للسائق البديل بنفس القيمة
+                </p>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">السبب</label>
@@ -3172,8 +3174,15 @@ export const FinanceModule: React.FC = () => {
                           <td className="py-2 px-3 font-mono text-red-700">
                             {formatEGP(d.totalAdvances)}
                           </td>
-                          <td className="py-2 px-3 font-mono text-red-700">
-                            {formatEGP(d.totalCoverageDeductions)}
+                          <td className="py-2 px-3 font-mono">
+                            <div className="text-red-700">
+                              {formatEGP(d.totalCoverageDeductions)}
+                            </div>
+                            {Number(d.totalCoverageAdditions || 0) > 0 && (
+                              <div className="text-[11px] text-emerald-700">
+                                +{formatEGP(d.totalCoverageAdditions || 0)} بديل
+                              </div>
+                            )}
                           </td>
                           <td className="py-2 px-3 font-mono text-emerald-700">
                             {formatEGP(d.bonuses)}
