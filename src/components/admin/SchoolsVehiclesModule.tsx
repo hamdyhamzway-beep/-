@@ -15,6 +15,7 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatArabicTripTime, formatEGP, normalizeTimeInputValue } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { ContactPhoneInput } from '../ContactPhoneInput';
 import type { FleetVehicle, RouteItem, SchoolItem } from '../../types';
 
 type SubTabId = 'schools' | 'vehicles' | 'routes';
@@ -109,7 +110,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const [sRes, vRes, oRes] = await Promise.all([
+      const [sRes, vRes] = await Promise.all([
         canSchoolsRead
           ? apiFetch<{
               schools: SchoolItem[];

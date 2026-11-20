@@ -91,6 +91,15 @@ export interface SchoolItem {
   isActive: boolean;
   billingCycleType?: 'calendar' | 'shifted' | string;
   billingCycleStartDay?: number;
+  billingCycleEndDay?: number;
+  customStartDate?: string | null;
+  customEndDate?: string | null;
+  activePeriod?: {
+    month: number;
+    year: number;
+    customStartDate?: string | null;
+    customEndDate?: string | null;
+  };
   currentBillingRange?: SchoolBillingRange;
   vehicleCount?: number;
   driverCount?: number;

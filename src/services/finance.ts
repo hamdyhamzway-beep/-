@@ -37,32 +37,6 @@ export function getMonthYearFromDate(
   return getBillingPeriodForDate(dateStr, school);
 }
 
-export async function getDriverSchoolBillingConfig(
-  tx: DbExecutor,
-  driverId: number
-): Promise<SchoolBillingConfig | null> {
-  const [assignment] = await tx
-    .select({ schoolId: driverAssignments.schoolId })
-    .from(driverAssignments)
-    .where(and(eq(driverAssignments.driverId, driverId), eq(driverAssignments.isCurrent, true)))
-    .limit(1);
-
-  if (!assignment?.schoolId) return null;
-
-  const [school] = await tx
-    .select({
-      id: schools.id,
-      name: schools.name,
-      billingCycleType: schools.billingCycleType,
-      billingCycleStartDay: schools.billingCycleStartDay,
-    })
-    .from(schools)
-    .where(eq(schools.id, assignment.schoolId))
-    .limit(1);
-
-  return school || null;
-}
-
 export async function getSchoolBillingConfigById(
   tx: DbExecutor,
   schoolId?: number | null
@@ -74,11 +48,43 @@ export async function getSchoolBillingConfigById(
       name: schools.name,
       billingCycleType: schools.billingCycleType,
       billingCycleStartDay: schools.billingCycleStartDay,
+      billingCycleEndDay: schools.billingCycleEndDay,
     })
     .from(schools)
     .where(eq(schools.id, schoolId))
     .limit(1);
-  return school || null;
+  if (!school) return null;
+
+  // Check if there is an active custom date override for this school
+  const schoolKey = getSchoolBillingPeriodKey(schoolId);
+  const [pRow] = await tx
+    .select({
+      customStartDate: billingPeriods.customStartDate,
+      customEndDate: billingPeriods.customEndDate,
+    })
+    .from(billingPeriods)
+    .where(eq(billingPeriods.key, schoolKey))
+    .limit(1);
+
+  return {
+    ...school,
+    customStartDate: pRow?.customStartDate || null,
+    customEndDate: pRow?.customEndDate || null,
+  };
+}
+
+export async function getDriverSchoolBillingConfig(
+  tx: DbExecutor,
+  driverId: number
+): Promise<SchoolBillingConfig | null> {
+  const [assignment] = await tx
+    .select({ schoolId: driverAssignments.schoolId })
+    .from(driverAssignments)
+    .where(and(eq(driverAssignments.driverId, driverId), eq(driverAssignments.isCurrent, true)))
+    .limit(1);
+
+  if (!assignment?.schoolId) return null;
+  return getSchoolBillingConfigById(tx, assignment.schoolId);
 }
 
 /**
@@ -275,6 +281,9 @@ export async function getOrRecalculateDriverSalaryForRead(
 
 export async function recordAdvanceTransaction(params: {
   driverId: number;
+  schoolId?: number | null;
+  targetMonth?: number | null;
+  targetYear?: number | null;
   amount: number;
   date: string;
   reason: string;
@@ -307,13 +316,16 @@ export async function recordAdvanceTransaction(params: {
       .limit(1);
     if (!driver) throw new Error('لم يتم العثور على السائق');
 
-    const schoolConfig = await getDriverSchoolBillingConfig(tx, params.driverId);
+    const schoolConfig = params.schoolId
+      ? await getSchoolBillingConfigById(tx, params.schoolId)
+      : await getDriverSchoolBillingConfig(tx, params.driverId);
+    const effectiveSchoolId = params.schoolId ?? schoolConfig?.id ?? null;
 
     const [insertedAdvance] = await tx
       .insert(advances)
       .values({
         driverId: params.driverId,
-        schoolId: schoolConfig?.id ?? null,
+        schoolId: effectiveSchoolId,
         amount: params.amount.toFixed(2),
         date: params.date,
         reason: params.reason || '',
@@ -324,11 +336,14 @@ export async function recordAdvanceTransaction(params: {
       })
       .returning();
 
-    const { month, year } = getMonthYearFromDate(params.date, schoolConfig);
+    const { month, year } =
+      params.targetMonth && params.targetYear
+        ? { month: params.targetMonth, year: params.targetYear }
+        : getMonthYearFromDate(params.date, schoolConfig);
 
     await tx.insert(financialTransactions).values({
       driverId: params.driverId,
-      schoolId: schoolConfig?.id ?? null,
+      schoolId: effectiveSchoolId,
       month,
       year,
       type: 'advance',
@@ -369,6 +384,8 @@ export async function recordCoverageTransaction(params: {
   replacementExternalName?: string;
   vehicleId?: number | null;
   schoolId?: number | null;
+  targetMonth?: number | null;
+  targetYear?: number | null;
   date: string;
   actualReplacementCost: number;
   absentDriverDeduction: number;
@@ -424,7 +441,10 @@ export async function recordCoverageTransaction(params: {
       })
       .returning();
 
-    const { month, year } = getMonthYearFromDate(params.date, schoolConfig);
+    const { month, year } =
+      params.targetMonth && params.targetYear
+        ? { month: params.targetMonth, year: params.targetYear }
+        : getMonthYearFromDate(params.date, schoolConfig);
 
     if (params.absentDriverDeduction > 0) {
       await tx.insert(financialTransactions).values({
@@ -1096,7 +1116,12 @@ export function getSchoolBillingPeriodKey(schoolId: number): string {
 
 export async function getActiveBillingPeriod(
   schoolId?: number | null
-): Promise<{ month: number; year: number }> {
+): Promise<{
+  month: number;
+  year: number;
+  customStartDate?: string | null;
+  customEndDate?: string | null;
+}> {
   if (schoolId) {
     const schoolKey = getSchoolBillingPeriodKey(schoolId);
     const [schoolPeriodRow] = await db
@@ -1110,12 +1135,22 @@ export async function getActiveBillingPeriod(
       schoolPeriodRow.activeMonth <= 12 &&
       schoolPeriodRow.activeYear >= 2020
     ) {
-      return { month: schoolPeriodRow.activeMonth, year: schoolPeriodRow.activeYear };
+      return {
+        month: schoolPeriodRow.activeMonth,
+        year: schoolPeriodRow.activeYear,
+        customStartDate: schoolPeriodRow.customStartDate || null,
+        customEndDate: schoolPeriodRow.customEndDate || null,
+      };
     }
     const schoolCfg = await getSchoolBillingConfigById(db, schoolId);
     if (schoolCfg) {
       const auto = getCurrentBillingRangeForSchool(schoolCfg);
-      return { month: auto.month, year: auto.year };
+      return {
+        month: auto.month,
+        year: auto.year,
+        customStartDate: schoolCfg.customStartDate || null,
+        customEndDate: schoolCfg.customEndDate || null,
+      };
     }
   }
 
@@ -1126,11 +1161,21 @@ export async function getActiveBillingPeriod(
     .limit(1);
 
   if (row && row.activeMonth >= 1 && row.activeMonth <= 12 && row.activeYear >= 2020) {
-    return { month: row.activeMonth, year: row.activeYear };
+    return {
+      month: row.activeMonth,
+      year: row.activeYear,
+      customStartDate: row.customStartDate || null,
+      customEndDate: row.customEndDate || null,
+    };
   }
   const today = getCairoTodayDateString();
   const [y, m] = today.split('-').map(Number);
-  return { month: m || new Date().getMonth() + 1, year: y || new Date().getFullYear() };
+  return {
+    month: m || new Date().getMonth() + 1,
+    year: y || new Date().getFullYear(),
+    customStartDate: null,
+    customEndDate: null,
+  };
 }
 
 export interface SupervisorCycleSummary {

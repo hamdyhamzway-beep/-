@@ -2199,6 +2199,7 @@ async function startServer() {
         isActive,
         billingCycleType,
         billingCycleStartDay,
+        billingCycleEndDay,
       } = req.body;
 
       const nextName = name ?? existing.name;
@@ -2211,11 +2212,16 @@ async function startServer() {
           : billingCycleType === 'shifted' && Number(existing.billingCycleStartDay || 1) <= 1
           ? 13
           : existing.billingCycleStartDay;
+      const requestedEndDay =
+        billingCycleEndDay !== undefined
+          ? Number(billingCycleEndDay)
+          : existing.billingCycleEndDay;
 
       const resolvedRule = resolveSchoolBillingRule({
         name: nextName,
         billingCycleType: requestedCycleType,
         billingCycleStartDay: requestedStartDay,
+        billingCycleEndDay: requestedEndDay,
       });
 
       const [updated] = await db
@@ -2233,6 +2239,7 @@ async function startServer() {
           contractEndDate: contractEndDate ?? existing.contractEndDate,
           billingCycleType: resolvedRule.cycleType,
           billingCycleStartDay: resolvedRule.startDay,
+          billingCycleEndDay: resolvedRule.endDay,
           notes: notes ?? existing.notes,
           isActive: isActive !== undefined ? Boolean(isActive) : existing.isActive,
         })
@@ -2243,6 +2250,157 @@ async function startServer() {
     } catch (error) {
       console.error('Update school error:', error);
       res.status(500).json({ error: 'تعذر تحديث المدرسة' });
+    }
+  });
+
+  // التحكم المباشر في بداية ونهاية كل فترة شهرية لكل مدرسة
+  app.get('/api/schools/:id/billing-period', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!isSchoolAllowed(req.dbUser, id)) {
+        return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+      }
+      const schoolCfg = await getSchoolBillingConfigById(db, id);
+      if (!schoolCfg) return res.status(404).json({ error: 'المدرسة غير موجودة' });
+      const activePeriod = await getActiveBillingPeriod(id);
+      const rule = resolveSchoolBillingRule(schoolCfg);
+      const range = getBillingDateRangeForPeriod(activePeriod.month, activePeriod.year, schoolCfg);
+
+      res.json({
+        schoolId: id,
+        schoolName: schoolCfg.name,
+        cycleType: rule.cycleType,
+        startDay: rule.startDay,
+        endDay: rule.endDay,
+        activeMonth: activePeriod.month,
+        activeYear: activePeriod.year,
+        customStartDate: schoolCfg.customStartDate || null,
+        customEndDate: schoolCfg.customEndDate || null,
+        currentRange: range,
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'تعذر جلب تفاصيل الفترة الشهرية للمدرسة' });
+    }
+  });
+
+  app.put('/api/schools/:id/billing-period', requireAuth, requireAdminOrStaff, requireAnyPermission(['schools:write', 'finance:write']), async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!isSchoolAllowed(req.dbUser, id)) {
+        return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+      }
+      const [existing] = await db.select().from(schools).where(eq(schools.id, id)).limit(1);
+      if (!existing) return res.status(404).json({ error: 'المدرسة غير موجودة' });
+
+      const {
+        cycleType,
+        startDay,
+        endDay,
+        activeMonth,
+        activeYear,
+        customStartDate,
+        customEndDate,
+        resetToDefault,
+      } = req.body;
+
+      const schoolKey = getSchoolBillingPeriodKey(id);
+
+      if (resetToDefault) {
+        await db.delete(billingPeriods).where(eq(billingPeriods.key, schoolKey));
+        await db.update(schools).set({
+          billingCycleType: existing.name.includes('هلالي') ? 'shifted' : 'calendar',
+          billingCycleStartDay: existing.name.includes('هلالي') ? 13 : 1,
+          billingCycleEndDay: existing.name.includes('هلالي') ? 12 : null,
+        }).where(eq(schools.id, id));
+
+        const updatedCfg = await getSchoolBillingConfigById(db, id);
+        const auto = getCurrentBillingRangeForSchool(updatedCfg);
+        return res.json({
+          ok: true,
+          message: 'تمت استعادة الدورة التلقائية للمدرسة بنجاح',
+          billingPeriod: auto,
+        });
+      }
+
+      const nextCycleType = cycleType || existing.billingCycleType;
+      const nextStartDay = startDay !== undefined ? Number(startDay) : existing.billingCycleStartDay;
+      const nextEndDay = endDay !== undefined ? Number(endDay) : existing.billingCycleEndDay;
+
+      await db.update(schools).set({
+        billingCycleType: nextCycleType,
+        billingCycleStartDay: nextStartDay,
+        billingCycleEndDay: nextEndDay,
+      }).where(eq(schools.id, id));
+
+      const nowPeriod = await getActiveBillingPeriod(id);
+      const nextMonth = activeMonth !== undefined ? Number(activeMonth) : nowPeriod.month;
+      const nextYear = activeYear !== undefined ? Number(activeYear) : nowPeriod.year;
+      const cleanCustomStart = customStartDate ? String(customStartDate).trim() : null;
+      const cleanCustomEnd = customEndDate ? String(customEndDate).trim() : null;
+
+      await db
+        .insert(billingPeriods)
+        .values({
+          key: schoolKey,
+          activeMonth: nextMonth,
+          activeYear: nextYear,
+          customStartDate: cleanCustomStart,
+          customEndDate: cleanCustomEnd,
+          updatedByUserId: req.dbUser!.id,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: [billingPeriods.key],
+          set: {
+            activeMonth: nextMonth,
+            activeYear: nextYear,
+            customStartDate: cleanCustomStart,
+            customEndDate: cleanCustomEnd,
+            updatedByUserId: req.dbUser!.id,
+            updatedAt: new Date(),
+          },
+        });
+
+      const updatedSchoolCfg = await getSchoolBillingConfigById(db, id);
+      const schoolDrivers = (await getEnrichedDrivers()).filter((d) => d.schoolId === id && d.accountStatus === 'active');
+      for (const drv of schoolDrivers) {
+        await recalculateDriverSalary(db, drv.id, nextMonth, nextYear, updatedSchoolCfg);
+      }
+
+      const activeRange = getBillingDateRangeForPeriod(nextMonth, nextYear, updatedSchoolCfg);
+
+      await db.insert(auditLogs).values({
+        actorUserId: req.dbUser!.id,
+        action: 'UPDATE_SCHOOL_BILLING_PERIOD',
+        entityType: 'schools',
+        entityId: String(id),
+        afterJson: {
+          schoolId: id,
+          activeMonth: nextMonth,
+          activeYear: nextYear,
+          customStartDate: cleanCustomStart,
+          customEndDate: cleanCustomEnd,
+          cycleType: nextCycleType,
+          startDay: nextStartDay,
+          endDay: nextEndDay,
+          activeRange,
+        },
+        ipAddress: req.ip || '',
+      });
+
+      res.json({
+        ok: true,
+        message: 'تم تحديث الدورة المالية والفترة الشهرية للمدرسة بنجاح',
+        schoolId: id,
+        activeMonth: nextMonth,
+        activeYear: nextYear,
+        customStartDate: cleanCustomStart,
+        customEndDate: cleanCustomEnd,
+        range: activeRange,
+      });
+    } catch (error) {
+      console.error('Update school billing period error:', error);
+      res.status(500).json({ error: 'تعذر تحديث الفترة الشهرية للمدرسة' });
     }
   });
 
@@ -2547,14 +2705,26 @@ async function startServer() {
         const schoolById: Record<number, (typeof allSchools)[number]> = {};
         for (const sc of allSchools) schoolById[sc.id] = sc;
 
+        const schoolConfigsById: Record<number, SchoolBillingConfig> = {};
+        await Promise.all(
+          allSchools.map(async (sc) => {
+            const cfg = await getSchoolBillingConfigById(db, sc.id);
+            if (cfg) schoolConfigsById[sc.id] = cfg;
+          })
+        );
+
         const rangeBySchoolKey = new Map<string, ReturnType<typeof getBillingDateRangeForPeriod>>();
-        const defaultRange = getBillingDateRangeForPeriod(month, year, selectedSchool);
+        const defaultSchoolCfg = selectedSchoolId
+          ? schoolConfigsById[selectedSchoolId] || (await getSchoolBillingConfigById(db, selectedSchoolId))
+          : null;
+        const defaultRange = getBillingDateRangeForPeriod(month, year, defaultSchoolCfg);
         rangeBySchoolKey.set('unassigned', getBillingDateRangeForPeriod(month, year, null));
 
         let minStartDate = defaultRange.startDate;
         let maxEndDate = defaultRange.endDate;
         for (const sc of allSchools) {
-          const r = getBillingDateRangeForPeriod(month, year, sc);
+          const cfg = schoolConfigsById[sc.id] || sc;
+          const r = getBillingDateRangeForPeriod(month, year, cfg);
           rangeBySchoolKey.set(String(sc.id), r);
           if (r.startDate < minStartDate) minStartDate = r.startDate;
           if (r.endDate > maxEndDate) maxEndDate = r.endDate;
@@ -2589,7 +2759,7 @@ async function startServer() {
 
         for (const d of activeDrivers) {
           if (!isSchoolClosedForPeriod(d.schoolId)) {
-            const drvSchool = d.schoolId ? schoolById[d.schoolId] || null : null;
+            const drvSchool = d.schoolId ? schoolConfigsById[d.schoolId] || null : null;
             await recalculateDriverSalary(db, d.id, month, year, drvSchool);
           }
         }
@@ -2610,12 +2780,26 @@ async function startServer() {
           db
             .select()
             .from(advances)
-            .where(and(gte(advances.date, minStartDate), lte(advances.date, maxEndDate)))
+            .where(
+              selectedSchoolId
+                ? or(
+                    and(gte(advances.date, minStartDate), lte(advances.date, maxEndDate)),
+                    eq(advances.schoolId, selectedSchoolId)
+                  )
+                : and(gte(advances.date, minStartDate), lte(advances.date, maxEndDate))
+            )
             .orderBy(desc(advances.date), desc(advances.id)),
           db
             .select()
             .from(coverageRecords)
-            .where(and(gte(coverageRecords.date, minStartDate), lte(coverageRecords.date, maxEndDate)))
+            .where(
+              selectedSchoolId
+                ? or(
+                    and(gte(coverageRecords.date, minStartDate), lte(coverageRecords.date, maxEndDate)),
+                    eq(coverageRecords.schoolId, selectedSchoolId)
+                  )
+                : and(gte(coverageRecords.date, minStartDate), lte(coverageRecords.date, maxEndDate))
+            )
             .orderBy(desc(coverageRecords.date), desc(coverageRecords.id)),
           db
             .select()
@@ -2638,7 +2822,8 @@ async function startServer() {
         const monthAdvancesAll = rawWindowAdvances.filter((a) => {
           if (!unrestricted && !scopedDriverIds.has(a.driverId)) return false;
           const drv = driverMap[a.driverId];
-          const recRange = getRangeForSchoolId(drv?.schoolId ?? null);
+          const recSchoolId = a.schoolId ?? drv?.schoolId ?? null;
+          const recRange = getRangeForSchoolId(recSchoolId);
           return isDateInRange(a.date, recRange.startDate, recRange.endDate);
         });
 
@@ -2812,7 +2997,9 @@ async function startServer() {
           ? enrichedSalariesAll.filter((s) => s.schoolId === selectedSchoolId)
           : enrichedSalariesAll;
         const monthAdvances = selectedSchoolId
-          ? monthAdvancesAll.filter((a) => driverMap[a.driverId]?.schoolId === selectedSchoolId)
+          ? monthAdvancesAll.filter(
+              (a) => (a.schoolId ?? driverMap[a.driverId]?.schoolId) === selectedSchoolId
+            )
           : monthAdvancesAll;
         const monthCoverages = selectedSchoolId
           ? monthCoveragesAll.filter(
@@ -2971,8 +3158,11 @@ async function startServer() {
             amount: Number(a.amount),
             driverName: driverMap[a.driverId]?.fullName || '—',
             driverCode: driverMap[a.driverId]?.driverCode || '—',
-            schoolId: driverMap[a.driverId]?.schoolId ?? null,
-            schoolName: driverMap[a.driverId]?.schoolName || '—',
+            schoolId: a.schoolId ?? driverMap[a.driverId]?.schoolId ?? null,
+            schoolName:
+              (a.schoolId && schoolById[a.schoolId]?.name) ||
+              driverMap[a.driverId]?.schoolName ||
+              '—',
           })),
           coverages: monthCoverages.map((c) => ({
             ...c,
@@ -3008,17 +3198,33 @@ async function startServer() {
 
   app.post('/api/finance/advances', requireAuth, requireAdminOrStaff, requireAnyPermission(['finance:write', 'advances:write']), async (req: AuthRequest, res) => {
     try {
-      const { driverId, driverQuery, amount, date, reason, paymentMethod, notes, idempotencyKey } = req.body;
+      const {
+        driverId,
+        driverQuery,
+        amount,
+        date,
+        reason,
+        paymentMethod,
+        notes,
+        idempotencyKey,
+        schoolId,
+        targetMonth,
+        targetYear,
+      } = req.body;
       const resolvedDriver = await resolveDriverByIdOrQuery({ driverId, driverQuery });
       if (!resolvedDriver || !amount || !date) {
         return res.status(400).json({ error: 'يرجى كتابة اسم أو كود سائق مسجل والمبلغ والتاريخ' });
       }
-      const drvSchoolId = await getDriverCurrentSchoolId(resolvedDriver.id);
-      if (!isSchoolAllowed(req.dbUser, drvSchoolId)) {
+      const rawSchoolId = schoolId ? Number(schoolId) : null;
+      const drvSchoolId = rawSchoolId ?? (await getDriverCurrentSchoolId(resolvedDriver.id));
+      if (drvSchoolId && !isSchoolAllowed(req.dbUser, drvSchoolId)) {
         return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
       }
       const result = await recordAdvanceTransaction({
         driverId: resolvedDriver.id,
+        schoolId: drvSchoolId,
+        targetMonth: targetMonth ? Number(targetMonth) : null,
+        targetYear: targetYear ? Number(targetYear) : null,
         amount: Number(amount),
         date: String(date),
         reason: reason ? String(reason).trim() : '',
@@ -3045,6 +3251,8 @@ async function startServer() {
         replacementExternalName,
         vehicleId,
         schoolId,
+        targetMonth,
+        targetYear,
         date,
         actualReplacementCost,
         absentDriverDeduction,
@@ -3080,7 +3288,7 @@ async function startServer() {
         if (!nextSchoolId) nextSchoolId = assign?.schoolId ?? null;
       }
 
-      if (!isSchoolAllowed(req.dbUser, nextSchoolId)) {
+      if (nextSchoolId && !isSchoolAllowed(req.dbUser, nextSchoolId)) {
         return res.status(403).json({ error: 'هذا السائق تابع لمدرسة خارج نطاق صلاحياتك' });
       }
 
@@ -3091,6 +3299,8 @@ async function startServer() {
           replacementExternalName: resolvedRep ? '' : repText,
           vehicleId: nextVehicleId,
           schoolId: nextSchoolId,
+          targetMonth: targetMonth ? Number(targetMonth) : null,
+          targetYear: targetYear ? Number(targetYear) : null,
           date: String(date),
           actualReplacementCost: Number(actualReplacementCost || 0),
           absentDriverDeduction: Number(absentDriverDeduction || 0),

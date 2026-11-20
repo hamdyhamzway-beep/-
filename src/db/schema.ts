@@ -59,6 +59,7 @@ export const schools = pgTable('schools', {
   contractEndDate: text('contract_end_date').notNull().default(''),
   billingCycleType: text('billing_cycle_type').notNull().default('calendar'), // calendar (1..30/31) | shifted (e.g. 13..12)
   billingCycleStartDay: integer('billing_cycle_start_day').notNull().default(1), // 1 for calendar, 13 for Al-Hilaliya
+  billingCycleEndDay: integer('billing_cycle_end_day'), // e.g. 12 for Al-Hilaliya or custom end day
   notes: text('notes').default(''),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -512,6 +513,8 @@ export const billingPeriods = pgTable('billing_periods', {
   key: text('key').notNull().unique(),
   activeMonth: integer('active_month').notNull(),
   activeYear: integer('active_year').notNull(),
+  customStartDate: text('custom_start_date'), // YYYY-MM-DD custom start date override
+  customEndDate: text('custom_end_date'), // YYYY-MM-DD custom end date override
   updatedByUserId: integer('updated_by_user_id').references(() => users.id),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
