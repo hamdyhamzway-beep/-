@@ -23,6 +23,7 @@ import {
   getCairoTodayDateString,
   getCurrentBillingRangeForSchool,
   getFinancialPeriodBounds,
+  normalizeIsoDateInput,
   type FinancialPeriodBounds,
   type SchoolBillingConfig,
   type SchoolBillingRange,
@@ -34,7 +35,7 @@ export function getMonthYearFromDate(
   dateStr: string,
   school?: SchoolBillingConfig | null
 ): { month: number; year: number } {
-  return getBillingPeriodForDate(dateStr, school);
+  return getBillingPeriodForDate(normalizeIsoDateInput(dateStr), school);
 }
 
 export async function getSchoolBillingConfigById(
@@ -59,6 +60,8 @@ export async function getSchoolBillingConfigById(
   const schoolKey = getSchoolBillingPeriodKey(schoolId);
   const [pRow] = await tx
     .select({
+      activeMonth: billingPeriods.activeMonth,
+      activeYear: billingPeriods.activeYear,
       customStartDate: billingPeriods.customStartDate,
       customEndDate: billingPeriods.customEndDate,
     })
@@ -70,6 +73,8 @@ export async function getSchoolBillingConfigById(
     ...school,
     customStartDate: pRow?.customStartDate || null,
     customEndDate: pRow?.customEndDate || null,
+    customPeriodMonth: pRow?.activeMonth ?? null,
+    customPeriodYear: pRow?.activeYear ?? null,
   };
 }
 
@@ -91,7 +96,7 @@ export async function getDriverSchoolBillingConfig(
  * GetFinancialPeriod(schoolId, targetMonth, targetYear)
  * Returns exact StartDate (00:00:00) and EndDate (23:59:59) for the given school & period:
  * - "إشراقة الغد" (calendar): Day 1 00:00:00 to last day of targetMonth 23:59:59
- * - "الهلالية" (shifted, startDay=13): Day 13 of previous month 00:00:00 to Day 12 of targetMonth 23:59:59
+ * - "الهلالية" (shifted, startDay=13, endDay=12): Day 13 of targetMonth 00:00:00 to Day 12 of next month 23:59:59
  */
 export async function getFinancialPeriod(
   schoolId: number | null | undefined,
@@ -282,6 +287,7 @@ export async function getOrRecalculateDriverSalaryForRead(
 export async function recordAdvanceTransaction(params: {
   driverId: number;
   schoolId?: number | null;
+  schoolName?: string | null;
   targetMonth?: number | null;
   targetYear?: number | null;
   amount: number;
@@ -296,6 +302,7 @@ export async function recordAdvanceTransaction(params: {
   if (!Number.isFinite(params.amount) || params.amount <= 0) {
     throw new Error('قيمة السلفة يجب أن تكون أكبر من صفر');
   }
+  const cleanDate = normalizeIsoDateInput(params.date);
 
   return await db.transaction(async (tx) => {
     if (params.idempotencyKey) {
@@ -305,7 +312,25 @@ export async function recordAdvanceTransaction(params: {
         .where(eq(advances.idempotencyKey, params.idempotencyKey))
         .limit(1);
       if (existing[0]) {
-        return { advance: existing[0], duplicate: true };
+        const dupCfg = existing[0].schoolId
+          ? await getSchoolBillingConfigById(tx, existing[0].schoolId)
+          : await getDriverSchoolBillingConfig(tx, existing[0].driverId);
+        const dupPeriod = getMonthYearFromDate(existing[0].date, dupCfg);
+        const dupRange = getBillingDateRangeForPeriod(dupPeriod.month, dupPeriod.year, dupCfg);
+        const dupSalary = await getOrRecalculateDriverSalaryForRead(
+          tx,
+          existing[0].driverId,
+          dupPeriod.month,
+          dupPeriod.year,
+          dupCfg
+        );
+        return {
+          advance: existing[0],
+          salary: dupSalary,
+          duplicate: true,
+          period: dupPeriod,
+          billingRange: dupRange,
+        };
       }
     }
 
@@ -316,9 +341,21 @@ export async function recordAdvanceTransaction(params: {
       .limit(1);
     if (!driver) throw new Error('لم يتم العثور على السائق');
 
-    const schoolConfig = params.schoolId
+    let schoolConfig = params.schoolId
       ? await getSchoolBillingConfigById(tx, params.schoolId)
       : await getDriverSchoolBillingConfig(tx, params.driverId);
+
+    if (!schoolConfig && params.schoolName?.trim()) {
+      const [matchedSchool] = await tx
+        .select({ id: schools.id })
+        .from(schools)
+        .where(eq(schools.name, params.schoolName.trim()))
+        .limit(1);
+      if (matchedSchool) {
+        schoolConfig = await getSchoolBillingConfigById(tx, matchedSchool.id);
+      }
+    }
+
     const effectiveSchoolId = params.schoolId ?? schoolConfig?.id ?? null;
 
     const [insertedAdvance] = await tx
@@ -327,7 +364,7 @@ export async function recordAdvanceTransaction(params: {
         driverId: params.driverId,
         schoolId: effectiveSchoolId,
         amount: params.amount.toFixed(2),
-        date: params.date,
+        date: cleanDate,
         reason: params.reason || '',
         paymentMethod: params.paymentMethod || '',
         notes: params.notes || '',
@@ -336,10 +373,9 @@ export async function recordAdvanceTransaction(params: {
       })
       .returning();
 
-    const { month, year } =
-      params.targetMonth && params.targetYear
-        ? { month: params.targetMonth, year: params.targetYear }
-        : getMonthYearFromDate(params.date, schoolConfig);
+    // Always resolve period from cleanDate + schoolConfig so ledger, advances date range, and salary agree
+    const { month, year } = getMonthYearFromDate(cleanDate, schoolConfig);
+    const billingRange = getBillingDateRangeForPeriod(month, year, schoolConfig);
 
     await tx.insert(financialTransactions).values({
       driverId: params.driverId,
@@ -362,7 +398,7 @@ export async function recordAdvanceTransaction(params: {
       recipientUserId: driver.userId || null,
       type: 'advance',
       title: 'تم تسجيل سلفة جديدة',
-      body: `تم تسجيل سلفة بمبلغ ${params.amount.toLocaleString('ar-EG')} ج.م بتاريخ ${params.date}. صافي راتبك الحالي للشهر: ${Number(salary.netSalary).toLocaleString('ar-EG')} ج.م.`,
+      body: `تم تسجيل سلفة بمبلغ ${params.amount.toLocaleString('ar-EG')} ج.م بتاريخ ${cleanDate}. صافي راتبك الحالي للشهر: ${Number(salary.netSalary).toLocaleString('ar-EG')} ج.م.`,
     });
 
     await tx.insert(auditLogs).values({
@@ -374,7 +410,13 @@ export async function recordAdvanceTransaction(params: {
       ipAddress: params.ipAddress || '',
     });
 
-    return { advance: insertedAdvance, salary, duplicate: false };
+    return {
+      advance: insertedAdvance,
+      salary,
+      duplicate: false,
+      period: { month, year },
+      billingRange,
+    };
   });
 }
 
@@ -384,6 +426,7 @@ export async function recordCoverageTransaction(params: {
   replacementExternalName?: string;
   vehicleId?: number | null;
   schoolId?: number | null;
+  schoolName?: string | null;
   targetMonth?: number | null;
   targetYear?: number | null;
   date: string;
@@ -398,6 +441,7 @@ export async function recordCoverageTransaction(params: {
   if (params.actualReplacementCost < 0 || params.absentDriverDeduction < 0) {
     throw new Error('المبالغ يجب أن تكون موجبة أو صفر');
   }
+  const cleanDate = normalizeIsoDateInput(params.date);
 
   return await db.transaction(async (tx) => {
     if (params.idempotencyKey) {
@@ -407,7 +451,25 @@ export async function recordCoverageTransaction(params: {
         .where(eq(coverageRecords.idempotencyKey, params.idempotencyKey))
         .limit(1);
       if (existing[0]) {
-        return { coverage: existing[0], duplicate: true };
+        const dupCfg = existing[0].schoolId
+          ? await getSchoolBillingConfigById(tx, existing[0].schoolId)
+          : await getDriverSchoolBillingConfig(tx, existing[0].absentDriverId);
+        const dupPeriod = getMonthYearFromDate(existing[0].date, dupCfg);
+        const dupRange = getBillingDateRangeForPeriod(dupPeriod.month, dupPeriod.year, dupCfg);
+        const dupSalary = await getOrRecalculateDriverSalaryForRead(
+          tx,
+          existing[0].absentDriverId,
+          dupPeriod.month,
+          dupPeriod.year,
+          dupCfg
+        );
+        return {
+          coverage: existing[0],
+          salary: dupSalary,
+          duplicate: true,
+          period: dupPeriod,
+          billingRange: dupRange,
+        };
       }
     }
 
@@ -418,9 +480,21 @@ export async function recordCoverageTransaction(params: {
       .limit(1);
     if (!absentDriver) throw new Error('السائق الغائب غير موجود');
 
-    const schoolConfig = params.schoolId
+    let schoolConfig = params.schoolId
       ? await getSchoolBillingConfigById(tx, params.schoolId)
       : await getDriverSchoolBillingConfig(tx, params.absentDriverId);
+
+    if (!schoolConfig && params.schoolName?.trim()) {
+      const [matchedSchool] = await tx
+        .select({ id: schools.id })
+        .from(schools)
+        .where(eq(schools.name, params.schoolName.trim()))
+        .limit(1);
+      if (matchedSchool) {
+        schoolConfig = await getSchoolBillingConfigById(tx, matchedSchool.id);
+      }
+    }
+
     const effectiveSchoolId = params.schoolId ?? schoolConfig?.id ?? null;
 
     const [insertedCoverage] = await tx
@@ -431,7 +505,7 @@ export async function recordCoverageTransaction(params: {
         replacementExternalName: params.replacementExternalName || '',
         vehicleId: params.vehicleId || null,
         schoolId: effectiveSchoolId,
-        date: params.date,
+        date: cleanDate,
         actualReplacementCost: params.actualReplacementCost.toFixed(2),
         absentDriverDeduction: params.absentDriverDeduction.toFixed(2),
         reason: params.reason || '',
@@ -441,10 +515,9 @@ export async function recordCoverageTransaction(params: {
       })
       .returning();
 
-    const { month, year } =
-      params.targetMonth && params.targetYear
-        ? { month: params.targetMonth, year: params.targetYear }
-        : getMonthYearFromDate(params.date, schoolConfig);
+    // Always resolve period from cleanDate + schoolConfig so ledger, coverages date range, and salary agree
+    const { month, year } = getMonthYearFromDate(cleanDate, schoolConfig);
+    const billingRange = getBillingDateRangeForPeriod(month, year, schoolConfig);
 
     if (params.absentDriverDeduction > 0) {
       await tx.insert(financialTransactions).values({
@@ -457,7 +530,7 @@ export async function recordCoverageTransaction(params: {
         amount: params.absentDriverDeduction.toFixed(2),
         referenceType: 'coverage',
         referenceId: insertedCoverage.id,
-        description: `خصم تغطية غياب بتاريخ ${params.date} — ${params.reason || 'تغطية خط'}`,
+        description: `خصم تغطية غياب بتاريخ ${cleanDate} — ${params.reason || 'تغطية خط'}`,
         recordedByUserId: params.recordedByUserId,
       });
     }
@@ -468,7 +541,7 @@ export async function recordCoverageTransaction(params: {
       .values({
         driverId: params.absentDriverId,
         schoolId: effectiveSchoolId,
-        date: params.date,
+        date: cleanDate,
         status: 'covered',
         notes: params.reason || 'تمت التغطية',
         recordedByUserId: params.recordedByUserId,
@@ -490,7 +563,7 @@ export async function recordCoverageTransaction(params: {
       recipientUserId: absentDriver.userId || null,
       type: 'coverage',
       title: 'تسجيل تغطية غياب وخصم مستحق',
-      body: `تم تسجيل تغطية غياب بتاريخ ${params.date} وخصم ${params.absentDriverDeduction.toLocaleString('ar-EG')} ج.م. صافي راتبك الحالي: ${Number(salary.netSalary).toLocaleString('ar-EG')} ج.م.`,
+      body: `تم تسجيل تغطية غياب بتاريخ ${cleanDate} وخصم ${params.absentDriverDeduction.toLocaleString('ar-EG')} ج.م. صافي راتبك الحالي: ${Number(salary.netSalary).toLocaleString('ar-EG')} ج.م.`,
     });
 
     await tx.insert(auditLogs).values({
@@ -502,7 +575,13 @@ export async function recordCoverageTransaction(params: {
       ipAddress: params.ipAddress || '',
     });
 
-    return { coverage: insertedCoverage, salary, duplicate: false };
+    return {
+      coverage: insertedCoverage,
+      salary,
+      duplicate: false,
+      period: { month, year },
+      billingRange,
+    };
   });
 }
 
@@ -697,6 +776,7 @@ export async function updateAdvanceTransaction(params: {
   if (!Number.isFinite(params.amount) || params.amount <= 0) {
     throw new Error('قيمة السلفة يجب أن تكون أكبر من صفر');
   }
+  const cleanDate = normalizeIsoDateInput(params.date);
 
   return await db.transaction(async (tx) => {
     const [existing] = await tx
@@ -706,15 +786,17 @@ export async function updateAdvanceTransaction(params: {
       .limit(1);
     if (!existing) throw new Error('السلفة غير موجودة');
 
-    const schoolConfig = await getDriverSchoolBillingConfig(tx, existing.driverId);
+    const schoolConfig = existing.schoolId
+      ? await getSchoolBillingConfigById(tx, existing.schoolId)
+      : await getDriverSchoolBillingConfig(tx, existing.driverId);
     const oldPeriod = getMonthYearFromDate(existing.date, schoolConfig);
-    const newPeriod = getMonthYearFromDate(params.date, schoolConfig);
+    const newPeriod = getMonthYearFromDate(cleanDate, schoolConfig);
 
     const [updated] = await tx
       .update(advances)
       .set({
         amount: params.amount.toFixed(2),
-        date: params.date,
+        date: cleanDate,
         reason: params.reason || '',
         paymentMethod: params.paymentMethod || '',
         notes: params.notes || '',
@@ -784,7 +866,7 @@ export async function updateAdvanceTransaction(params: {
       ipAddress: params.ipAddress || '',
     });
 
-    return { advance: updated, salary };
+    return { advance: updated, salary, period: newPeriod };
   });
 }
 
@@ -801,7 +883,9 @@ export async function deleteAdvanceTransaction(params: {
       .limit(1);
     if (!existing) throw new Error('السلفة غير موجودة');
 
-    const schoolConfig = await getDriverSchoolBillingConfig(tx, existing.driverId);
+    const schoolConfig = existing.schoolId
+      ? await getSchoolBillingConfigById(tx, existing.schoolId)
+      : await getDriverSchoolBillingConfig(tx, existing.driverId);
     const { month, year } = getMonthYearFromDate(existing.date, schoolConfig);
 
     await tx
@@ -845,6 +929,7 @@ export async function updateCoverageTransaction(params: {
   if (params.actualReplacementCost < 0 || params.absentDriverDeduction < 0) {
     throw new Error('المبالغ يجب أن تكون موجبة أو صفر');
   }
+  const cleanDate = normalizeIsoDateInput(params.date);
 
   return await db.transaction(async (tx) => {
     const [existing] = await tx
@@ -858,7 +943,7 @@ export async function updateCoverageTransaction(params: {
       ? await getSchoolBillingConfigById(tx, existing.schoolId)
       : await getDriverSchoolBillingConfig(tx, existing.absentDriverId);
     const oldPeriod = getMonthYearFromDate(existing.date, schoolConfig);
-    const newPeriod = getMonthYearFromDate(params.date, schoolConfig);
+    const newPeriod = getMonthYearFromDate(cleanDate, schoolConfig);
 
     const [updated] = await tx
       .update(coverageRecords)
@@ -866,7 +951,7 @@ export async function updateCoverageTransaction(params: {
         replacementDriverId:
           params.replacementDriverId !== undefined ? params.replacementDriverId : null,
         replacementExternalName: params.replacementExternalName || '',
-        date: params.date,
+        date: cleanDate,
         actualReplacementCost: params.actualReplacementCost.toFixed(2),
         absentDriverDeduction: params.absentDriverDeduction.toFixed(2),
         reason: params.reason || '',
@@ -887,7 +972,7 @@ export async function updateCoverageTransaction(params: {
       )
       .limit(1);
 
-    const description = `خصم تغطية غياب بتاريخ ${params.date} — ${params.reason || 'تغطية خط'}`;
+    const description = `خصم تغطية غياب بتاريخ ${cleanDate} — ${params.reason || 'تغطية خط'}`;
 
     if (params.absentDriverDeduction > 0 && !existing.isReversed) {
       if (existingLedger[0]) {
@@ -949,7 +1034,7 @@ export async function updateCoverageTransaction(params: {
       ipAddress: params.ipAddress || '',
     });
 
-    return { coverage: updated, salary };
+    return { coverage: updated, salary, period: newPeriod };
   });
 }
 
@@ -1201,13 +1286,26 @@ export async function getSupervisorCycleSummaries(params: {
   allowedSchoolIds?: number[] | null;
 }): Promise<SupervisorCycleSummary[]> {
   const { month, year, schoolId, allowedSchoolIds } = params;
-  const [allSups, allSchools] = await Promise.all([
+  const [allSups, allSchools, allPeriodRows] = await Promise.all([
     db.select().from(supervisors).orderBy(supervisors.fullName),
     db.select().from(schools),
+    db.select().from(billingPeriods),
   ]);
 
-  const schoolMap: Record<number, (typeof allSchools)[number]> = {};
-  for (const s of allSchools) schoolMap[s.id] = s;
+  const periodByKey: Record<string, (typeof allPeriodRows)[number]> = {};
+  for (const p of allPeriodRows) periodByKey[p.key] = p;
+
+  const schoolMap: Record<number, SchoolBillingConfig & { name: string }> = {};
+  for (const s of allSchools) {
+    const pRow = periodByKey[getSchoolBillingPeriodKey(s.id)];
+    schoolMap[s.id] = {
+      ...s,
+      customStartDate: pRow?.customStartDate || null,
+      customEndDate: pRow?.customEndDate || null,
+      customPeriodMonth: pRow?.activeMonth ?? null,
+      customPeriodYear: pRow?.activeYear ?? null,
+    };
+  }
 
   const scopedSups = allSups.filter((sup) => {
     if (schoolId && sup.schoolId !== schoolId) return false;
@@ -1550,7 +1648,7 @@ export async function closeMonthAndStartNext(params: {
       await recalculateDriverSalary(tx, d.id, nextMonth, nextYear, drvSchool);
     }
 
-    // Advance active billing period for the school (or global)
+    // Advance active billing period for the school (or global) and clear previous month's custom date override
     const periodKey = targetSchool ? getSchoolBillingPeriodKey(targetSchool.id) : ACTIVE_PERIOD_KEY;
     await tx
       .insert(billingPeriods)
@@ -1558,6 +1656,8 @@ export async function closeMonthAndStartNext(params: {
         key: periodKey,
         activeMonth: nextMonth,
         activeYear: nextYear,
+        customStartDate: null,
+        customEndDate: null,
         updatedByUserId: params.recordedByUserId,
         updatedAt: new Date(),
       })
@@ -1566,6 +1666,8 @@ export async function closeMonthAndStartNext(params: {
         set: {
           activeMonth: nextMonth,
           activeYear: nextYear,
+          customStartDate: null,
+          customEndDate: null,
           updatedByUserId: params.recordedByUserId,
           updatedAt: new Date(),
         },

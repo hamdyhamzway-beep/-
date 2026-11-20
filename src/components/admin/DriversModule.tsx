@@ -49,7 +49,14 @@ import type {
 
 interface StatementResponse {
   driver: EnrichedDriver;
-  period: { month: number; year: number };
+  period: {
+    month: number;
+    year: number;
+    startDate?: string;
+    endDate?: string;
+    labelAr?: string;
+    shortLabelAr?: string;
+  };
   salary: SalaryRecord;
   advances: AdvanceRecord[];
   coverages: CoverageRecord[];
@@ -121,6 +128,8 @@ export const DriversModule: React.FC<{
   const [statementYear, setStatementYear] = useState(new Date().getFullYear());
   const [statementData, setStatementData] = useState<StatementResponse | null>(null);
   const [statementLoading, setStatementLoading] = useState(false);
+  const pendingAutoPeriodRef = useRef(false);
+  const skipNextAutoFetchRef = useRef(false);
   const [financeBusy, setFinanceBusy] = useState(false);
   const [financeNotice, setFinanceNotice] = useState<string | null>(null);
   const [financeErr, setFinanceErr] = useState<string | null>(null);
@@ -365,13 +374,34 @@ export const DriversModule: React.FC<{
   };
 
   const loadStatement = useCallback(
-    async (id: number, month: number, year: number) => {
+    async (id: number, month: number, year: number, useAuto = false) => {
       setStatementLoading(true);
       try {
         const res = await apiFetch<StatementResponse>(
-          `/api/drivers/${id}/statement?month=${month}&year=${year}`
+          `/api/drivers/${id}/statement?month=${month}&year=${year}${useAuto ? '&autoPeriod=true' : ''}`
         );
         setStatementData(res);
+        if (res.period && (res.period.month !== month || res.period.year !== year)) {
+          skipNextAutoFetchRef.current = true;
+          setStatementMonth(res.period.month);
+          setStatementYear(res.period.year);
+        }
+        const pStart = res.period?.startDate;
+        const pEnd = res.period?.endDate;
+        if (pStart && pEnd) {
+          const today = getLocalTodayDateString();
+          const preferredDate = today >= pStart && today <= pEnd ? today : pStart;
+          setNewAdv((prev) =>
+            prev.date && prev.date >= pStart && prev.date <= pEnd
+              ? prev
+              : { ...prev, date: preferredDate }
+          );
+          setNewCov((prev) =>
+            prev.date && prev.date >= pStart && prev.date <= pEnd
+              ? prev
+              : { ...prev, date: preferredDate }
+          );
+        }
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'تعذر تحميل كشف الحساب');
       } finally {
@@ -414,8 +444,9 @@ export const DriversModule: React.FC<{
     setEditingAdjId(null);
     setStatementTab(getAllowedStatementTab(initialTab));
     if (id === statementDriverId) {
-      loadStatement(id, statementMonth, statementYear);
+      loadStatement(id, statementMonth, statementYear, true);
     } else {
+      pendingAutoPeriodRef.current = true;
       setStatementData(null);
       setStatementDriverId(id);
     }
@@ -428,10 +459,18 @@ export const DriversModule: React.FC<{
     setFinanceErr(null);
     setFinanceNotice(null);
     try {
-      await apiFetch('/api/finance/advances', {
+      const res = await apiFetch<{
+        period?: { month: number; year: number };
+        billingRange?: { startDate?: string; endDate?: string };
+      }>('/api/finance/advances', {
         method: 'POST',
         body: JSON.stringify({
           driverId: statementDriverId,
+          schoolId: statementData?.driver?.schoolId ?? null,
+          schoolName:
+            statementData?.driver?.schoolName && statementData.driver.schoolName !== 'غير معين'
+              ? statementData.driver.schoolName
+              : undefined,
           amount: Number(newAdv.amount),
           date: newAdv.date,
           paymentMethod: newAdv.paymentMethod.trim(),
@@ -439,9 +478,18 @@ export const DriversModule: React.FC<{
           idempotencyKey: `drv-adv-${statementDriverId}-${newAdv.amount}-${Date.now()}`,
         }),
       });
+      const targetMonth = res.period?.month || statementMonth;
+      const targetYear = res.period?.year || statementYear;
+      if (targetMonth !== statementMonth || targetYear !== statementYear) {
+        skipNextAutoFetchRef.current = true;
+        setStatementMonth(targetMonth);
+        setStatementYear(targetYear);
+      }
       setNewAdv((p) => ({ ...p, amount: '', paymentMethod: '', reason: '' }));
-      setFinanceNotice('تمت إضافة السلفة وتحديث صافي الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      setFinanceNotice(
+        `تمت إضافة السلفة وتحديث صافي الراتب (فترة شهر ${targetMonth} / ${targetYear}).`
+      );
+      await Promise.all([loadStatement(statementDriverId, targetMonth, targetYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر إضافة السلفة');
     } finally {
@@ -456,19 +504,29 @@ export const DriversModule: React.FC<{
     setFinanceErr(null);
     setFinanceNotice(null);
     try {
-      await apiFetch(`/api/finance/advances/${editingAdvId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          amount: Number(editAdv.amount),
-          date: editAdv.date,
-          paymentMethod: editAdv.paymentMethod.trim(),
-          reason: editAdv.reason.trim(),
-          notes: editAdv.notes.trim(),
-        }),
-      });
+      const res = await apiFetch<{ period?: { month: number; year: number } }>(
+        `/api/finance/advances/${editingAdvId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            amount: Number(editAdv.amount),
+            date: editAdv.date,
+            paymentMethod: editAdv.paymentMethod.trim(),
+            reason: editAdv.reason.trim(),
+            notes: editAdv.notes.trim(),
+          }),
+        }
+      );
+      const targetMonth = res.period?.month || statementMonth;
+      const targetYear = res.period?.year || statementYear;
+      if (targetMonth !== statementMonth || targetYear !== statementYear) {
+        skipNextAutoFetchRef.current = true;
+        setStatementMonth(targetMonth);
+        setStatementYear(targetYear);
+      }
       setEditingAdvId(null);
       setFinanceNotice('تم تعديل السلفة وإعادة احتساب الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      await Promise.all([loadStatement(statementDriverId, targetMonth, targetYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر تعديل السلفة');
     } finally {
@@ -485,7 +543,7 @@ export const DriversModule: React.FC<{
       await apiFetch(`/api/finance/advances/${advId}`, { method: 'DELETE' });
       if (editingAdvId === advId) setEditingAdvId(null);
       setFinanceNotice('تم حذف السلفة وتحديث صافي الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      await Promise.all([loadStatement(statementDriverId, statementMonth, statementYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر حذف السلفة');
     } finally {
@@ -500,18 +558,33 @@ export const DriversModule: React.FC<{
     setFinanceErr(null);
     setFinanceNotice(null);
     try {
-      await apiFetch('/api/finance/coverage', {
-        method: 'POST',
-        body: JSON.stringify({
-          absentDriverId: statementDriverId,
-          replacementQuery: newCov.replacementQuery.trim(),
-          date: newCov.date,
-          actualReplacementCost: Number(newCov.actualReplacementCost || 0),
-          absentDriverDeduction: Number(newCov.absentDriverDeduction || 0),
-          reason: newCov.reason.trim(),
-          idempotencyKey: `drv-cov-${statementDriverId}-${newCov.date}-${Date.now()}`,
-        }),
-      });
+      const res = await apiFetch<{ period?: { month: number; year: number } }>(
+        '/api/finance/coverage',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            absentDriverId: statementDriverId,
+            schoolId: statementData?.driver?.schoolId ?? null,
+            schoolName:
+              statementData?.driver?.schoolName && statementData.driver.schoolName !== 'غير معين'
+                ? statementData.driver.schoolName
+                : undefined,
+            replacementQuery: newCov.replacementQuery.trim(),
+            date: newCov.date,
+            actualReplacementCost: Number(newCov.actualReplacementCost || 0),
+            absentDriverDeduction: Number(newCov.absentDriverDeduction || 0),
+            reason: newCov.reason.trim(),
+            idempotencyKey: `drv-cov-${statementDriverId}-${newCov.date}-${Date.now()}`,
+          }),
+        }
+      );
+      const targetMonth = res.period?.month || statementMonth;
+      const targetYear = res.period?.year || statementYear;
+      if (targetMonth !== statementMonth || targetYear !== statementYear) {
+        skipNextAutoFetchRef.current = true;
+        setStatementMonth(targetMonth);
+        setStatementYear(targetYear);
+      }
       setNewCov((p) => ({
         ...p,
         replacementQuery: '',
@@ -519,8 +592,10 @@ export const DriversModule: React.FC<{
         absentDriverDeduction: '',
         reason: '',
       }));
-      setFinanceNotice('تم تسجيل التغطية وتحديث صافي الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      setFinanceNotice(
+        `تم تسجيل التغطية وتحديث صافي الراتب (فترة شهر ${targetMonth} / ${targetYear}).`
+      );
+      await Promise.all([loadStatement(statementDriverId, targetMonth, targetYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر تسجيل التغطية');
     } finally {
@@ -535,20 +610,30 @@ export const DriversModule: React.FC<{
     setFinanceErr(null);
     setFinanceNotice(null);
     try {
-      await apiFetch(`/api/finance/coverage/${editingCovId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          replacementQuery: editCov.replacementQuery.trim(),
-          date: editCov.date,
-          actualReplacementCost: Number(editCov.actualReplacementCost || 0),
-          absentDriverDeduction: Number(editCov.absentDriverDeduction || 0),
-          reason: editCov.reason.trim(),
-          notes: editCov.notes.trim(),
-        }),
-      });
+      const res = await apiFetch<{ period?: { month: number; year: number } }>(
+        `/api/finance/coverage/${editingCovId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            replacementQuery: editCov.replacementQuery.trim(),
+            date: editCov.date,
+            actualReplacementCost: Number(editCov.actualReplacementCost || 0),
+            absentDriverDeduction: Number(editCov.absentDriverDeduction || 0),
+            reason: editCov.reason.trim(),
+            notes: editCov.notes.trim(),
+          }),
+        }
+      );
+      const targetMonth = res.period?.month || statementMonth;
+      const targetYear = res.period?.year || statementYear;
+      if (targetMonth !== statementMonth || targetYear !== statementYear) {
+        skipNextAutoFetchRef.current = true;
+        setStatementMonth(targetMonth);
+        setStatementYear(targetYear);
+      }
       setEditingCovId(null);
       setFinanceNotice('تم تعديل سجل التغطية وإعادة احتساب الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      await Promise.all([loadStatement(statementDriverId, targetMonth, targetYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر تعديل التغطية');
     } finally {
@@ -565,7 +650,7 @@ export const DriversModule: React.FC<{
       await apiFetch(`/api/finance/coverage/${covId}`, { method: 'DELETE' });
       if (editingCovId === covId) setEditingCovId(null);
       setFinanceNotice('تم حذف التغطية وتحديث صافي الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      await Promise.all([loadStatement(statementDriverId, statementMonth, statementYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر حذف التغطية');
     } finally {
@@ -593,7 +678,7 @@ export const DriversModule: React.FC<{
       });
       setNewAdj((p) => ({ ...p, amount: '', description: '' }));
       setFinanceNotice('تم حفظ التسوية وتحديث الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      await Promise.all([loadStatement(statementDriverId, statementMonth, statementYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر تسجيل التسوية');
     } finally {
@@ -618,7 +703,7 @@ export const DriversModule: React.FC<{
       });
       setEditingAdjId(null);
       setFinanceNotice('تم تعديل التسوية وتحديث صافي الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      await Promise.all([loadStatement(statementDriverId, statementMonth, statementYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر تعديل التسوية');
     } finally {
@@ -635,7 +720,7 @@ export const DriversModule: React.FC<{
       await apiFetch(`/api/finance/adjustments/${adjId}`, { method: 'DELETE' });
       if (editingAdjId === adjId) setEditingAdjId(null);
       setFinanceNotice('تم حذف التسوية وتحديث الراتب.');
-      await loadStatement(statementDriverId, statementMonth, statementYear);
+      await Promise.all([loadStatement(statementDriverId, statementMonth, statementYear), loadAll()]);
     } catch (err: unknown) {
       setFinanceErr(err instanceof Error ? err.message : 'تعذر حذف التسوية');
     } finally {
@@ -646,7 +731,13 @@ export const DriversModule: React.FC<{
   useEffect(() => {
     if (statementDriverId) {
       clearWhatsappPreview();
-      loadStatement(statementDriverId, statementMonth, statementYear);
+      if (skipNextAutoFetchRef.current) {
+        skipNextAutoFetchRef.current = false;
+        return;
+      }
+      const useAuto = pendingAutoPeriodRef.current;
+      pendingAutoPeriodRef.current = false;
+      loadStatement(statementDriverId, statementMonth, statementYear, useAuto);
     }
   }, [statementDriverId, statementMonth, statementYear, loadStatement, clearWhatsappPreview]);
 
@@ -1002,7 +1093,6 @@ export const DriversModule: React.FC<{
                       <div className="font-mono font-medium text-slate-800">
                         {d.busNumber} · {d.registrationNumber}
                       </div>
-                      <div className="text-slate-500 mt-0.5">المالك: {d.vehicleOwnerName}</div>
                     </td>
                     {canFinanceRead && (
                       <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
@@ -1529,7 +1619,12 @@ export const DriversModule: React.FC<{
                     </button>
                   ))}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {statementData?.period?.startDate && statementData?.period?.endDate && (
+                    <span className="rounded-lg bg-amber-50 border border-amber-200 px-2.5 py-1 font-mono text-[11px] font-bold text-[#0B1F3A] tabular-nums">
+                      {statementData.period.startDate} → {statementData.period.endDate}
+                    </span>
+                  )}
                   <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1">
                     <span className="text-[11px] text-slate-500">الشهر</span>
                     <input
@@ -1672,6 +1767,11 @@ export const DriversModule: React.FC<{
                           <div className="font-mono font-bold text-xs text-[#C89B3C] tabular-nums mt-0.5">
                             شهر {statementData.period.month} / {statementData.period.year}
                           </div>
+                          {statementData.period.startDate && statementData.period.endDate && (
+                            <div className="font-mono text-[10px] text-slate-300 tabular-nums mt-0.5">
+                              {statementData.period.startDate} → {statementData.period.endDate}
+                            </div>
+                          )}
                         </div>
                       </div>
 
@@ -1737,7 +1837,9 @@ export const DriversModule: React.FC<{
                                 statementData.transactions.map((t) => (
                                   <tr key={t.id}>
                                     <td className="py-2.5 px-3 font-mono text-slate-500 tabular-nums">
-                                      {new Date(t.createdAt).toLocaleDateString('ar-EG')}
+                                      {new Date(t.createdAt).toLocaleDateString('ar-EG', {
+                                        timeZone: 'Africa/Cairo',
+                                      })}
                                     </td>
                                     <td className="py-2.5 px-3 font-semibold text-slate-700">
                                       {t.type === 'advance'

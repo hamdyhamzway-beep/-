@@ -8,6 +8,8 @@ export interface SchoolBillingConfig {
   billingCycleEndDay?: number | null;
   customStartDate?: string | null;
   customEndDate?: string | null;
+  customPeriodMonth?: number | null;
+  customPeriodYear?: number | null;
 }
 
 export interface ResolvedBillingRule {
@@ -16,6 +18,8 @@ export interface ResolvedBillingRule {
   endDay: number;
   customStartDate?: string | null;
   customEndDate?: string | null;
+  customPeriodMonth?: number | null;
+  customPeriodYear?: number | null;
 }
 
 export interface SchoolBillingRange {
@@ -45,6 +49,12 @@ function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
 
+function toWesternDigits(input: string): string {
+  return input
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+}
+
 function normalizeArabicNameForCycle(input: string): string {
   return input
     .trim()
@@ -69,22 +79,67 @@ export function getCairoTodayDateString(): string {
   }
 }
 
+/**
+ * Normalizes date strings (YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, ISO timestamps, Arabic digits)
+ * strictly into YYYY-MM-DD without UTC timezone drift.
+ */
+export function normalizeIsoDateInput(dateStr?: string | null): string {
+  const raw = toWesternDigits(String(dateStr || '').trim());
+  if (!raw) return getCairoTodayDateString();
+
+  // YYYY-MM-DD or YYYY/MM/DD (optionally followed by T...)
+  const ymd = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T\s].*)?$/);
+  if (ymd) {
+    const y = Number(ymd[1]);
+    const m = Number(ymd[2]);
+    const d = Number(ymd[3]);
+    if (y >= 2000 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${pad2(m)}-${pad2(d)}`;
+    }
+  }
+
+  // DD/MM/YYYY or DD-MM-YYYY
+  const dmy = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s.*)?$/);
+  if (dmy) {
+    const d = Number(dmy[1]);
+    const m = Number(dmy[2]);
+    const y = Number(dmy[3]);
+    if (y >= 2000 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${y}-${pad2(m)}-${pad2(d)}`;
+    }
+  }
+
+  return getCairoTodayDateString();
+}
+
 export function getDaysInMonth(year: number, month: number): number {
   return new Date(year, month, 0).getDate();
 }
 
 /**
  * Resolves the financial cycle rule for a school.
- * - "مدرسة إشراقة الغد" (or default): calendar month (day 1 00:00 to last day 23:59:59)
- * - "مدرسة الهلالية" (or any school configured with shifted / startDay > 1):
- *   day 13 of previous month 00:00 to day 12 of target month 23:59:59
+ * - Calendar cycle (default): day 1 00:00 to last day 23:59:59 of targetMonth
+ * - "مدرسة الهلالية" / "هلاليه للغات" (shifted, startDay=13, endDay=12):
+ *   day 13 of CURRENT targetMonth 00:00 to day 12 of NEXT month 23:59:59
  */
 export function resolveSchoolBillingRule(school?: SchoolBillingConfig | null): ResolvedBillingRule {
   const rawType = school?.billingCycleType;
   const rawStartDay = Number(school?.billingCycleStartDay || 0);
   const rawEndDay = Number(school?.billingCycleEndDay || 0);
-  const customStartDate = school?.customStartDate?.trim() || null;
-  const customEndDate = school?.customEndDate?.trim() || null;
+  const customStartDate = school?.customStartDate?.trim()
+    ? normalizeIsoDateInput(school.customStartDate)
+    : null;
+  const customEndDate = school?.customEndDate?.trim()
+    ? normalizeIsoDateInput(school.customEndDate)
+    : null;
+  const customPeriodMonth =
+    school?.customPeriodMonth && Number.isFinite(Number(school.customPeriodMonth))
+      ? Number(school.customPeriodMonth)
+      : null;
+  const customPeriodYear =
+    school?.customPeriodYear && Number.isFinite(Number(school.customPeriodYear))
+      ? Number(school.customPeriodYear)
+      : null;
 
   if (rawType === 'shifted' || (Number.isFinite(rawStartDay) && rawStartDay > 1 && rawStartDay <= 31)) {
     const safeStartDay =
@@ -103,6 +158,8 @@ export function resolveSchoolBillingRule(school?: SchoolBillingConfig | null): R
       endDay: safeEndDay,
       customStartDate,
       customEndDate,
+      customPeriodMonth,
+      customPeriodYear,
     };
   }
 
@@ -117,18 +174,22 @@ export function resolveSchoolBillingRule(school?: SchoolBillingConfig | null): R
       endDay: safeEndDay,
       customStartDate,
       customEndDate,
+      customPeriodMonth,
+      customPeriodYear,
     };
   }
 
-  // Smart fallback by school name if DB column was not yet explicitly configured
+  // Smart fallback by school name (matches "مدرسة الهلالية", "هلاليه للغات", "Al-Hilaliya")
   const normName = normalizeArabicNameForCycle(school?.name || '');
-  if (normName.includes('الهلالي') || normName.includes('hilal')) {
+  if (normName.includes('هلالي') || normName.includes('hilal')) {
     return {
       cycleType: 'shifted',
       startDay: 13,
       endDay: 12,
       customStartDate,
       customEndDate,
+      customPeriodMonth,
+      customPeriodYear,
     };
   }
 
@@ -138,12 +199,17 @@ export function resolveSchoolBillingRule(school?: SchoolBillingConfig | null): R
     endDay: 31,
     customStartDate,
     customEndDate,
+    customPeriodMonth,
+    customPeriodYear,
   };
 }
 
 /**
  * Given a target billing period (month, year) and a school's billing rule,
  * returns the exact inclusive [StartDate 00:00:00, EndDate 23:59:59] range.
+ *
+ * For Al-Hilaliya (shifted, startDay=13, endDay=12):
+ * Period (11, 2026) -> 2026-11-13 00:00:00 to 2026-12-12 23:59:59.
  */
 export function getBillingDateRangeForPeriod(
   month: number,
@@ -154,12 +220,21 @@ export function getBillingDateRangeForPeriod(
   const safeYear = Math.min(2099, Math.max(2020, Math.floor(year) || new Date().getFullYear()));
   const rule = resolveSchoolBillingRule(school);
 
-  // If a custom period override exists for this school
+  // Apply customStartDate / customEndDate only when it matches the requested period (or unscoped)
+  const customPeriodMatches =
+    rule.customPeriodMonth === null ||
+    rule.customPeriodMonth === undefined ||
+    rule.customPeriodYear === null ||
+    rule.customPeriodYear === undefined ||
+    (safeMonth === rule.customPeriodMonth && safeYear === rule.customPeriodYear);
+
   if (
+    customPeriodMatches &&
     rule.customStartDate &&
     rule.customEndDate &&
     /^\d{4}-\d{2}-\d{2}$/.test(rule.customStartDate) &&
-    /^\d{4}-\d{2}-\d{2}$/.test(rule.customEndDate)
+    /^\d{4}-\d{2}-\d{2}$/.test(rule.customEndDate) &&
+    rule.customStartDate <= rule.customEndDate
   ) {
     const sDate = rule.customStartDate;
     const eDate = rule.customEndDate;
@@ -206,17 +281,18 @@ export function getBillingDateRangeForPeriod(
   const endDay = rule.endDay;
 
   if (startDay > endDay) {
-    // Standard shifted cycle (e.g. 13 of previous month to 12 of target month)
-    const prevMonth = safeMonth === 1 ? 12 : safeMonth - 1;
-    const prevYear = safeMonth === 1 ? safeYear - 1 : safeYear;
+    // Shifted cycle: day `startDay` of CURRENT month -> day `endDay` of NEXT month
+    // Example (Al-Hilaliya, month=11, year=2026): 2026-11-13 -> 2026-12-12
+    const nextMonth = safeMonth === 12 ? 1 : safeMonth + 1;
+    const nextYear = safeMonth === 12 ? safeYear + 1 : safeYear;
 
-    const prevMonthDays = getDaysInMonth(prevYear, prevMonth);
-    const clampedStartDay = Math.min(startDay, prevMonthDays);
     const currMonthDays = getDaysInMonth(safeYear, safeMonth);
-    const clampedEndDay = Math.min(endDay, currMonthDays);
+    const clampedStartDay = Math.min(startDay, currMonthDays);
+    const nextMonthDays = getDaysInMonth(nextYear, nextMonth);
+    const clampedEndDay = Math.min(endDay, nextMonthDays);
 
-    const startDate = `${prevYear}-${pad2(prevMonth)}-${pad2(clampedStartDay)}`;
-    const endDate = `${safeYear}-${pad2(safeMonth)}-${pad2(clampedEndDay)}`;
+    const startDate = `${safeYear}-${pad2(safeMonth)}-${pad2(clampedStartDay)}`;
+    const endDate = `${nextYear}-${pad2(nextMonth)}-${pad2(clampedEndDay)}`;
 
     return {
       month: safeMonth,
@@ -230,8 +306,8 @@ export function getBillingDateRangeForPeriod(
       cycleType: 'shifted',
       startDay: clampedStartDay,
       endDay: clampedEndDay,
-      labelAr: `دورة مرحّلة: من ${startDate} إلى ${endDate} (${clampedStartDay}/${prevMonth} ← ${clampedEndDay}/${safeMonth} · 11:59 م)`,
-      shortLabelAr: `${clampedStartDay}/${prevMonth} → ${clampedEndDay}/${safeMonth}`,
+      labelAr: `دورة مرحّلة: من ${startDate} إلى ${endDate} (${clampedStartDay}/${safeMonth} ← ${clampedEndDay}/${nextMonth} · 11:59 م)`,
+      shortLabelAr: `${clampedStartDay}/${safeMonth} → ${clampedEndDay}/${nextMonth}`,
     };
   }
 
@@ -280,31 +356,33 @@ export function getFinancialPeriodBounds(
 }
 
 /**
- * Given a transaction or trip date (YYYY-MM-DD) and a school's billing rule,
+ * Given a transaction or trip date (YYYY-MM-DD / DD/MM/YYYY) and a school's billing rule,
  * returns the canonical (month, year) billing period that this date belongs to.
+ *
+ * For Al-Hilaliya (startDay=13, endDay=12):
+ * - 2026-11-13..2026-11-30 (day >= 13) -> { month: 11, year: 2026 }
+ * - 2026-12-01..2026-12-12 (day <= 12) -> { month: 11, year: 2026 }
  */
 export function getBillingPeriodForDate(
   dateStr: string,
   school?: SchoolBillingConfig | null
 ): { month: number; year: number } {
   const rule = resolveSchoolBillingRule(school);
-  const parts = String(dateStr || '').trim().split('-');
-  let year = Number(parts[0]);
-  let month = Number(parts[1]);
-  let day = Number(parts[2]);
+  const cleanDate = normalizeIsoDateInput(dateStr);
+  const parts = cleanDate.split('-');
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
 
-  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
-    const todayParts = getCairoTodayDateString().split('-');
-    year = Number(todayParts[0]);
-    month = Number(todayParts[1]);
-    day = Number(todayParts[2]);
-  }
-  if (!Number.isFinite(day) || day < 1 || day > 31) {
-    day = 1;
-  }
-
-  // If a custom date range is set and date falls within it, return the period of the override
-  if (rule.customStartDate && rule.customEndDate && isDateInRange(dateStr, rule.customStartDate, rule.customEndDate)) {
+  // If a custom date range is configured for a specific period and the date falls inside it, return that period
+  if (
+    rule.customStartDate &&
+    rule.customEndDate &&
+    isDateInRange(cleanDate, rule.customStartDate, rule.customEndDate)
+  ) {
+    if (rule.customPeriodMonth && rule.customPeriodYear) {
+      return { month: rule.customPeriodMonth, year: rule.customPeriodYear };
+    }
     return { month, year };
   }
 
@@ -313,25 +391,16 @@ export function getBillingPeriodForDate(
   }
 
   if (rule.startDay > rule.endDay) {
-    // Day >= startDay (e.g. 13..31) belongs to NEXT month's shifted period (13 current -> 12 next)
+    // Day >= startDay (e.g. 13..31 of Nov) belongs to CURRENT month's shifted period (11/2026)
     if (day >= rule.startDay) {
-      if (month === 12) {
-        return { month: 1, year: year + 1 };
-      }
-      return { month: month + 1, year };
-    }
-
-    // Day <= endDay (e.g. 1..12) belongs to THIS month's shifted period (13 prev -> 12 current)
-    if (day <= rule.endDay) {
       return { month, year };
     }
 
-    // If day is between endDay and startDay (e.g. if startDay=15, endDay=10, day 11..14),
-    // assign to next month's cycle
-    if (month === 12) {
-      return { month: 1, year: year + 1 };
+    // Day <= endDay (e.g. 1..12 of Dec) belongs to PREVIOUS month's shifted period (11/2026)
+    if (month === 1) {
+      return { month: 12, year: year - 1 };
     }
-    return { month: month + 1, year };
+    return { month: month - 1, year };
   }
 
   return { month, year };
@@ -344,7 +413,7 @@ export function getCurrentBillingRangeForSchool(
   school?: SchoolBillingConfig | null,
   referenceDate?: string
 ): SchoolBillingRange {
-  const today = referenceDate || getCairoTodayDateString();
+  const today = referenceDate ? normalizeIsoDateInput(referenceDate) : getCairoTodayDateString();
   const { month, year } = getBillingPeriodForDate(today, school);
   return getBillingDateRangeForPeriod(month, year, school);
 }
@@ -355,6 +424,6 @@ export function isDateInRange(
   endDate: string
 ): boolean {
   if (!dateStr) return false;
-  const clean = String(dateStr).slice(0, 10);
+  const clean = normalizeIsoDateInput(dateStr);
   return clean >= startDate && clean <= endDate;
 }

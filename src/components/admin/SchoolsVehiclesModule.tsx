@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Building2,
   Bus,
+  Calendar,
   Edit3,
   Plus,
   Route,
@@ -63,13 +64,25 @@ export const SchoolsVehiclesModule: React.FC = () => {
   const [editingVehicleId, setEditingVehicleId] = useState<number | null>(null);
   const [showRouteModal, setShowRouteModal] = useState(false);
   const [editingRouteId, setEditingRouteId] = useState<number | null>(null);
+  const [showBillingModal, setShowBillingModal] = useState(false);
+  const [billingTargetSchool, setBillingTargetSchool] = useState<SchoolItem | null>(null);
+  const [billingForm, setBillingForm] = useState({
+    cycleType: 'calendar' as 'calendar' | 'shifted',
+    startDay: '1',
+    endDay: '31',
+    activeMonth: '',
+    activeYear: '',
+    customStartDate: '',
+    customEndDate: '',
+  });
   const [modalError, setModalError] = useState<string | null>(null);
   const [savingModal, setSavingModal] = useState(false);
 
   useEscapeKey(
-    Boolean(showRouteModal || showVehicleModal || showSchoolModal),
+    Boolean(showBillingModal || showRouteModal || showVehicleModal || showSchoolModal),
     () => {
-      if (showRouteModal) setShowRouteModal(false);
+      if (showBillingModal) setShowBillingModal(false);
+      else if (showRouteModal) setShowRouteModal(false);
       else if (showVehicleModal) setShowVehicleModal(false);
       else if (showSchoolModal) setShowSchoolModal(false);
     }
@@ -85,6 +98,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
     contractEndDate: '',
     billingCycleType: 'calendar' as 'calendar' | 'shifted',
     billingCycleStartDay: '1',
+    billingCycleEndDay: '31',
     notes: '',
   });
 
@@ -184,13 +198,19 @@ export const SchoolsVehiclesModule: React.FC = () => {
     setModalError(null);
     setSavingModal(true);
     try {
+      const startDay =
+        schoolForm.billingCycleType === 'calendar'
+          ? 1
+          : Math.min(28, Math.max(2, Number(schoolForm.billingCycleStartDay || 13)));
+      const endDay =
+        schoolForm.billingCycleType === 'calendar'
+          ? Math.min(31, Math.max(1, Number(schoolForm.billingCycleEndDay || 31)))
+          : Math.min(28, Math.max(1, Number(schoolForm.billingCycleEndDay || Math.max(1, startDay - 1))));
       const payload = {
         ...schoolForm,
         monthlyContractValue: Number(schoolForm.monthlyContractValue || 0),
-        billingCycleStartDay:
-          schoolForm.billingCycleType === 'calendar'
-            ? 1
-            : Math.min(28, Math.max(2, Number(schoolForm.billingCycleStartDay || 13))),
+        billingCycleStartDay: startDay,
+        billingCycleEndDay: endDay,
       };
       if (editingSchoolId) {
         await apiFetch(`/api/schools/${editingSchoolId}`, {
@@ -215,11 +235,66 @@ export const SchoolsVehiclesModule: React.FC = () => {
         contractEndDate: '',
         billingCycleType: 'calendar',
         billingCycleStartDay: '1',
+        billingCycleEndDay: '31',
         notes: '',
       });
       await loadData();
     } catch (err: unknown) {
       setModalError(err instanceof Error ? err.message : 'تعذر حفظ بيانات المدرسة');
+    } finally {
+      setSavingModal(false);
+    }
+  };
+
+  const openBillingPeriodModal = (s: SchoolItem) => {
+    setModalError(null);
+    setBillingTargetSchool(s);
+    const resolvedType = s.billingCycleType === 'shifted' ? 'shifted' : 'calendar';
+    const startDayNum =
+      resolvedType === 'shifted'
+        ? s.billingCycleStartDay && s.billingCycleStartDay > 1
+          ? s.billingCycleStartDay
+          : 13
+        : s.billingCycleStartDay || 1;
+    const endDayNum =
+      resolvedType === 'shifted'
+        ? s.billingCycleEndDay || Math.max(1, startDayNum - 1)
+        : s.billingCycleEndDay || 31;
+    setBillingForm({
+      cycleType: resolvedType,
+      startDay: String(startDayNum),
+      endDay: String(endDayNum),
+      activeMonth: String(s.activePeriod?.month || s.currentBillingRange?.month || billingPeriod?.month || new Date().getMonth() + 1),
+      activeYear: String(s.activePeriod?.year || s.currentBillingRange?.year || billingPeriod?.year || new Date().getFullYear()),
+      customStartDate: s.customStartDate || '',
+      customEndDate: s.customEndDate || '',
+    });
+    setShowBillingModal(true);
+  };
+
+  const handleSaveBillingPeriod = async (e: React.FormEvent, resetCustomOnly = false) => {
+    e.preventDefault();
+    if (!billingTargetSchool) return;
+    setModalError(null);
+    setSavingModal(true);
+    try {
+      await apiFetch(`/api/schools/${billingTargetSchool.id}/billing-period`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          cycleType: billingForm.cycleType,
+          startDay: Number(billingForm.startDay),
+          endDay: Number(billingForm.endDay),
+          activeMonth: Number(billingForm.activeMonth) || undefined,
+          activeYear: Number(billingForm.activeYear) || undefined,
+          customStartDate: resetCustomOnly ? null : billingForm.customStartDate || null,
+          customEndDate: resetCustomOnly ? null : billingForm.customEndDate || null,
+        }),
+      });
+      setShowBillingModal(false);
+      setBillingTargetSchool(null);
+      await loadData();
+    } catch (err: unknown) {
+      setModalError(err instanceof Error ? err.message : 'تعذر حفظ إعدادات الفترة الشهرية للمدرسة');
     } finally {
       setSavingModal(false);
     }
@@ -324,6 +399,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
       contractEndDate: '',
       billingCycleType: 'calendar',
       billingCycleStartDay: '1',
+      billingCycleEndDay: '31',
       notes: '',
     });
     setShowSchoolModal(true);
@@ -333,8 +409,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
     setModalError(null);
     setEditingSchoolId(s.id);
     const resolvedType = s.billingCycleType === 'shifted' ? 'shifted' : 'calendar';
-    const resolvedDay =
-      resolvedType === 'shifted' ? String(s.billingCycleStartDay && s.billingCycleStartDay > 1 ? s.billingCycleStartDay : 13) : '1';
+    const resolvedStartNum =
+      resolvedType === 'shifted'
+        ? s.billingCycleStartDay && s.billingCycleStartDay > 1
+          ? s.billingCycleStartDay
+          : 13
+        : s.billingCycleStartDay || 1;
+    const resolvedEndNum =
+      resolvedType === 'shifted'
+        ? s.billingCycleEndDay || Math.max(1, resolvedStartNum - 1)
+        : s.billingCycleEndDay || 31;
     setSchoolForm({
       name: s.name,
       contactName: s.contactName || '',
@@ -344,7 +428,8 @@ export const SchoolsVehiclesModule: React.FC = () => {
       contractStartDate: s.contractStartDate || '',
       contractEndDate: s.contractEndDate || '',
       billingCycleType: resolvedType,
-      billingCycleStartDay: resolvedDay,
+      billingCycleStartDay: String(resolvedStartNum),
+      billingCycleEndDay: String(resolvedEndNum),
       notes: s.notes || '',
     });
     setShowSchoolModal(true);
@@ -620,7 +705,15 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   </div>
 
                   {canSchoolsWrite && (
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openBillingPeriodModal(selectedSchoolObj)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] px-3 py-2 text-xs font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer"
+                      >
+                        <Calendar className="w-3.5 h-3.5" />
+                        تخصيص الفترة الشهرية
+                      </button>
                       <button
                         type="button"
                         onClick={() => openEditSchool(selectedSchoolObj)}
@@ -924,7 +1017,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                     <span className="font-mono tabular-nums">
                       العقد: {s.contractStartDate || '—'} إلى {s.contractEndDate || '—'}
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         onClick={() => navigateSubView('schools', s.id)}
@@ -934,13 +1027,23 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         {canFinanceRead ? 'عرض العقد والسائقين والربح' : 'عرض السائقين والمركبات'}
                       </button>
                       {canSchoolsWrite && (
-                        <button
-                          onClick={() => openEditSchool(s)}
-                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
-                        >
-                          <Edit3 className="w-3 h-3" />
-                          تعديل
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => openBillingPeriodModal(s)}
+                            className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-200 px-2 py-1 text-[11px] font-bold text-[#0B1F3A] hover:bg-amber-100 cursor-pointer"
+                          >
+                            <Calendar className="w-3 h-3 text-[#C89B3C]" />
+                            بداية ونهاية الشهر
+                          </button>
+                          <button
+                            onClick={() => openEditSchool(s)}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            تعديل
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -1115,12 +1218,18 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 onChange={(e) => {
                   const nextName = e.target.value;
                   setSchoolForm((prev) => {
-                    const isHilal = !editingSchoolId && (nextName.includes('الهلالي') || nextName.toLowerCase().includes('hilal'));
+                    const isHilal =
+                      !editingSchoolId &&
+                      (nextName.includes('هلالي') || nextName.toLowerCase().includes('hilal'));
                     return {
                       ...prev,
                       name: nextName,
                       ...(isHilal && prev.billingCycleType === 'calendar'
-                        ? { billingCycleType: 'shifted' as const, billingCycleStartDay: '13' }
+                        ? {
+                            billingCycleType: 'shifted' as const,
+                            billingCycleStartDay: '13',
+                            billingCycleEndDay: '12',
+                          }
                         : {}),
                     };
                   });
@@ -1177,6 +1286,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         ...prev,
                         billingCycleType: 'calendar',
                         billingCycleStartDay: '1',
+                        billingCycleEndDay: '31',
                       }))
                     }
                     className={`rounded-lg border p-2.5 text-right transition-colors cursor-pointer ${
@@ -1202,6 +1312,10 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         billingCycleType: 'shifted',
                         billingCycleStartDay:
                           Number(prev.billingCycleStartDay) > 1 ? prev.billingCycleStartDay : '13',
+                        billingCycleEndDay:
+                          Number(prev.billingCycleEndDay) >= 1 && Number(prev.billingCycleEndDay) <= 28
+                            ? prev.billingCycleEndDay
+                            : '12',
                       }))
                     }
                     className={`rounded-lg border p-2.5 text-right transition-colors cursor-pointer ${
@@ -1216,32 +1330,49 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         schoolForm.billingCycleType === 'shifted' ? 'text-[#ebd089]' : 'text-slate-500'
                       }`}
                     >
-                      من يوم 13 الشهر السابق إلى 12 الشهر الحالي · 11:59 م (مثل: الهلالية)
+                      من يوم 13 الشهر الحالي إلى 12 الشهر التالي · 11:59 م (مثل: الهلالية)
                     </div>
                   </button>
                 </div>
                 {schoolForm.billingCycleType === 'shifted' && (
-                  <div className="flex items-center justify-between gap-3 pt-1">
-                    <label className="text-[11px] font-semibold text-slate-700">
-                      يوم بداية الدورة المالية (من الشهر السابق):
-                    </label>
-                    <div className="flex items-center gap-2">
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        يوم البداية (الشهر الحالي)
+                      </label>
                       <input
                         type="number"
                         min={2}
                         max={28}
                         value={schoolForm.billingCycleStartDay}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const sVal = Number(e.target.value) || 13;
                           setSchoolForm((prev) => ({
                             ...prev,
                             billingCycleStartDay: e.target.value,
+                            billingCycleEndDay: String(Math.max(1, sVal - 1)),
+                          }));
+                        }}
+                        className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-center font-mono font-bold"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        يوم النهاية (الشهر التالي)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={28}
+                        value={schoolForm.billingCycleEndDay}
+                        onChange={(e) =>
+                          setSchoolForm((prev) => ({
+                            ...prev,
+                            billingCycleEndDay: e.target.value,
                           }))
                         }
-                        className="w-16 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center font-mono font-bold"
+                        className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-center font-mono font-bold"
                       />
-                      <span className="text-[11px] text-slate-500 font-mono">
-                        ← ينتهي يوم {Math.max(1, (Number(schoolForm.billingCycleStartDay) || 13) - 1)} من الشهر الحالي (11:59 م)
-                      </span>
                     </div>
                   </div>
                 )}
@@ -1266,10 +1397,186 @@ export const SchoolsVehiclesModule: React.FC = () => {
               </div>
               <button
                 type="submit"
-                className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                disabled={savingModal}
+                className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
               >
                 حفظ المدرسة
               </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Per-School Billing Period Modal */}
+      {showBillingModal && billingTargetSchool && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-lg bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+            <div className="px-6 py-4 bg-[#0B1F3A] text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-[#C89B3C]" />
+                <h3 className="font-bold text-sm">
+                  التحكم في بداية ونهاية الفترة الشهرية — {billingTargetSchool.name}
+                </h3>
+              </div>
+              <button onClick={() => setShowBillingModal(false)} className="cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={(e) => handleSaveBillingPeriod(e, false)} className="p-6 space-y-4 text-xs">
+              {modalError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-800">
+                  {modalError}
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setBillingForm((prev) => ({
+                      ...prev,
+                      cycleType: 'calendar',
+                      startDay: '1',
+                      endDay: '31',
+                    }))
+                  }
+                  className={`rounded-lg border p-2.5 text-right cursor-pointer ${
+                    billingForm.cycleType === 'calendar'
+                      ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                      : 'border-slate-200 bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className="font-bold">دورة ميلادية عادية</div>
+                  <div className="text-[10px] opacity-80 mt-0.5">من 1 إلى آخر الشهر</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setBillingForm((prev) => ({
+                      ...prev,
+                      cycleType: 'shifted',
+                      startDay: Number(prev.startDay) > 1 ? prev.startDay : '13',
+                      endDay:
+                        Number(prev.endDay) >= 1 && Number(prev.endDay) <= 28
+                          ? prev.endDay
+                          : '12',
+                    }))
+                  }
+                  className={`rounded-lg border p-2.5 text-right cursor-pointer ${
+                    billingForm.cycleType === 'shifted'
+                      ? 'border-[#0B1F3A] bg-[#0B1F3A] text-white'
+                      : 'border-slate-200 bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className="font-bold">دورة مرحّلة (نصف شهرية)</div>
+                  <div className="text-[10px] opacity-80 mt-0.5">من يوم 13 الحالي إلى 12 التالي</div>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">يوم البداية</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={28}
+                    required
+                    value={billingForm.startDay}
+                    onChange={(e) => setBillingForm({ ...billingForm, startDay: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-center font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">يوم النهاية</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={31}
+                    required
+                    value={billingForm.endDay}
+                    onChange={(e) => setBillingForm({ ...billingForm, endDay: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-center font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">الشهر النشط</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    required
+                    value={billingForm.activeMonth}
+                    onChange={(e) => setBillingForm({ ...billingForm, activeMonth: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-center font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">السنة</label>
+                  <input
+                    type="number"
+                    min={2020}
+                    max={2099}
+                    required
+                    value={billingForm.activeYear}
+                    onChange={(e) => setBillingForm({ ...billingForm, activeYear: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-center font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 space-y-2.5">
+                <div className="font-bold text-[#0B1F3A]">
+                  تاريخ بداية ونهاية مخصص لهذه الفترة فقط (اختياري)
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      تاريخ البداية المخصص
+                    </label>
+                    <input
+                      type="date"
+                      value={billingForm.customStartDate}
+                      onChange={(e) =>
+                        setBillingForm({ ...billingForm, customStartDate: e.target.value })
+                      }
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      تاريخ النهاية المخصص
+                    </label>
+                    <input
+                      type="date"
+                      value={billingForm.customEndDate}
+                      onChange={(e) =>
+                        setBillingForm({ ...billingForm, customEndDate: e.target.value })
+                      }
+                      className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                {(billingForm.customStartDate || billingForm.customEndDate) && (
+                  <button
+                    type="button"
+                    disabled={savingModal}
+                    onClick={(e) => handleSaveBillingPeriod(e, true)}
+                    className="rounded-lg border border-slate-300 bg-white px-3.5 py-2 font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                  >
+                    إلغاء التاريخ المخصص
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={savingModal}
+                  className="flex-1 rounded-lg bg-[#0B1F3A] py-2.5 font-bold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
+                >
+                  {savingModal ? 'جاري الحفظ...' : 'حفظ الفترة الشهرية للمدرسة'}
+                </button>
+              </div>
             </form>
           </div>
         </div>

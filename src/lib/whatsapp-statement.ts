@@ -4,7 +4,7 @@ import type { EnrichedDriver, FinancialTransaction, SalaryRecord } from '../type
 
 export interface StatementFallbackData {
   driver: EnrichedDriver;
-  period: { month: number; year: number };
+  period: { month: number; year: number; startDate?: string; endDate?: string };
   salary: SalaryRecord;
   transactions: FinancialTransaction[];
 }
@@ -160,7 +160,15 @@ export async function renderStatementFallbackBlob(
   ctx.fillText('الوليد ترافيل — كشف حساب السائق الشهري', width - 48, 62);
   ctx.fillStyle = '#E2E8F0';
   ctx.font = '22px Tahoma, Arial, sans-serif';
-  ctx.fillText(`الفترة: شهر ${data.period.month} / ${data.period.year}`, width - 48, 104);
+  const periodRangeTxt =
+    data.period.startDate && data.period.endDate
+      ? ` (${data.period.startDate} → ${data.period.endDate})`
+      : '';
+  ctx.fillText(
+    `الفترة: شهر ${data.period.month} / ${data.period.year}${periodRangeTxt}`,
+    width - 48,
+    104
+  );
 
   // Driver info strip
   let y = headerHeight + 48;
@@ -264,7 +272,11 @@ export async function renderStatementFallbackBlob(
 
       ctx.fillStyle = '#475569';
       ctx.font = '18px Tahoma, Arial, sans-serif';
-      ctx.fillText(new Date(t.createdAt).toLocaleDateString('ar-EG'), width - 68, y + 30);
+      ctx.fillText(
+        new Date(t.createdAt).toLocaleDateString('ar-EG', { timeZone: 'Africa/Cairo' }),
+        width - 68,
+        y + 30
+      );
 
       ctx.fillStyle = '#0F172A';
       ctx.fillText(typeLabel, width - 260, y + 30);
