@@ -1,7 +1,7 @@
 /**
  * Stale-While-Revalidate (SWR) Batch Data Fetching Cache for Dashboard & Admin Modules
  */
-import { apiFetch } from './api';
+import { apiFetch, registerApiMutationListener } from './api';
 
 interface CacheEntry<T> {
   data: T;
@@ -13,8 +13,14 @@ const inFlightRequests = new Map<string, Promise<unknown>>();
 
 const DEFAULT_TTL_MS = 60 * 1000; // 60 seconds stale TTL
 
+// Automatically clear in-memory SWR cache when any POST/PATCH/DELETE mutation succeeds
+registerApiMutationListener(() => {
+  clearSwrCache();
+});
+
 export interface SwrOptions<T> {
   ttlMs?: number;
+  forceRefresh?: boolean;
   onRevalidate?: (freshData: T) => void;
 }
 
@@ -61,7 +67,7 @@ export async function fetchWithSWR<T>(
     return promise;
   };
 
-  if (cached) {
+  if (cached && !swrOptions.forceRefresh) {
     const isStale = now - cached.timestamp > ttl;
     if (isStale) {
       // Revalidate in background without blocking

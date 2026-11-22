@@ -53,6 +53,25 @@ export class ApiHttpError extends Error {
   }
 }
 
+const mutationListeners = new Set<() => void>();
+
+export function registerApiMutationListener(fn: () => void): () => void {
+  mutationListeners.add(fn);
+  return () => {
+    mutationListeners.delete(fn);
+  };
+}
+
+function notifyMutationListeners(): void {
+  for (const fn of mutationListeners) {
+    try {
+      fn();
+    } catch {
+      // ignore listener error
+    }
+  }
+}
+
 export async function apiFetch<T = unknown>(
   url: string,
   options: RequestInit = {}
@@ -137,6 +156,12 @@ export async function apiFetch<T = unknown>(
       typeof data.details === 'string' ? data.details : undefined
     );
   }
+
+  const method = (options.method || 'GET').toUpperCase();
+  if (method !== 'GET') {
+    notifyMutationListeners();
+  }
+
   return data as T;
 }
 

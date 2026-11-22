@@ -493,7 +493,7 @@ export const ReportsModule: React.FC = () => {
             <img
               src={whatsappPreview.url}
               alt="معاينة صورة التقرير"
-              className="w-36 h-24 object-cover object-top rounded-lg border border-emerald-200 bg-white shadow-xs shrink-0"
+              className="w-full sm:w-80 h-48 sm:h-56 object-contain object-top rounded-xl border border-emerald-300 bg-slate-900 shadow-md shrink-0"
             />
             <div className="flex flex-wrap items-center gap-2">
               <a

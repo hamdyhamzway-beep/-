@@ -1688,7 +1688,7 @@ export const DriversModule: React.FC<{
                     <img
                       src={whatsappPreview.url}
                       alt="معاينة صورة كشف الحساب"
-                      className="w-36 h-24 object-cover object-top rounded-lg border border-emerald-200 bg-white shadow-xs shrink-0"
+                      className="w-full sm:w-80 h-48 sm:h-56 object-contain object-top rounded-xl border border-emerald-300 bg-slate-900 shadow-md shrink-0"
                     />
                     <div className="flex flex-wrap items-center gap-2">
                       <a
@@ -1734,7 +1734,8 @@ export const DriversModule: React.FC<{
                     <div
                       ref={statementCaptureRef}
                       dir="rtl"
-                      className="bg-white rounded-xl border border-slate-200 p-5 space-y-5"
+                      style={{ width: '960px', minWidth: '960px' }}
+                      className="bg-white rounded-xl border border-slate-200 p-6 space-y-5 mx-auto shadow-sm"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
                         <div className="flex items-center gap-3">

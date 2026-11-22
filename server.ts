@@ -3,7 +3,7 @@ import http from 'http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { and, desc, eq, gte, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNull, like, lte, ne, or, sql } from 'drizzle-orm';
 import { db } from './src/db/index.ts';
 import {
   advances,
@@ -16,14 +16,17 @@ import {
   driverAssignments,
   drivers,
   employees,
+  financialCustodies,
   financialTransactions,
   gpsLocations,
+  invoices,
   monthlyClosings,
   notifications,
   routes,
   salaries,
   schools,
   supervisors,
+  supervisorNotes,
   supervisorTrips,
   userRoles,
   users,
@@ -31,6 +34,14 @@ import {
   vehicles,
   voiceCommandLogs,
 } from './src/db/schema.ts';
+import {
+  buildDefaultInvoiceStatement,
+  DEFAULT_INVOICE_BILL_TO,
+  DEFAULT_INVOICE_SCHOOL_NAME,
+  DEFAULT_INVOICE_VEHICLE_COUNT,
+  formatInvoiceCode,
+  tafqeetEGP,
+} from './src/lib/arabic-tafqeet.ts';
 import {
   type AuthRequest,
   buildEffectivePermissions,
@@ -1266,6 +1277,55 @@ async function startServer() {
     return assign?.schoolId ?? null;
   }
 
+  async function permanentlyDeleteUserTx(
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+    userId: number,
+    fallbackAdminUserId: number
+  ): Promise<boolean> {
+    const [targetUser] = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
+    if (!targetUser) return false;
+    if (targetUser.email.toLowerCase() === 'hamdyhamzway@gmail.com') {
+      throw new Error('لا يمكن حذف حساب المدير العام الرئيسي');
+    }
+
+    // 1. Reassign non-null foreign keys to fallbackAdminUserId
+    await tx
+      .update(advances)
+      .set({ recordedByUserId: fallbackAdminUserId })
+      .where(eq(advances.recordedByUserId, userId));
+
+    await tx
+      .update(coverageRecords)
+      .set({ recordedByUserId: fallbackAdminUserId })
+      .where(eq(coverageRecords.recordedByUserId, userId));
+
+    await tx
+      .update(financialTransactions)
+      .set({ recordedByUserId: fallbackAdminUserId })
+      .where(eq(financialTransactions.recordedByUserId, userId));
+
+    await tx
+      .update(voiceCommandLogs)
+      .set({ adminUserId: fallbackAdminUserId })
+      .where(eq(voiceCommandLogs.adminUserId, userId));
+
+    // 2. Nullify nullable foreign keys
+    await tx.update(drivers).set({ userId: null }).where(eq(drivers.userId, userId));
+    await tx.update(supervisors).set({ userId: null }).where(eq(supervisors.userId, userId));
+    await tx.update(attendance).set({ recordedByUserId: null }).where(eq(attendance.recordedByUserId, userId));
+    await tx.update(notifications).set({ recipientUserId: null }).where(eq(notifications.recipientUserId, userId));
+    await tx.update(auditLogs).set({ actorUserId: null }).where(eq(auditLogs.actorUserId, userId));
+    await tx.update(monthlyClosings).set({ closedByUserId: null }).where(eq(monthlyClosings.closedByUserId, userId));
+    await tx.update(billingPeriods).set({ updatedByUserId: null }).where(eq(billingPeriods.updatedByUserId, userId));
+    await tx.update(dailyReports).set({ userId: null }).where(eq(dailyReports.userId, userId));
+    await tx.update(financialCustodies).set({ handedByUserId: null }).where(eq(financialCustodies.handedByUserId, userId));
+    await tx.update(financialCustodies).set({ settledByUserId: null }).where(eq(financialCustodies.settledByUserId, userId));
+
+    // 3. Delete the user row permanently
+    await tx.delete(users).where(eq(users.id, userId));
+    return true;
+  }
+
   // 3. Drivers Management (Active by default — archived drivers live in /api/archive)
   app.get('/api/drivers', requireAuth, requireAdminOrStaff, requirePermission('drivers:read'), async (req: AuthRequest, res) => {
     try {
@@ -1833,10 +1893,12 @@ async function startServer() {
             .limit(1),
         ]);
 
-        if (ftRef[0] || advRef[0] || covRef[0]) {
+        const force = req.query.force === 'true';
+        if (!force && (ftRef[0] || advRef[0] || covRef[0])) {
           return res.status(409).json({
             error:
-              'لا يمكن حذف هذا السائق نهائياً لوجود سلف أو تغطيات أو حركات مالية مسجلة في دفتر الحسابات غير القابل للحذف. يمكنك إيقاف حسابه أو تعديل اسمه وبياناته بدلاً من الحذف.',
+              'توجد سلف أو تغطيات أو حركات مالية مسجلة لهذا السائق في دفتر الحسابات. هل تريد حذفه نهائياً وشاملاً مع كافة حركاته؟',
+            canForce: true,
           });
         }
 
@@ -1845,13 +1907,37 @@ async function startServer() {
             .update(gpsLocations)
             .set({ driverId: null })
             .where(eq(gpsLocations.driverId, driverId));
-          await tx.delete(driverAssignments).where(eq(driverAssignments.driverId, driverId));
-          await tx.delete(attendance).where(eq(attendance.driverId, driverId));
-          await tx.delete(salaries).where(eq(salaries.driverId, driverId));
           await tx
-            .delete(notifications)
-            .where(eq(notifications.recipientDriverId, driverId));
+            .delete(chatChannels)
+            .where(and(eq(chatChannels.driverId, driverId), eq(chatChannels.channelType, 'direct')));
+          await tx
+            .update(chatChannels)
+            .set({ driverId: null })
+            .where(eq(chatChannels.driverId, driverId));
+          await tx
+            .update(coverageRecords)
+            .set({ replacementDriverId: null })
+            .where(eq(coverageRecords.replacementDriverId, driverId));
+          await tx
+            .delete(coverageRecords)
+            .where(eq(coverageRecords.absentDriverId, driverId));
+          await tx
+            .delete(financialTransactions)
+            .where(eq(financialTransactions.driverId, driverId));
+          await tx.delete(advances).where(eq(advances.driverId, driverId));
+          await tx.delete(salaries).where(eq(salaries.driverId, driverId));
+          await tx.delete(attendance).where(eq(attendance.driverId, driverId));
+          await tx.delete(driverAssignments).where(eq(driverAssignments.driverId, driverId));
+          await tx.delete(notifications).where(eq(notifications.recipientDriverId, driverId));
+          await tx
+            .update(financialCustodies)
+            .set({ driverId: null })
+            .where(eq(financialCustodies.driverId, driverId));
           await tx.delete(drivers).where(eq(drivers.id, driverId));
+
+          if (existing.userId) {
+            await permanentlyDeleteUserTx(tx, existing.userId, req.dbUser!.id);
+          }
 
           await tx.insert(auditLogs).values({
             actorUserId: req.dbUser!.id,
@@ -1863,10 +1949,122 @@ async function startServer() {
           });
         });
 
-        res.json({ ok: true, deletedId: driverId });
+        res.json({ ok: true, deletedId: driverId, message: 'تم مسح السائق نهائياً بنجاح.' });
       } catch (error) {
         console.error('Delete driver error:', error);
         res.status(500).json({ error: 'تعذر حذف السائق' });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/schools/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('schools:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const [existing] = await db.select().from(schools).where(eq(schools.id, id)).limit(1);
+        if (!existing) return res.status(404).json({ error: 'المدرسة غير موجودة' });
+        if (!isSchoolAllowed(req.dbUser, id)) {
+          return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+        }
+
+        await db.transaction(async (tx) => {
+          await tx.update(vehicles).set({ schoolId: null }).where(eq(vehicles.schoolId, id));
+          await tx.update(routes).set({ schoolId: null }).where(eq(routes.schoolId, id));
+          await tx.update(driverAssignments).set({ schoolId: null }).where(eq(driverAssignments.schoolId, id));
+          await tx.update(salaries).set({ schoolId: null }).where(eq(salaries.schoolId, id));
+          await tx.update(advances).set({ schoolId: null }).where(eq(advances.schoolId, id));
+          await tx.update(coverageRecords).set({ schoolId: null }).where(eq(coverageRecords.schoolId, id));
+          await tx.update(financialTransactions).set({ schoolId: null }).where(eq(financialTransactions.schoolId, id));
+          await tx.update(financialCustodies).set({ schoolId: null }).where(eq(financialCustodies.schoolId, id));
+          await tx.update(attendance).set({ schoolId: null }).where(eq(attendance.schoolId, id));
+          await tx.update(employees).set({ schoolId: null }).where(eq(employees.schoolId, id));
+          await tx.update(monthlyClosings).set({ schoolId: null }).where(eq(monthlyClosings.schoolId, id));
+          await tx.update(supervisors).set({ schoolId: null }).where(eq(supervisors.schoolId, id));
+          await tx.update(chatChannels).set({ schoolId: null }).where(eq(chatChannels.schoolId, id));
+          await tx.update(dailyReports).set({ schoolId: null }).where(eq(dailyReports.schoolId, id));
+          await tx.delete(billingPeriods).where(eq(billingPeriods.key, getSchoolBillingPeriodKey(id)));
+
+          const allUsersRows = await tx.select().from(users);
+          for (const u of allUsersRows) {
+            const currentAssigned = Array.isArray(u.assignedSchoolIds) ? u.assignedSchoolIds : [];
+            if (currentAssigned.includes(id)) {
+              await tx
+                .update(users)
+                .set({
+                  assignedSchoolIds: currentAssigned.filter((sid) => sid !== id),
+                  updatedAt: new Date(),
+                })
+                .where(eq(users.id, u.id));
+            }
+          }
+
+          await tx.delete(schools).where(eq(schools.id, id));
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'DELETE_SCHOOL',
+            entityType: 'schools',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+        });
+
+        res.json({ ok: true, deletedId: id, message: 'تم مسح المدرسة نهائياً بنجاح.' });
+      } catch (error) {
+        console.error('Delete school error:', error);
+        res.status(500).json({ error: 'تعذر حذف المدرسة' });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/vehicles/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('vehicles:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const [existing] = await db.select().from(vehicles).where(eq(vehicles.id, id)).limit(1);
+        if (!existing) return res.status(404).json({ error: 'المركبة غير موجودة' });
+
+        if (!isSchoolUnrestricted(req.dbUser)) {
+          const [assign] = await db
+            .select({ schoolId: driverAssignments.schoolId })
+            .from(driverAssignments)
+            .where(and(eq(driverAssignments.vehicleId, id), eq(driverAssignments.isCurrent, true)))
+            .limit(1);
+          const effSchoolId = existing.schoolId ?? assign?.schoolId ?? null;
+          if (!effSchoolId || !isSchoolAllowed(req.dbUser, effSchoolId)) {
+            return res.status(403).json({ error: 'هذه المركبة خارج نطاق المدارس المصرح لك بها' });
+          }
+        }
+
+        await db.transaction(async (tx) => {
+          await tx.update(gpsLocations).set({ vehicleId: null }).where(eq(gpsLocations.vehicleId, id));
+          await tx.update(driverAssignments).set({ vehicleId: null }).where(eq(driverAssignments.vehicleId, id));
+          await tx.update(coverageRecords).set({ vehicleId: null }).where(eq(coverageRecords.vehicleId, id));
+          await tx.update(supervisors).set({ vehicleId: null }).where(eq(supervisors.vehicleId, id));
+          await tx.update(supervisorTrips).set({ vehicleId: null }).where(eq(supervisorTrips.vehicleId, id));
+          await tx.delete(vehicles).where(eq(vehicles.id, id));
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'DELETE_VEHICLE',
+            entityType: 'vehicles',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+        });
+
+        res.json({ ok: true, deletedId: id, message: 'تم مسح المركبة نهائياً بنجاح.' });
+      } catch (error) {
+        console.error('Delete vehicle error:', error);
+        res.status(500).json({ error: 'تعذر حذف المركبة' });
       }
     }
   );
@@ -2926,6 +3124,7 @@ async function startServer() {
           if (!unrestricted && !scopedDriverIds.has(a.driverId)) return false;
           const drv = driverMap[a.driverId];
           const recSchoolId = a.schoolId ?? drv?.schoolId ?? null;
+          if (!isSchoolClosedForPeriod(recSchoolId) && !activeDriverIds.has(a.driverId)) return false;
           const recRange = getRangeForSchoolId(recSchoolId);
           return isDateInRange(a.date, recRange.startDate, recRange.endDate);
         });
@@ -2939,13 +3138,18 @@ async function startServer() {
             return false;
           }
           const recSchoolId = c.schoolId ?? driverMap[c.absentDriverId]?.schoolId ?? null;
+          if (!isSchoolClosedForPeriod(recSchoolId) && !activeDriverIds.has(c.absentDriverId)) return false;
           const recRange = getRangeForSchoolId(recSchoolId);
           return isDateInRange(c.date, recRange.startDate, recRange.endDate);
         });
 
-        const monthLedgerAll = unrestricted
+        const monthLedgerAll = (unrestricted
           ? rawMonthLedger
-          : rawMonthLedger.filter((t) => scopedDriverIds.has(t.driverId));
+          : rawMonthLedger.filter((t) => scopedDriverIds.has(t.driverId))
+        ).filter((t) => {
+          const drv = driverMap[t.driverId];
+          return isSchoolClosedForPeriod(drv?.schoolId) || activeDriverIds.has(t.driverId);
+        });
         const allEmployees = rawAllEmployees.filter((e) =>
           isSchoolAllowed(req.dbUser, e.schoolId)
         );
@@ -3839,6 +4043,1092 @@ async function startServer() {
     }
   });
 
+  // 5a. Financial Ledger Permanent Deletion (حذف القيود المالية من دفتر الأستاذ مع عكس وتصفية السجلات المرتبطة)
+  app.delete(
+    '/api/finance/ledger/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف الحركة غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [txRow] = await db
+            .select()
+            .from(financialTransactions)
+            .where(eq(financialTransactions.id, id))
+            .limit(1);
+
+          if (!txRow) {
+            return { status: 404 as const, body: { error: 'الحركة المالية غير موجودة' } };
+          }
+
+          const drvSchoolId = await getDriverCurrentSchoolId(txRow.driverId);
+          if (!isSchoolUnrestricted(req.dbUser) && !isSchoolAllowed(req.dbUser, drvSchoolId)) {
+            return {
+              status: 403 as const,
+              body: { error: 'هذه الحركة تابعة لمدرسة خارج نطاق صلاحياتك' },
+            };
+          }
+
+          const result = await db.transaction(async (tx) => {
+            let deletedAdvanceId: number | null = null;
+            let deletedCoverageId: number | null = null;
+            let replacementDriverId: number | null = null;
+
+            if (txRow.referenceType === 'advance' && txRow.referenceId) {
+              deletedAdvanceId = txRow.referenceId;
+              await tx
+                .delete(financialTransactions)
+                .where(
+                  and(
+                    eq(financialTransactions.referenceType, 'advance'),
+                    eq(financialTransactions.referenceId, txRow.referenceId)
+                  )
+                );
+              await tx.delete(advances).where(eq(advances.id, txRow.referenceId));
+            } else if (txRow.referenceType === 'coverage' && txRow.referenceId) {
+              deletedCoverageId = txRow.referenceId;
+              const [covRow] = await tx
+                .select()
+                .from(coverageRecords)
+                .where(eq(coverageRecords.id, txRow.referenceId))
+                .limit(1);
+
+              if (covRow) {
+                replacementDriverId = covRow.replacementDriverId;
+                await tx
+                  .delete(financialTransactions)
+                  .where(
+                    and(
+                      eq(financialTransactions.referenceType, 'coverage'),
+                      eq(financialTransactions.referenceId, txRow.referenceId)
+                    )
+                  );
+                await tx
+                  .delete(attendance)
+                  .where(
+                    and(
+                      eq(attendance.driverId, covRow.absentDriverId),
+                      eq(attendance.date, covRow.date),
+                      eq(attendance.status, 'covered')
+                    )
+                  );
+                await tx.delete(coverageRecords).where(eq(coverageRecords.id, txRow.referenceId));
+              }
+            } else {
+              await tx.delete(financialTransactions).where(eq(financialTransactions.id, id));
+            }
+
+            const schoolCfg = await getDriverSchoolBillingConfig(tx, txRow.driverId);
+            const salary = await recalculateDriverSalary(
+              tx,
+              txRow.driverId,
+              txRow.month,
+              txRow.year,
+              schoolCfg
+            );
+
+            if (replacementDriverId) {
+              const repSchoolCfg = await getDriverSchoolBillingConfig(tx, replacementDriverId);
+              await recalculateDriverSalary(
+                tx,
+                replacementDriverId,
+                txRow.month,
+                txRow.year,
+                repSchoolCfg
+              );
+            }
+
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'DELETE_LEDGER_TRANSACTION',
+              entityType: 'financial_transactions',
+              entityId: String(id),
+              beforeJson: txRow,
+              ipAddress: req.ip || '',
+            });
+
+            return {
+              deletedId: id,
+              deletedAdvanceId,
+              deletedCoverageId,
+              salary,
+            };
+          });
+
+          return { status: 200 as const, body: { ok: true, ...result } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Delete ledger transaction error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر حذف القيد المالي';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  // 5b. Financial Custodies Management (العهد المالية - تسليم واستلام وتصفية)
+  app.get(
+    '/api/finance/custodies',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'finance:write']),
+    async (req: AuthRequest, res) => {
+      try {
+        const rawSchoolIdParam = req.query.schoolId;
+        const selectedSchoolId =
+          rawSchoolIdParam && rawSchoolIdParam !== 'all' ? Number(rawSchoolIdParam) : null;
+        if (selectedSchoolId && !isSchoolAllowed(req.dbUser, selectedSchoolId)) {
+          return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+        }
+        const statusFilter = req.query.status ? String(req.query.status) : null;
+        const beneficiaryTypeFilter = req.query.beneficiaryType ? String(req.query.beneficiaryType) : null;
+        const search = req.query.search ? String(req.query.search).trim().toLowerCase() : '';
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [rawCustodies, allSchools, allDrivers, allSupervisors, allEmployees] = await Promise.all([
+            db
+              .select()
+              .from(financialCustodies)
+              .orderBy(desc(financialCustodies.handoverDate), desc(financialCustodies.id)),
+            db.select().from(schools),
+            db.select().from(drivers),
+            db.select().from(supervisors),
+            db.select().from(employees),
+          ]);
+
+          const schoolMap = new Map(allSchools.map((s) => [s.id, s]));
+          const driverMap = new Map(allDrivers.map((d) => [d.id, d]));
+          const supervisorMap = new Map(allSupervisors.map((s) => [s.id, s]));
+          const employeeMap = new Map(allEmployees.map((e) => [e.id, e]));
+
+          const filtered = rawCustodies.filter((c) => {
+            if (!isSchoolAllowed(req.dbUser, c.schoolId)) return false;
+            if (selectedSchoolId && c.schoolId !== selectedSchoolId) return false;
+            if (statusFilter && statusFilter !== 'all' && c.status !== statusFilter) return false;
+            if (
+              beneficiaryTypeFilter &&
+              beneficiaryTypeFilter !== 'all' &&
+              c.beneficiaryType !== beneficiaryTypeFilter
+            ) {
+              return false;
+            }
+            if (search) {
+              const codeMatch = c.custodyCode?.toLowerCase().includes(search);
+              const nameMatch = c.beneficiaryName?.toLowerCase().includes(search);
+              const purposeMatch = c.purpose?.toLowerCase().includes(search);
+              const notesMatch = c.notes?.toLowerCase().includes(search);
+              if (!codeMatch && !nameMatch && !purposeMatch && !notesMatch) return false;
+            }
+            return true;
+          });
+
+          const enriched = filtered.map((c) => {
+            const sc = c.schoolId ? schoolMap.get(c.schoolId) : null;
+            const drv = c.driverId ? driverMap.get(c.driverId) : null;
+            const sup = c.supervisorId ? supervisorMap.get(c.supervisorId) : null;
+            const emp = c.employeeId ? employeeMap.get(c.employeeId) : null;
+
+            const amount = Number(c.amount || 0);
+            const spentAmount = Number(c.spentAmount || 0);
+            const returnedAmount = Number(c.returnedAmount || 0);
+            const remainingAmount = Math.max(0, amount - spentAmount - returnedAmount);
+
+            return {
+              ...c,
+              amount,
+              spentAmount,
+              returnedAmount,
+              remainingAmount,
+              schoolName: sc?.name || (c.schoolId ? `مدرسة #${c.schoolId}` : 'الإدارة العامة'),
+              driverCode: drv?.driverCode || null,
+              driverName: drv?.fullName || null,
+              supervisorName: sup?.fullName || null,
+              employeeName: emp?.fullName || null,
+            };
+          });
+
+          const totalHandedAmount = enriched.reduce((sum, c) => sum + c.amount, 0);
+          const totalSpentAmount = enriched.reduce((sum, c) => sum + c.spentAmount, 0);
+          const totalReturnedAmount = enriched.reduce((sum, c) => sum + c.returnedAmount, 0);
+          const totalActiveAmount = enriched.reduce(
+            (sum, c) => sum + (c.status !== 'settled' ? c.remainingAmount : 0),
+            0
+          );
+          const activeCount = enriched.filter((c) => c.status === 'active').length;
+          const partialCount = enriched.filter((c) => c.status === 'partial').length;
+          const settledCount = enriched.filter((c) => c.status === 'settled').length;
+
+          return {
+            custodies: enriched,
+            stats: {
+              totalHandedAmount,
+              totalSpentAmount,
+              totalReturnedAmount,
+              totalActiveAmount,
+              totalCount: enriched.length,
+              activeCount,
+              partialCount,
+              settledCount,
+            },
+          };
+        });
+
+        res.json(outcome);
+      } catch (error) {
+        console.error('Get custodies error:', error);
+        res.status(500).json({ error: 'تعذر تحميل العهد المالية' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/finance/custodies',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const {
+          schoolId,
+          beneficiaryType = 'driver',
+          driverId,
+          supervisorId,
+          employeeId,
+          beneficiaryName,
+          beneficiaryPhone,
+          amount,
+          handoverDate,
+          purpose,
+          paymentMethod = 'كاش',
+          handedByName,
+          notes,
+        } = req.body;
+
+        const numAmount = Number(amount);
+        if (!numAmount || numAmount <= 0) {
+          return res.status(400).json({ error: 'يرجى إدخال مبلغ صحيح للعهدة أكبر من صفر' });
+        }
+        if (!beneficiaryName || !String(beneficiaryName).trim()) {
+          return res.status(400).json({ error: 'يرجى تحديد أو إدخال اسم المستلم للعهدة' });
+        }
+        if (!purpose || !String(purpose).trim()) {
+          return res.status(400).json({ error: 'يرجى تحديد الغرض من العهدة' });
+        }
+
+        const cleanSchoolId = schoolId ? Number(schoolId) : null;
+        if (cleanSchoolId && !isSchoolAllowed(req.dbUser, cleanSchoolId)) {
+          return res.status(403).json({ error: 'المدرسة خارج نطاق صلاحياتك' });
+        }
+
+        const cleanHandoverDate = handoverDate
+          ? normalizeIsoDateInput(String(handoverDate))
+          : getTodayDateString();
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          return await db.transaction(async (tx) => {
+            const [lastCustody] = await tx
+              .select({ id: financialCustodies.id })
+              .from(financialCustodies)
+              .orderBy(desc(financialCustodies.id))
+              .limit(1);
+
+            const nextNum = (lastCustody?.id || 0) + 1;
+            const custodyCode = `CST-${String(nextNum).padStart(4, '0')}`;
+
+            const [inserted] = await tx
+              .insert(financialCustodies)
+              .values({
+                custodyCode,
+                schoolId: cleanSchoolId,
+                beneficiaryType: String(beneficiaryType || 'driver'),
+                driverId: driverId ? Number(driverId) : null,
+                supervisorId: supervisorId ? Number(supervisorId) : null,
+                employeeId: employeeId ? Number(employeeId) : null,
+                beneficiaryName: String(beneficiaryName).trim(),
+                beneficiaryPhone: beneficiaryPhone ? String(beneficiaryPhone).trim() : '',
+                amount: numAmount.toFixed(2),
+                spentAmount: '0.00',
+                returnedAmount: '0.00',
+                handoverDate: cleanHandoverDate,
+                purpose: String(purpose).trim(),
+                paymentMethod: String(paymentMethod || 'كاش').trim(),
+                handedByUserId: req.dbUser?.id || null,
+                handedByName: handedByName
+                  ? String(handedByName).trim()
+                  : req.dbUser?.fullName || 'الإدارة المالية',
+                status: 'active',
+                notes: notes ? String(notes).trim() : '',
+              })
+              .returning();
+
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'ADD_CUSTODY',
+              entityType: 'financial_custodies',
+              entityId: String(inserted.id),
+              afterJson: inserted,
+              ipAddress: req.ip || '',
+            });
+
+            await tx.insert(notifications).values({
+              targetRole: 'super_admin',
+              type: 'financial_action',
+              title: 'تسليم عهدة مالية جديدة',
+              body: `قام المحاسب/المسؤول ${inserted.handedByName} بتسليم عهدة (${inserted.custodyCode}) بقيمة ${numAmount.toLocaleString()} ج.م إلى ${inserted.beneficiaryName} (${String(purpose).trim()}).`,
+              isRead: false,
+            });
+
+            return inserted;
+          });
+        });
+
+        res.status(201).json({ custody: outcome });
+      } catch (error: unknown) {
+        console.error('Create custody error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر تسجيل تسليم العهدة';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.patch(
+    '/api/finance/custodies/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف العهدة غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(financialCustodies)
+            .where(eq(financialCustodies.id, id))
+            .limit(1);
+
+          if (!existing) return { status: 404 as const, body: { error: 'العهدة غير موجودة' } };
+          if (existing.schoolId && !isSchoolAllowed(req.dbUser, existing.schoolId)) {
+            return { status: 403 as const, body: { error: 'العهدة خارج نطاق صلاحياتك' } };
+          }
+
+          const {
+            schoolId,
+            beneficiaryType,
+            driverId,
+            supervisorId,
+            employeeId,
+            beneficiaryName,
+            beneficiaryPhone,
+            amount,
+            handoverDate,
+            purpose,
+            paymentMethod,
+            handedByName,
+            notes,
+          } = req.body;
+
+          const newAmount = amount !== undefined ? Number(amount) : Number(existing.amount);
+          const currentSpent = Number(existing.spentAmount || 0);
+          const currentReturned = Number(existing.returnedAmount || 0);
+
+          let newStatus = existing.status;
+          if (currentSpent + currentReturned >= newAmount && newAmount > 0) {
+            newStatus = 'settled';
+          } else if (currentSpent + currentReturned > 0) {
+            newStatus = 'partial';
+          } else {
+            newStatus = 'active';
+          }
+
+          const [updated] = await db
+            .update(financialCustodies)
+            .set({
+              schoolId: schoolId !== undefined ? (schoolId ? Number(schoolId) : null) : existing.schoolId,
+              beneficiaryType:
+                beneficiaryType !== undefined ? String(beneficiaryType) : existing.beneficiaryType,
+              driverId: driverId !== undefined ? (driverId ? Number(driverId) : null) : existing.driverId,
+              supervisorId:
+                supervisorId !== undefined ? (supervisorId ? Number(supervisorId) : null) : existing.supervisorId,
+              employeeId:
+                employeeId !== undefined ? (employeeId ? Number(employeeId) : null) : existing.employeeId,
+              beneficiaryName:
+                beneficiaryName !== undefined ? String(beneficiaryName).trim() : existing.beneficiaryName,
+              beneficiaryPhone:
+                beneficiaryPhone !== undefined ? String(beneficiaryPhone).trim() : existing.beneficiaryPhone,
+              amount: newAmount.toFixed(2),
+              handoverDate:
+                handoverDate !== undefined
+                  ? normalizeIsoDateInput(String(handoverDate))
+                  : existing.handoverDate,
+              purpose: purpose !== undefined ? String(purpose).trim() : existing.purpose,
+              paymentMethod:
+                paymentMethod !== undefined ? String(paymentMethod).trim() : existing.paymentMethod,
+              handedByName:
+                handedByName !== undefined ? String(handedByName).trim() : existing.handedByName,
+              notes: notes !== undefined ? String(notes).trim() : existing.notes,
+              status: newStatus,
+              updatedAt: new Date(),
+            })
+            .where(eq(financialCustodies.id, id))
+            .returning();
+
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'UPDATE_CUSTODY',
+            entityType: 'financial_custodies',
+            entityId: String(id),
+            beforeJson: existing,
+            afterJson: updated,
+            ipAddress: req.ip || '',
+          });
+
+          return { status: 200 as const, body: { custody: updated } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Update custody error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر تعديل بيانات العهدة';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.post(
+    '/api/finance/custodies/:id/settle',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف العهدة غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(financialCustodies)
+            .where(eq(financialCustodies.id, id))
+            .limit(1);
+
+          if (!existing) return { status: 404 as const, body: { error: 'العهدة غير موجودة' } };
+          if (existing.schoolId && !isSchoolAllowed(req.dbUser, existing.schoolId)) {
+            return { status: 403 as const, body: { error: 'العهدة خارج نطاق صلاحياتك' } };
+          }
+
+          const {
+            spentAmount = 0,
+            returnedAmount = 0,
+            settlementDate,
+            settledByName,
+            notes,
+          } = req.body;
+
+          const numSpent = Math.max(0, Number(spentAmount) || 0);
+          const numReturned = Math.max(0, Number(returnedAmount) || 0);
+          const totalOriginal = Number(existing.amount || 0);
+          const totalSettled = numSpent + numReturned;
+
+          if (totalSettled > totalOriginal + 0.001) {
+            return {
+              status: 400 as const,
+              body: {
+                error: `إجمالي المصروف والمرتجع (${totalSettled.toLocaleString()} ج.م) لا يمكن أن يتجاوز أصل العهدة (${totalOriginal.toLocaleString()} ج.م)`,
+              },
+            };
+          }
+
+          let status = 'active';
+          if (totalSettled >= totalOriginal - 0.001 && totalOriginal > 0) {
+            status = 'settled';
+          } else if (totalSettled > 0) {
+            status = 'partial';
+          }
+
+          const cleanSettlementDate = settlementDate
+            ? normalizeIsoDateInput(String(settlementDate))
+            : getTodayDateString();
+
+          const combinedNotes = notes
+            ? `${existing.notes ? existing.notes + ' | ' : ''}[تصفية ${cleanSettlementDate}]: ${String(notes).trim()}`
+            : existing.notes;
+
+          const [updated] = await db
+            .update(financialCustodies)
+            .set({
+              spentAmount: numSpent.toFixed(2),
+              returnedAmount: numReturned.toFixed(2),
+              settlementDate: cleanSettlementDate,
+              settledByUserId: req.dbUser?.id || null,
+              settledByName: settledByName
+                ? String(settledByName).trim()
+                : req.dbUser?.fullName || 'الإدارة المالية',
+              status,
+              notes: combinedNotes,
+              updatedAt: new Date(),
+            })
+            .where(eq(financialCustodies.id, id))
+            .returning();
+
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'SETTLE_CUSTODY',
+            entityType: 'financial_custodies',
+            entityId: String(id),
+            beforeJson: existing,
+            afterJson: updated,
+            ipAddress: req.ip || '',
+          });
+
+          await db.insert(notifications).values({
+            targetRole: 'super_admin',
+            type: 'financial_action',
+            title: 'تصفية عهدة مالية',
+            body: `تم تصفية العهدة (${updated.custodyCode}) الخاصة بـ ${updated.beneficiaryName}: مصروف ${numSpent.toLocaleString()} ج.م، مرتجع ${numReturned.toLocaleString()} ج.م بواسطة ${updated.settledByName}.`,
+            isRead: false,
+          });
+
+          return { status: 200 as const, body: { custody: updated } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Settle custody error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر تسجيل تصفية العهدة';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/finance/custodies/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف العهدة غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(financialCustodies)
+            .where(eq(financialCustodies.id, id))
+            .limit(1);
+
+          if (!existing) return { status: 404 as const, body: { error: 'العهدة غير موجودة' } };
+          if (existing.schoolId && !isSchoolAllowed(req.dbUser, existing.schoolId)) {
+            return { status: 403 as const, body: { error: 'العهدة خارج نطاق صلاحياتك' } };
+          }
+
+          await db.delete(financialCustodies).where(eq(financialCustodies.id, id));
+
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'DELETE_CUSTODY',
+            entityType: 'financial_custodies',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+
+          return { status: 200 as const, body: { ok: true, deletedId: id } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Delete custody error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر حذف العهدة';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  // 5b-2. Commercial Invoices & Archive (وحدة إصدار الفواتير وأرشيف الفواتير الصادرة)
+  const serializeInvoice = (row: typeof invoices.$inferSelect) => ({
+    ...row,
+    totalAmount: Number(row.totalAmount || 0),
+    cancelledReason: row.cancelledReason || '',
+    createdByName: row.createdByName || '',
+    notes: row.notes || '',
+  });
+
+  app.get(
+    '/api/finance/invoices/next-number',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'finance:write', 'reports:read']),
+    async (_req: AuthRequest, res) => {
+      try {
+        const result = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [row] = await db
+            .select({ maxNum: sql<number>`COALESCE(MAX(${invoices.invoiceNumber}), 0)` })
+            .from(invoices);
+          const nextNumber = Number(row?.maxNum || 0) + 1;
+          return { nextNumber, nextCode: formatInvoiceCode(nextNumber) };
+        });
+        res.json(result);
+      } catch (error) {
+        console.error('Next invoice number error:', error);
+        res.status(500).json({ error: 'تعذر احتساب رقم الفاتورة التسلسلي التالي' });
+      }
+    }
+  );
+
+  app.get(
+    '/api/finance/invoices',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'finance:write', 'reports:read']),
+    async (req: AuthRequest, res) => {
+      try {
+        const search = String(req.query.search || '').trim().toLowerCase();
+        const statusFilter = String(req.query.status || 'all').trim();
+
+        const payload = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const rows = await db
+            .select()
+            .from(invoices)
+            .orderBy(desc(invoices.invoiceNumber));
+
+          const maxNum = rows.reduce((m, r) => Math.max(m, Number(r.invoiceNumber || 0)), 0);
+          const nextNumber = maxNum + 1;
+
+          const serialized = rows.map(serializeInvoice);
+          const issuedCount = serialized.filter((r) => r.status === 'issued').length;
+          const cancelledCount = serialized.filter((r) => r.status === 'cancelled').length;
+          const issuedTotalAmount = serialized
+            .filter((r) => r.status === 'issued')
+            .reduce((sum, r) => sum + Number(r.totalAmount || 0), 0);
+
+          const filtered = serialized.filter((inv) => {
+            if (statusFilter !== 'all' && inv.status !== statusFilter) return false;
+            if (!search) return true;
+            const hay = `${inv.invoiceCode} ${inv.billToName} ${inv.schoolName} ${inv.statementText} ${inv.issueDate}`.toLowerCase();
+            return hay.includes(search);
+          });
+
+          return {
+            invoices: filtered,
+            nextNumber,
+            nextCode: formatInvoiceCode(nextNumber),
+            summary: {
+              totalCount: serialized.length,
+              issuedCount,
+              cancelledCount,
+              issuedTotalAmount,
+            },
+          };
+        });
+
+        res.json(payload);
+      } catch (error) {
+        console.error('List invoices error:', error);
+        res.status(500).json({ error: 'تعذر تحميل سجل الفواتير الصادرة' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/finance/invoices',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const {
+          issueDate,
+          billToName,
+          billingMonth,
+          billingYear,
+          vehicleCount,
+          schoolName,
+          statementText,
+          totalAmount,
+          notes,
+        } = req.body;
+
+        const cleanTotal = Math.round(Number(totalAmount || 0) * 100) / 100;
+        if (!Number.isFinite(cleanTotal) || cleanTotal <= 0) {
+          return res.status(400).json({ error: 'يرجى إدخال قيمة إجمالية صحيحة أكبر من صفر' });
+        }
+
+        const todayCairo = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+        const cleanIssueDate = normalizeIsoDateInput(String(issueDate || '')) || todayCairo;
+        const cleanMonth = Math.min(12, Math.max(1, Number(billingMonth) || new Date().getMonth() + 1));
+        const cleanYear = Math.min(2099, Math.max(2020, Number(billingYear) || new Date().getFullYear()));
+        const cleanVehicleCount =
+          Number.isFinite(Number(vehicleCount)) && Number(vehicleCount) > 0
+            ? Math.floor(Number(vehicleCount))
+            : DEFAULT_INVOICE_VEHICLE_COUNT;
+        const cleanSchool =
+          String(schoolName || '').trim() || DEFAULT_INVOICE_SCHOOL_NAME;
+        const cleanBillTo =
+          String(billToName || '').trim() || DEFAULT_INVOICE_BILL_TO;
+        const cleanStatement =
+          String(statementText || '').trim() ||
+          buildDefaultInvoiceStatement(cleanMonth, cleanVehicleCount, cleanSchool);
+        const amountWords = tafqeetEGP(cleanTotal);
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          return db.transaction(async (tx) => {
+            // Transaction-scoped advisory lock guarantees zero duplicate/skipped sequence numbers
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(9042001)`);
+            const [maxRow] = await tx
+              .select({ maxNum: sql<number>`COALESCE(MAX(${invoices.invoiceNumber}), 0)` })
+              .from(invoices);
+            const nextNumber = Number(maxRow?.maxNum || 0) + 1;
+            const invoiceCode = formatInvoiceCode(nextNumber);
+
+            const [created] = await tx
+              .insert(invoices)
+              .values({
+                invoiceNumber: nextNumber,
+                invoiceCode,
+                issueDate: cleanIssueDate,
+                billToName: cleanBillTo,
+                billingMonth: cleanMonth,
+                billingYear: cleanYear,
+                vehicleCount: cleanVehicleCount,
+                schoolName: cleanSchool,
+                statementText: cleanStatement,
+                totalAmount: cleanTotal.toFixed(2),
+                amountInWords: amountWords,
+                status: 'issued',
+                createdByUserId: req.dbUser!.id,
+                createdByName: req.dbUser!.fullName || req.dbUser!.email || '',
+                notes: String(notes || '').trim(),
+              })
+              .returning();
+
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'ISSUE_INVOICE',
+              entityType: 'invoices',
+              entityId: String(created.id),
+              afterJson: created,
+              ipAddress: req.ip || '',
+            });
+
+            await tx.insert(notifications).values({
+              targetRole: 'super_admin',
+              type: 'financial_action',
+              title: `إصدار فاتورة رقم #${invoiceCode}`,
+              body: `تم إصدار فاتورة رقم #${invoiceCode} بمبلغ ${cleanTotal.toLocaleString()} ج.م مطلوبة من ${cleanBillTo} بواسطة ${req.dbUser!.fullName || req.dbUser!.email}.`,
+              isRead: false,
+            });
+
+            return {
+              invoice: serializeInvoice(created),
+              nextNumber: nextNumber + 1,
+              nextCode: formatInvoiceCode(nextNumber + 1),
+            };
+          });
+        });
+
+        res.status(201).json(outcome);
+      } catch (error) {
+        console.error('Create invoice error:', error);
+        res.status(500).json({ error: 'تعذر إصدار الفاتورة وحفظها في السجل' });
+      }
+    }
+  );
+
+  app.patch(
+    '/api/finance/invoices/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف الفاتورة غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(invoices)
+            .where(eq(invoices.id, id))
+            .limit(1);
+
+          if (!existing) {
+            return { status: 404 as const, body: { error: 'الفاتورة غير موجودة' } };
+          }
+          if (existing.status === 'cancelled') {
+            return {
+              status: 400 as const,
+              body: { error: 'لا يمكن تعديل فاتورة ملغاة حفاظاً على سلامة السجل المحاسبي' },
+            };
+          }
+
+          const {
+            issueDate,
+            billToName,
+            billingMonth,
+            billingYear,
+            vehicleCount,
+            schoolName,
+            statementText,
+            totalAmount,
+            notes,
+          } = req.body;
+
+          const nextTotal =
+            totalAmount !== undefined
+              ? Math.round(Number(totalAmount) * 100) / 100
+              : Number(existing.totalAmount || 0);
+
+          if (!Number.isFinite(nextTotal) || nextTotal <= 0) {
+            return {
+              status: 400 as const,
+              body: { error: 'يجب أن يكون إجمالي الفاتورة أكبر من صفر' },
+            };
+          }
+
+          const nextIssueDate =
+            issueDate !== undefined
+              ? normalizeIsoDateInput(String(issueDate)) || existing.issueDate
+              : existing.issueDate;
+          const nextMonth =
+            billingMonth !== undefined
+              ? Math.min(12, Math.max(1, Number(billingMonth) || existing.billingMonth))
+              : existing.billingMonth;
+          const nextYear =
+            billingYear !== undefined
+              ? Math.min(2099, Math.max(2020, Number(billingYear) || existing.billingYear))
+              : existing.billingYear;
+          const nextVehicleCount =
+            vehicleCount !== undefined
+              ? Math.max(1, Math.floor(Number(vehicleCount) || existing.vehicleCount))
+              : existing.vehicleCount;
+          const nextSchoolName =
+            schoolName !== undefined
+              ? String(schoolName).trim() || existing.schoolName
+              : existing.schoolName;
+          const nextBillTo =
+            billToName !== undefined
+              ? String(billToName).trim() || existing.billToName
+              : existing.billToName;
+          const nextStatement =
+            statementText !== undefined
+              ? String(statementText).trim() || existing.statementText
+              : existing.statementText;
+          const nextNotes = notes !== undefined ? String(notes).trim() : existing.notes || '';
+          const nextWords = tafqeetEGP(nextTotal);
+
+          const [updated] = await db
+            .update(invoices)
+            .set({
+              issueDate: nextIssueDate,
+              billToName: nextBillTo,
+              billingMonth: nextMonth,
+              billingYear: nextYear,
+              vehicleCount: nextVehicleCount,
+              schoolName: nextSchoolName,
+              statementText: nextStatement,
+              totalAmount: nextTotal.toFixed(2),
+              amountInWords: nextWords,
+              notes: nextNotes,
+              updatedAt: new Date(),
+            })
+            .where(eq(invoices.id, id))
+            .returning();
+
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'UPDATE_INVOICE',
+            entityType: 'invoices',
+            entityId: String(id),
+            beforeJson: existing,
+            afterJson: updated,
+            ipAddress: req.ip || '',
+          });
+
+          await db.insert(notifications).values({
+            targetRole: 'super_admin',
+            type: 'financial_action',
+            title: `تعديل فاتورة رقم #${existing.invoiceCode}`,
+            body: `تم تحديث بيانات الفاتورة رقم #${existing.invoiceCode} إلى مبلغ ${nextTotal.toLocaleString()} ج.م بواسطة ${req.dbUser!.fullName || req.dbUser!.email}.`,
+            isRead: false,
+          });
+
+          return { status: 200 as const, body: { invoice: serializeInvoice(updated) } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error) {
+        console.error('Update invoice error:', error);
+        res.status(500).json({ error: 'تعذر تعديل بيانات الفاتورة' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/finance/invoices/:id/cancel',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف الفاتورة غير صالح' });
+        const reason = String(req.body?.reason || '').trim() || 'إلغاء محاسبي مع حفظ التسلسل';
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(invoices)
+            .where(eq(invoices.id, id))
+            .limit(1);
+
+          if (!existing) {
+            return { status: 404 as const, body: { error: 'الفاتورة غير موجودة' } };
+          }
+          if (existing.status === 'cancelled') {
+            return {
+              status: 400 as const,
+              body: { error: 'الفاتورة ملغاة بالفعل في السجل' },
+            };
+          }
+
+          const [updated] = await db
+            .update(invoices)
+            .set({
+              status: 'cancelled',
+              cancelledReason: reason,
+              cancelledAt: new Date(),
+              cancelledByUserId: req.dbUser!.id,
+              updatedAt: new Date(),
+            })
+            .where(eq(invoices.id, id))
+            .returning();
+
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'CANCEL_INVOICE',
+            entityType: 'invoices',
+            entityId: String(id),
+            beforeJson: existing,
+            afterJson: updated,
+            ipAddress: req.ip || '',
+          });
+
+          await db.insert(notifications).values({
+            targetRole: 'super_admin',
+            type: 'financial_action',
+            title: `إلغاء فاتورة رقم #${existing.invoiceCode}`,
+            body: `تم إلغاء الفاتورة رقم #${existing.invoiceCode} مع بقائها محفوظة بالسجل (السبب: ${reason}) بواسطة ${req.dbUser!.fullName || req.dbUser!.email}.`,
+            isRead: false,
+          });
+
+          return { status: 200 as const, body: { invoice: serializeInvoice(updated) } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error) {
+        console.error('Cancel invoice error:', error);
+        res.status(500).json({ error: 'تعذر إلغاء الفاتورة' });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/finance/invoices/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    async (_req: AuthRequest, res) => {
+      res.status(405).json({
+        error:
+          'لا يُسمح بالحذف النهائي للفواتير حفاظاً على تسلسل الترقيم المحاسبي — استخدم إجراء الإلغاء لوسمها كـ «ملغاة».',
+      });
+    }
+  );
+
+  // 5c. Financial Audit Trail / Activity Log (سجل النشاط والرقابة المالية)
+  app.get(
+    '/api/finance/audit-logs',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'finance:write']),
+    async (req: AuthRequest, res) => {
+      try {
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [logs, allUsers] = await Promise.all([
+            db
+              .select()
+              .from(auditLogs)
+              .where(
+                or(
+                  eq(auditLogs.entityType, 'advances'),
+                  eq(auditLogs.entityType, 'coverage_records'),
+                  eq(auditLogs.entityType, 'financial_transactions'),
+                  eq(auditLogs.entityType, 'financial_custodies'),
+                  eq(auditLogs.entityType, 'invoices'),
+                  like(auditLogs.action, '%ADVANCE%'),
+                  like(auditLogs.action, '%COVERAGE%'),
+                  like(auditLogs.action, '%ADJUSTMENT%'),
+                  like(auditLogs.action, '%CUSTODY%'),
+                  like(auditLogs.action, '%INVOICE%'),
+                  like(auditLogs.action, '%LEDGER%')
+                )
+              )
+              .orderBy(desc(auditLogs.createdAt))
+              .limit(100),
+            db.select().from(users),
+          ]);
+
+          const userMap = new Map(allUsers.map((u) => [u.id, u]));
+
+          const enriched = logs.map((log) => {
+            const actor = log.actorUserId ? userMap.get(log.actorUserId) : null;
+            let actionAr = log.action;
+            if (log.action.includes('ADVANCE') || log.entityType === 'advances') {
+              actionAr = log.action.includes('ADD') ? 'إضافة سلفة' : log.action.includes('UPDATE') ? 'تعديل سلفة' : 'حذف سلفة';
+            } else if (log.action.includes('COVERAGE') || log.entityType === 'coverage_records') {
+              actionAr = log.action.includes('ADD') ? 'إضافة تغطية' : log.action.includes('UPDATE') ? 'تعديل تغطية' : 'حذف تغطية';
+            } else if (log.action.includes('ADJUSTMENT')) {
+              actionAr = 'تعديل تسوية راتب (مكافأة/خصم)';
+            } else if (log.action.includes('CUSTODY') || log.entityType === 'financial_custodies') {
+              actionAr = log.action.includes('ADD') ? 'تسليم عهدة' : log.action.includes('UPDATE') ? 'تعديل عهدة' : log.action.includes('SETTLE') ? 'تصفية عهدة' : 'حذف عهدة';
+            } else if (log.action.includes('INVOICE') || log.entityType === 'invoices') {
+              actionAr = log.action.includes('ISSUE')
+                ? 'إصدار فاتورة'
+                : log.action.includes('UPDATE')
+                ? 'تعديل فاتورة'
+                : log.action.includes('CANCEL')
+                ? 'إلغاء فاتورة'
+                : 'عملية فاتورة';
+            } else if (log.action.includes('LEDGER') || log.entityType === 'financial_transactions') {
+              actionAr = 'حذف قيد من دفتر الأستاذ';
+            }
+
+            return {
+              ...log,
+              actorName: actor?.fullName || 'النظام / غير معروف',
+              actorEmail: actor?.email || '',
+              actionAr,
+            };
+          });
+
+          return enriched;
+        });
+
+        res.json({ auditLogs: outcome });
+      } catch (error) {
+        console.error('Get finance audit logs error:', error);
+        res.status(500).json({ error: 'تعذر تحميل سجل النشاط المالي' });
+      }
+    }
+  );
+
   // 5b. Non-Driver Employees Management (الموظفون غير السائقين - نشطون فقط)
   app.get('/api/employees', requireAuth, requireAdminOrStaff, requireAnyPermission(['employees:read', 'employees:write', 'finance:read', 'dashboard:read']), async (req: AuthRequest, res) => {
     try {
@@ -4119,13 +5409,14 @@ async function startServer() {
           await tx.delete(attendance).where(eq(attendance.driverId, driverId));
           await tx.delete(driverAssignments).where(eq(driverAssignments.driverId, driverId));
           await tx.delete(notifications).where(eq(notifications.recipientDriverId, driverId));
+          await tx
+            .update(financialCustodies)
+            .set({ driverId: null })
+            .where(eq(financialCustodies.driverId, driverId));
           await tx.delete(drivers).where(eq(drivers.id, driverId));
 
           if (existing.userId) {
-            await tx
-              .update(users)
-              .set({ isActive: false, phone: null, updatedAt: new Date() })
-              .where(eq(users.id, existing.userId));
+            await permanentlyDeleteUserTx(tx, existing.userId, req.dbUser!.id);
           }
 
           await tx.insert(auditLogs).values({
@@ -4164,6 +5455,21 @@ async function startServer() {
         }
 
         await db.transaction(async (tx) => {
+          const [linkedUser] = await tx
+            .select({ id: users.id, email: users.email })
+            .from(users)
+            .where(eq(users.employeeId, id))
+            .limit(1);
+
+          if (linkedUser && linkedUser.email.toLowerCase() !== 'hamdyhamzway@gmail.com') {
+            await permanentlyDeleteUserTx(tx, linkedUser.id, req.dbUser!.id);
+          }
+
+          await tx
+            .update(financialCustodies)
+            .set({ employeeId: null })
+            .where(eq(financialCustodies.employeeId, id));
+
           await tx.delete(employees).where(eq(employees.id, id));
           await tx.insert(auditLogs).values({
             actorUserId: req.dbUser!.id,
@@ -4510,14 +5816,31 @@ async function startServer() {
       if (!isSchoolAllowed(req.dbUser, existing.schoolId)) {
         return res.status(403).json({ error: 'هذا الموظف تابع لمدرسة خارج نطاق صلاحياتك' });
       }
-      await db.delete(employees).where(eq(employees.id, id));
-      await db.insert(auditLogs).values({
-        actorUserId: req.dbUser!.id,
-        action: 'DELETE_EMPLOYEE',
-        entityType: 'employees',
-        entityId: String(id),
-        beforeJson: existing,
-        ipAddress: req.ip || '',
+      await db.transaction(async (tx) => {
+        const [linkedUser] = await tx
+          .select({ id: users.id, email: users.email })
+          .from(users)
+          .where(eq(users.employeeId, id))
+          .limit(1);
+
+        if (linkedUser && linkedUser.email.toLowerCase() !== 'hamdyhamzway@gmail.com') {
+          await permanentlyDeleteUserTx(tx, linkedUser.id, req.dbUser!.id);
+        }
+
+        await tx
+          .update(financialCustodies)
+          .set({ employeeId: null })
+          .where(eq(financialCustodies.employeeId, id));
+
+        await tx.delete(employees).where(eq(employees.id, id));
+        await tx.insert(auditLogs).values({
+          actorUserId: req.dbUser!.id,
+          action: 'DELETE_EMPLOYEE',
+          entityType: 'employees',
+          entityId: String(id),
+          beforeJson: existing,
+          ipAddress: req.ip || '',
+        });
       });
       res.json({ ok: true, deletedId: id });
     } catch (error) {
@@ -6193,20 +7516,48 @@ async function startServer() {
       const rawEmail = String(email || '').trim().toLowerCase();
       const cleanEmail = rawEmail || `staff.${Date.now()}.${Math.floor(Math.random() * 1000)}@staff.alwaleed.local`;
 
-      // Prevent duplicate email
+      // Auto-purge any stale inactive non-owner accounts that held this email
+      const allUsersRows = await db.select().from(users);
+      const staleEmailUser = allUsersRows.find(
+        (u) =>
+          u.email.toLowerCase() === cleanEmail &&
+          !u.isActive &&
+          u.email.toLowerCase() !== 'hamdyhamzway@gmail.com'
+      );
+      if (staleEmailUser) {
+        await db.transaction(async (tx) => {
+          await permanentlyDeleteUserTx(tx, staleEmailUser.id, req.dbUser!.id);
+        });
+      }
+
+      // Check active duplicate email
       const [dupEmail] = await db
         .select({ id: users.id })
         .from(users)
         .where(eq(users.email, cleanEmail))
         .limit(1);
       if (dupEmail) {
-        return res.status(409).json({ error: 'هذا البريد الإلكتروني مستخدم بالفعل لحساب آخر' });
+        return res.status(409).json({ error: 'هذا البريد الإلكتروني مستخدم بالفعل لحساب نشط آخر' });
       }
 
-      // Prevent duplicate staffCode among active staff
-      const allUsersRows = await db.select().from(users);
-      const dupCode = allUsersRows.find(
+      // Auto-purge any stale inactive staffCode user
+      const staleCodeUser = allUsersRows.find(
         (u) =>
+          u.staffCode &&
+          normalizeDriverCode(u.staffCode).toLowerCase() === cleanStaffCode.toLowerCase() &&
+          !u.isActive &&
+          u.email.toLowerCase() !== 'hamdyhamzway@gmail.com'
+      );
+      if (staleCodeUser) {
+        await db.transaction(async (tx) => {
+          await permanentlyDeleteUserTx(tx, staleCodeUser.id, req.dbUser!.id);
+        });
+      }
+
+      const refreshedUsers = await db.select().from(users);
+      const dupCode = refreshedUsers.find(
+        (u) =>
+          u.isActive &&
           u.staffCode &&
           normalizeDriverCode(u.staffCode).toLowerCase() === cleanStaffCode.toLowerCase()
       );
@@ -6216,7 +7567,7 @@ async function startServer() {
 
       const nextEmployeeId = employeeId ? Number(employeeId) : null;
       if (nextEmployeeId) {
-        const linkedConflict = allUsersRows.find((u) => u.employeeId === nextEmployeeId);
+        const linkedConflict = refreshedUsers.find((u) => u.isActive && u.employeeId === nextEmployeeId);
         if (linkedConflict) {
           return res.status(409).json({ error: 'هذا الموظف لديه حساب وصلاحيات مفعلة بالفعل — يمكنك تعديله من القائمة' });
         }
@@ -6437,45 +7788,11 @@ async function startServer() {
         return res.status(400).json({ error: 'لا يمكن حذف حساب المدير العام الرئيسي' });
       }
 
-      // Check financial/ledger dependencies that cannot break audit trail
-      const [advRef, covRef, ftRef] = await Promise.all([
-        db.select({ id: advances.id }).from(advances).where(eq(advances.recordedByUserId, userId)).limit(1),
-        db.select({ id: coverageRecords.id }).from(coverageRecords).where(eq(coverageRecords.recordedByUserId, userId)).limit(1),
-        db.select({ id: financialTransactions.id }).from(financialTransactions).where(eq(financialTransactions.recordedByUserId, userId)).limit(1),
-      ]);
-
-      if (advRef[0] || covRef[0] || ftRef[0]) {
-        const [disabled] = await db
-          .update(users)
-          .set({ isActive: false, staffCode: '', updatedAt: new Date() })
-          .where(eq(users.id, userId))
-          .returning();
-        await db.insert(auditLogs).values({
-          actorUserId: req.dbUser.id,
-          action: 'REVOKE_STAFF_USER',
-          entityType: 'users',
-          entityId: String(userId),
-          beforeJson: existing,
-          ipAddress: req.ip || '',
-        });
-        return res.json({
-          ok: true,
-          revokedOnly: true,
-          user: disabled,
-          message: 'تم سحب صلاحية الدخول وإيقاف الحساب نهائياً مع الاحتفاظ بسجل العمليات المالية السابقة للتدقيق.',
-        });
-      }
-
       await db.transaction(async (tx) => {
-        await tx.update(drivers).set({ userId: null }).where(eq(drivers.userId, userId));
-        await tx.update(supervisors).set({ userId: null }).where(eq(supervisors.userId, userId));
-        await tx.update(attendance).set({ recordedByUserId: null }).where(eq(attendance.recordedByUserId, userId));
-        await tx.update(notifications).set({ recipientUserId: null }).where(eq(notifications.recipientUserId, userId));
-        await tx.update(auditLogs).set({ actorUserId: null }).where(eq(auditLogs.actorUserId, userId));
-        await tx.delete(users).where(eq(users.id, userId));
+        await permanentlyDeleteUserTx(tx, userId, req.dbUser!.id);
         await tx.insert(auditLogs).values({
           actorUserId: req.dbUser!.id,
-          action: 'DELETE_STAFF_USER',
+          action: 'PERMANENT_DELETE_STAFF_USER',
           entityType: 'users',
           entityId: String(userId),
           beforeJson: existing,
@@ -6483,7 +7800,7 @@ async function startServer() {
         });
       });
 
-      res.json({ ok: true, deletedId: userId });
+      res.json({ ok: true, deletedId: userId, message: 'تم مسح الحساب نهائياً وتحرير البريد الإلكتروني وكود الدخول.' });
     } catch (error) {
       console.error('Delete user error:', error);
       res.status(500).json({ error: 'تعذر حذف المستخدم' });
@@ -7797,7 +9114,16 @@ async function startServer() {
 
           await db.transaction(async (tx) => {
             await tx.delete(supervisorTrips).where(eq(supervisorTrips.supervisorId, id));
+            await tx
+              .update(financialCustodies)
+              .set({ supervisorId: null })
+              .where(eq(financialCustodies.supervisorId, id));
             await tx.delete(supervisors).where(eq(supervisors.id, id));
+
+            if (existing.userId) {
+              await permanentlyDeleteUserTx(tx, existing.userId, req.dbUser!.id);
+            }
+
             await tx.insert(auditLogs).values({
               actorUserId: req.dbUser!.id,
               action: 'DELETE_SUPERVISOR',
@@ -8392,6 +9718,140 @@ async function startServer() {
     } catch (error) {
       console.error('Supervisor trip action error:', error);
       res.status(500).json({ error: 'تعذر تسجيل حركة الرحلة' });
+    }
+  });
+
+  // Supervisor App: Task Notebook / Notes (مفكرة المهام وملاحظات المشرفة)
+  app.get('/api/supervisor-app/notes', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'supervisor' && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'غير مطلع على هذا المسار' });
+      }
+      let targetSupervisorId: number | null = req.supervisorRecord?.id || null;
+      if (req.dbUser?.roleSlug === 'super_admin') {
+        const override = req.query.asSupervisorId;
+        if (override) targetSupervisorId = Number(override);
+      }
+      if (!targetSupervisorId && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'لا يوجد ملف مشرفة مرتبط' });
+      }
+
+      const rows = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        return await db
+          .select()
+          .from(supervisorNotes)
+          .where(targetSupervisorId ? eq(supervisorNotes.supervisorId, targetSupervisorId) : undefined)
+          .orderBy(desc(supervisorNotes.createdAt));
+      });
+
+      res.json({ notes: rows });
+    } catch (error) {
+      console.error('Get supervisor notes error:', error);
+      res.status(500).json({ error: 'تعذر تحميل مفكرة المهام' });
+    }
+  });
+
+  app.post('/api/supervisor-app/notes', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (req.dbUser?.roleSlug !== 'supervisor' && req.dbUser?.roleSlug !== 'super_admin') {
+        return res.status(403).json({ error: 'غير متاح لك إضافة ملاحظات المشرفة' });
+      }
+      let targetSupervisorId: number | null = req.supervisorRecord?.id || null;
+      if (req.dbUser?.roleSlug === 'super_admin') {
+        const override = req.body?.supervisorId || req.query.asSupervisorId;
+        if (override) targetSupervisorId = Number(override);
+      }
+      if (!targetSupervisorId) {
+        return res.status(403).json({ error: 'لا يوجد ملف مشرفة مرتبط' });
+      }
+
+      const { category = 'students_trip', title, content, notifyAdmin = false, schoolId } = req.body;
+      if (!title || !String(title).trim() || !content || !String(content).trim()) {
+        return res.status(400).json({ error: 'يرجى إدخال عنوان وتفاصيل الملاحظة أو المهمة' });
+      }
+
+      const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        return await db.transaction(async (tx) => {
+          const [sup] = await tx.select().from(supervisors).where(eq(supervisors.id, targetSupervisorId)).limit(1);
+          if (!sup) throw new Error('المشرفة غير موجودة');
+
+          const [inserted] = await tx
+            .insert(supervisorNotes)
+            .values({
+              supervisorId: sup.id,
+              schoolId: schoolId ? Number(schoolId) : sup.schoolId,
+              category: String(category || 'students_trip'),
+              title: String(title).trim(),
+              content: String(content).trim(),
+              notifyAdmin: Boolean(notifyAdmin),
+            })
+            .returning();
+
+          if (Boolean(notifyAdmin)) {
+            await tx.insert(notifications).values({
+              targetRole: 'super_admin',
+              type: 'supervisor_note',
+              title: `🚨 تنبيه من المشرفة ${sup.fullName}: ${inserted.title}`,
+              body: `ملاحظة (${inserted.category === 'financial_tips' ? 'الماليات والإكراميات' : inserted.category === 'students_trip' ? 'حالة الطلاب والرحلة' : 'إدارية عاجلة'}): ${inserted.content}`,
+              isRead: false,
+            });
+          }
+
+          await tx.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'CREATE_SUPERVISOR_NOTE',
+            entityType: 'supervisor_notes',
+            entityId: String(inserted.id),
+            afterJson: inserted,
+            ipAddress: req.ip || '',
+          });
+
+          return inserted;
+        });
+      });
+
+      res.status(201).json({ note: outcome });
+    } catch (error: unknown) {
+      console.error('Create supervisor note error:', error);
+      const msg = error instanceof Error ? error.message : 'تعذر حفظ الملاحظة';
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  app.delete('/api/supervisor-app/notes/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ error: 'معرف الملاحظة غير صالح' });
+
+      const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+        const [existing] = await db.select().from(supervisorNotes).where(eq(supervisorNotes.id, id)).limit(1);
+        if (!existing) return { status: 404 as const, body: { error: 'الملاحظة غير موجودة' } };
+
+        if (req.dbUser?.roleSlug === 'supervisor' && req.supervisorRecord?.id && existing.supervisorId !== req.supervisorRecord.id) {
+          return { status: 403 as const, body: { error: 'لا يمكنك حذف ملاحظة خاصة بمشرفة أخرى' } };
+        }
+
+        await db.delete(supervisorNotes).where(eq(supervisorNotes.id, id));
+
+        if (req.dbUser?.id) {
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser.id,
+            action: 'DELETE_SUPERVISOR_NOTE',
+            entityType: 'supervisor_notes',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+        }
+
+        return { status: 200 as const, body: { ok: true, deletedId: id } };
+      });
+
+      res.status(outcome.status).json(outcome.body);
+    } catch (error: unknown) {
+      console.error('Delete supervisor note error:', error);
+      const msg = error instanceof Error ? error.message : 'تعذر حذف الملاحظة';
+      res.status(400).json({ error: msg });
     }
   });
 

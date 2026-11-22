@@ -11,7 +11,7 @@ export const COMPANY_DETAILS = {
   businessNameAr: 'الوليد ترافيل للنقل المدرسي',
   businessNameEn: 'Al-Waleed Travel · School Fleet Management',
   commercialRegister: '83296',
-  taxId: '775-627-151',
+  taxId: '775627151',
   managerTitleAr: 'الإدارة العامة — م. حمدي',
   phone: '01016815939',
   phoneFormatted: '01016815939',

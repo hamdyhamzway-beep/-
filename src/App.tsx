@@ -11,6 +11,7 @@ import {
   MapPin,
   Menu,
   Mic,
+  Receipt,
   Settings,
   Smartphone,
   Users,
@@ -41,6 +42,7 @@ import { EmployeeDailyReportModal } from './components/employee/EmployeeDailyRep
 import { DriverApp } from './components/driver/DriverApp';
 import { SupervisorApp } from './components/supervisor/SupervisorApp';
 import { ChatHubModule } from './components/chat/ChatHubModule';
+import { InvoicesModule } from './components/admin/InvoicesModule';
 import { ArrowRight, MessageSquare, UserCheck } from 'lucide-react';
 
 type AdminTabId =
@@ -50,6 +52,7 @@ type AdminTabId =
   | 'employees'
   | 'schools'
   | 'finance'
+  | 'invoices'
   | 'daily_reports'
   | 'map'
   | 'chat'
@@ -191,6 +194,16 @@ const AppShell: React.FC = () => {
           can('finance:write') ||
           can('advances:write') ||
           can('coverage:write'),
+      },
+      {
+        id: 'invoices',
+        label: 'الفواتير',
+        icon: Receipt,
+        visible:
+          isSuperAdmin ||
+          can('finance:read') ||
+          can('finance:write') ||
+          can('reports:read'),
       },
       {
         id: 'daily_reports',
@@ -662,6 +675,7 @@ const AppShell: React.FC = () => {
           {activeTab === 'employees' && <EmployeesModule />}
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
           {activeTab === 'finance' && <FinanceModule />}
+          {activeTab === 'invoices' && <InvoicesModule initialView="create" />}
           {activeTab === 'daily_reports' && <DailyReportsModule />}
           {activeTab === 'map' && <LiveMapModule />}
           {activeTab === 'chat' && (

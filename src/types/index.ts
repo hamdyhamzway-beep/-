@@ -547,4 +547,72 @@ export interface DailyReportRecord {
   updatedAt: string;
 }
 
+export interface FinancialCustodyRecord {
+  id: number;
+  custodyCode: string;
+  schoolId: number | null;
+  schoolName: string;
+  beneficiaryType: 'driver' | 'supervisor' | 'employee' | 'other';
+  driverId: number | null;
+  driverCode: string | null;
+  driverName: string | null;
+  supervisorId: number | null;
+  supervisorName: string | null;
+  employeeId: number | null;
+  employeeName: string | null;
+  beneficiaryName: string;
+  beneficiaryPhone: string;
+  amount: number;
+  spentAmount: number;
+  returnedAmount: number;
+  remainingAmount: number;
+  handoverDate: string;
+  settlementDate: string | null;
+  purpose: string;
+  paymentMethod: string;
+  handedByUserId?: number | null;
+  handedByName: string;
+  settledByUserId?: number | null;
+  settledByName: string;
+  status: 'active' | 'settled' | 'partial';
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FinancialCustodyStats {
+  totalHandedAmount: number;
+  totalSpentAmount: number;
+  totalReturnedAmount: number;
+  totalActiveAmount: number;
+  totalCount: number;
+  activeCount: number;
+  partialCount: number;
+  settledCount: number;
+}
+
+export interface InvoiceRecord {
+  id: number;
+  invoiceNumber: number;
+  invoiceCode: string;
+  issueDate: string;
+  billToName: string;
+  billingMonth: number;
+  billingYear: number;
+  vehicleCount: number;
+  schoolName: string;
+  statementText: string;
+  totalAmount: number;
+  amountInWords: string;
+  status: 'issued' | 'cancelled';
+  cancelledReason?: string;
+  cancelledAt?: string | null;
+  createdByName?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+
+
 

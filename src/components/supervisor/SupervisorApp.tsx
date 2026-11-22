@@ -25,7 +25,9 @@ import {
   School,
   Signal,
   SignalZero,
+  StickyNote,
   Sun,
+  Trash2,
   UserCheck,
   X,
 } from 'lucide-react';
@@ -298,6 +300,111 @@ export const SupervisorApp: React.FC<{
   const trackedVehicles = data?.trackedVehicles || [];
   const activeVehicle =
     trackedVehicles.find((v) => v.vehicleId === activeVehicleId) || trackedVehicles[0] || null;
+
+  const [supervisorTab, setSupervisorTab] = useState<'tracking' | 'notes'>('tracking');
+
+  interface SupervisorNoteItem {
+    id: number;
+    supervisorId: number;
+    schoolId: number | null;
+    category: string;
+    title: string;
+    content: string;
+    notifyAdmin: boolean;
+    createdAt: string;
+  }
+  const [supNotes, setSupNotes] = useState<SupervisorNoteItem[]>([]);
+  const [notesLoading, setNotesLoading] = useState(false);
+  const [noteForm, setNoteForm] = useState({
+    category: 'students_trip' as 'students_trip' | 'financial_tips' | 'urgent_admin' | 'other',
+    title: '',
+    content: '',
+    notifyAdmin: false,
+  });
+  const [savingNote, setSavingNote] = useState(false);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [noteSuccess, setNoteSuccess] = useState<string | null>(null);
+
+  const loadSupervisorNotes = useCallback(async () => {
+    if (!supervisor) return;
+    setNotesLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (allowSupervisorSelector && selectedSupervisorId) {
+        params.set('asSupervisorId', selectedSupervisorId);
+      }
+      const qs = params.toString();
+      const res = await apiFetch<{ notes: SupervisorNoteItem[] }>(
+        qs ? `/api/supervisor-app/notes?${qs}` : `/api/supervisor-app/notes`
+      );
+      setSupNotes(res.notes);
+    } catch (err: unknown) {
+      setNoteError(err instanceof Error ? err.message : 'تعذر تحميل مفكرة المهام');
+    } finally {
+      setNotesLoading(false);
+    }
+  }, [supervisor, allowSupervisorSelector, selectedSupervisorId]);
+
+  useEffect(() => {
+    if (supervisorTab === 'notes' && supervisor) {
+      loadSupervisorNotes();
+    }
+  }, [supervisorTab, supervisor, loadSupervisorNotes]);
+
+  const handleCreateNote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supervisor) return;
+    setNoteError(null);
+    setNoteSuccess(null);
+    setSavingNote(true);
+    try {
+      const params = new URLSearchParams();
+      if (allowSupervisorSelector && selectedSupervisorId) {
+        params.set('asSupervisorId', selectedSupervisorId);
+      }
+      const qs = params.toString();
+      await apiFetch(
+        qs ? `/api/supervisor-app/notes?${qs}` : `/api/supervisor-app/notes`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            supervisorId: supervisor.id,
+            schoolId: data?.school?.id ?? null,
+            category: noteForm.category,
+            title: noteForm.title.trim(),
+            content: noteForm.content.trim(),
+            notifyAdmin: noteForm.notifyAdmin,
+          }),
+        }
+      );
+      setNoteForm({
+        category: 'students_trip',
+        title: '',
+        content: '',
+        notifyAdmin: false,
+      });
+      setNoteSuccess(
+        noteForm.notifyAdmin
+          ? 'تم حفظ الملاحظة وإرسال تنبيه فوري للإدارة بنجاح.'
+          : 'تم حفظ الملاحظة في مفكرة المهام بنجاح.'
+      );
+      await loadSupervisorNotes();
+    } catch (err: unknown) {
+      setNoteError(err instanceof Error ? err.message : 'تعذر حفظ الملاحظة');
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const handleDeleteNote = async (noteId: number) => {
+    try {
+      await apiFetch(`/api/supervisor-app/notes/${noteId}`, { method: 'DELETE' });
+      setNoteSuccess('تم حذف الملاحظة بنجاح.');
+      await loadSupervisorNotes();
+    } catch (err: unknown) {
+      setNoteError(err instanceof Error ? err.message : 'تعذر حذف الملاحظة');
+    }
+  };
 
   const transmitSupervisorGps = useCallback(
     async (
@@ -918,6 +1025,193 @@ export const SupervisorApp: React.FC<{
 
             <MorningSpiritualRibbon compact />
 
+            {/* Supervisor View Tabs */}
+            <div className="flex items-center gap-1 p-1 bg-slate-200/70 rounded-xl w-fit">
+              <button
+                type="button"
+                onClick={() => setSupervisorTab('tracking')}
+                className={`min-h-[40px] px-4 py-2 text-xs font-bold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 ${
+                  supervisorTab === 'tracking'
+                    ? 'bg-white text-[#0B1F3A] shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Navigation className="w-3.5 h-3.5 text-[#C89B3C]" />
+                التتبع والرحلة اليومية
+              </button>
+              <button
+                type="button"
+                onClick={() => setSupervisorTab('notes')}
+                className={`min-h-[40px] px-4 py-2 text-xs font-bold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 ${
+                  supervisorTab === 'notes'
+                    ? 'bg-white text-[#0B1F3A] shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <StickyNote className="w-3.5 h-3.5 text-[#C89B3C]" />
+                مفكرة المهام
+              </button>
+            </div>
+
+            {supervisorTab === 'notes' && (
+              <section className="space-y-4">
+                <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-4">
+                  <div>
+                    <h2 className="font-display text-base font-bold text-[#0B1F3A]">
+                      إضافة ملاحظة جديدة في مفكرة المهام
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      سجلي ملاحظات سريعة عن الرحلة، حالة الطلاب، أو الماليات والإكراميات مع خيار تنبيه الإدارة فوراً.
+                    </p>
+                  </div>
+
+                  {noteError && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-xs text-red-800">
+                      {noteError}
+                    </div>
+                  )}
+                  {noteSuccess && (
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-900">
+                      {noteSuccess}
+                    </div>
+                  )}
+
+                  <form onSubmit={handleCreateNote} className="space-y-3 text-xs">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">تصنيف الملاحظة</label>
+                        <select
+                          value={noteForm.category}
+                          onChange={(e) =>
+                            setNoteForm({
+                              ...noteForm,
+                              category: e.target.value as 'students_trip' | 'financial_tips' | 'urgent_admin' | 'other',
+                            })
+                          }
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800"
+                        >
+                          <option value="students_trip">حالة الطلاب والرحلة</option>
+                          <option value="financial_tips">الماليات والإكراميات</option>
+                          <option value="urgent_admin">تنبيه إداري عاجل</option>
+                          <option value="other">ملاحظات أخرى</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">عنوان الملاحظة *</label>
+                        <input
+                          type="text"
+                          required
+                          value={noteForm.title}
+                          onChange={(e) => setNoteForm({ ...noteForm, title: e.target.value })}
+                          placeholder="مثال: تأخر طالب في المحطة الثانية / مصروف إكرامية"
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">التفاصيل *</label>
+                      <textarea
+                        rows={3}
+                        required
+                        value={noteForm.content}
+                        onChange={(e) => setNoteForm({ ...noteForm, content: e.target.value })}
+                        placeholder="اكتبي تفاصيل الملاحظة أو المهمة هنا..."
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                      <label className="inline-flex items-center gap-2 cursor-pointer select-none font-semibold text-slate-800">
+                        <input
+                          type="checkbox"
+                          checked={noteForm.notifyAdmin}
+                          onChange={(e) => setNoteForm({ ...noteForm, notifyAdmin: e.target.checked })}
+                          className="w-4 h-4 rounded border-slate-300 text-[#0B1F3A]"
+                        />
+                        <span>ربط بتنبيه فوري للإدارة (إرسال إشعار للمدير العام)</span>
+                      </label>
+                      <button
+                        type="submit"
+                        disabled={savingNote}
+                        className="min-h-[40px] rounded-xl bg-[#0B1F3A] hover:bg-[#13325c] px-5 py-2 font-bold text-white disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        {savingNote ? 'جاري الحفظ...' : 'حفظ الملاحظة'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+
+                <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
+                    <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
+                      سجل الملاحظات والمهام المسجلة
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={loadSupervisorNotes}
+                      className="text-xs font-semibold text-slate-600 hover:text-[#0B1F3A] cursor-pointer"
+                    >
+                      تحديث
+                    </button>
+                  </div>
+                  <div className="divide-y divide-slate-100">
+                    {notesLoading ? (
+                      <div className="p-8 text-center text-xs text-slate-400">جاري تحميل مفكرة المهام...</div>
+                    ) : supNotes.length === 0 ? (
+                      <div className="p-8 text-center text-xs text-slate-400">
+                        لا توجد ملاحظات مسجلة في مفكرة المهام بعد.
+                      </div>
+                    ) : (
+                      supNotes.map((note) => {
+                        const catLabel =
+                          note.category === 'financial_tips'
+                            ? 'الماليات والإكراميات'
+                            : note.category === 'students_trip'
+                            ? 'حالة الطلاب والرحلة'
+                            : note.category === 'urgent_admin'
+                            ? 'تنبيه إداري عاجل'
+                            : 'أخرى';
+                        return (
+                          <div key={note.id} className="p-4 flex items-start justify-between gap-3">
+                            <div className="space-y-1 min-w-0">
+                              <div className="font-bold text-sm text-[#0B1F3A]">{note.title}</div>
+                              <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2 tabular-nums">
+                                <span>{catLabel}</span>
+                                <span aria-hidden="true">·</span>
+                                <span>
+                                  {new Date(note.createdAt).toLocaleString('ar-EG', {
+                                    timeZone: 'Africa/Cairo',
+                                  })}
+                                </span>
+                                {note.notifyAdmin && (
+                                  <>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="font-semibold text-amber-700">تم تنبيه الإدارة</span>
+                                  </>
+                                )}
+                              </div>
+                              <p className="text-xs text-slate-700 leading-relaxed pt-1 whitespace-pre-wrap">
+                                {note.content}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteNote(note.id)}
+                              title="حذف الملاحظة"
+                              className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 cursor-pointer shrink-0"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {supervisorTab === 'tracking' && (
+              <>
             {/* 2. Live Location Control Card (Auto-Start + Close Option + Economy Mode) */}
             <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1487,6 +1781,8 @@ export const SupervisorApp: React.FC<{
                 )}
               </div>
             </section>
+              </>
+            )}
           </>
         )}
       </main>

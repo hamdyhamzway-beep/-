@@ -1,16 +1,27 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowDownLeft,
+  ArrowUpRight,
   Building2,
   Calculator,
   CalendarCheck,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
+  Coins,
   Edit3,
   Eye,
+  FileText,
+  Filter,
+  HandCoins,
   Plus,
+  Printer,
+  Receipt,
   RotateCcw,
+  Search,
   Sparkles,
   Trash2,
   TrendingUp,
@@ -21,10 +32,13 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatEGP, getLocalTodayDateString } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { InvoicesModule } from './InvoicesModule';
 import type {
   AdvanceRecord,
   CoverageRecord,
   FinanceGrandTotals,
+  FinancialCustodyRecord,
+  FinancialCustodyStats,
   FinancialTransaction,
   SalaryRecord,
   SchoolFinanceContract,
@@ -126,7 +140,17 @@ interface FinanceOverview {
   ledger: FinancialTransaction[];
 }
 
-type FinanceTabId = 'schools' | 'salaries' | 'advances' | 'coverage' | 'ledger' | 'closing';
+type FinanceTabId =
+  | 'schools'
+  | 'salaries'
+  | 'advances'
+  | 'coverage'
+  | 'custodies'
+  | 'invoices'
+  | 'invoice_archive'
+  | 'ledger'
+  | 'auditLogs'
+  | 'closing';
 
 export const FinanceModule: React.FC = () => {
   const { dbUser } = useAuth();
@@ -151,7 +175,11 @@ export const FinanceModule: React.FC = () => {
     ...(canCoverageWrite || canFinanceRead
       ? [{ id: 'coverage' as const, label: 'تغطية الغياب' }]
       : []),
+    ...(canFinanceRead ? [{ id: 'custodies' as const, label: 'العهد المالية' }] : []),
+    ...(canFinanceRead ? [{ id: 'invoices' as const, label: 'إصدار الفواتير' }] : []),
+    ...(canFinanceRead ? [{ id: 'invoice_archive' as const, label: 'سجل الفواتير' }] : []),
     ...(canFinanceRead ? [{ id: 'ledger' as const, label: 'دفتر الأستاذ المالي' }] : []),
+    ...(canFinanceRead ? [{ id: 'auditLogs' as const, label: 'سجل النشاط المالي (Audit Log)' }] : []),
     ...(canFinanceWrite ? [{ id: 'closing' as const, label: 'التصفية وبداية شهر جديد' }] : []),
   ];
 
@@ -248,6 +276,105 @@ export const FinanceModule: React.FC = () => {
   const [savingBillingPeriod, setSavingBillingPeriod] = useState(false);
   const [billingModalError, setBillingModalError] = useState<string | null>(null);
 
+  // Ledger transaction deletion state
+  const [deletingLedgerTx, setDeletingLedgerTx] = useState<FinancialTransaction | null>(null);
+
+  // Financial Custodies (العهد المالية) state
+  const [custodies, setCustodies] = useState<FinancialCustodyRecord[]>([]);
+  const [custodyStats, setCustodyStats] = useState<FinancialCustodyStats | null>(null);
+  const [custodiesLoading, setCustodiesLoading] = useState(false);
+  const [custodyFilterStatus, setCustodyFilterStatus] = useState<string>('all');
+  const [custodyFilterBeneficiary, setCustodyFilterBeneficiary] = useState<string>('all');
+  const [custodySearch, setCustodySearch] = useState<string>('');
+
+  const [newCustodyModalOpen, setNewCustodyModalOpen] = useState(false);
+  const [newCustodyForm, setNewCustodyForm] = useState({
+    beneficiaryType: 'driver' as 'driver' | 'supervisor' | 'employee' | 'other',
+    selectedDriverId: '',
+    selectedSupervisorId: '',
+    selectedEmployeeId: '',
+    beneficiaryName: '',
+    beneficiaryPhone: '',
+    schoolId: '',
+    amount: '',
+    handoverDate: getLocalTodayDateString(),
+    purpose: '',
+    paymentMethod: 'كاش',
+    handedByName: dbUser?.fullName || 'الإدارة المالية',
+    notes: '',
+  });
+  const [savingNewCustody, setSavingNewCustody] = useState(false);
+  const [newCustodyError, setNewCustodyError] = useState<string | null>(null);
+
+  const [settlingCustody, setSettlingCustody] = useState<FinancialCustodyRecord | null>(null);
+  const [settleForm, setSettleForm] = useState({
+    spentAmount: '',
+    returnedAmount: '',
+    settlementDate: getLocalTodayDateString(),
+    settledByName: dbUser?.fullName || 'الإدارة المالية',
+    notes: '',
+  });
+  const [savingSettlement, setSavingSettlement] = useState(false);
+  const [settleError, setSettleError] = useState<string | null>(null);
+
+  const [editingCustody, setEditingCustody] = useState<FinancialCustodyRecord | null>(null);
+  const [editCustodyForm, setEditCustodyForm] = useState({
+    beneficiaryName: '',
+    beneficiaryPhone: '',
+    schoolId: '',
+    amount: '',
+    handoverDate: '',
+    purpose: '',
+    paymentMethod: 'كاش',
+    handedByName: '',
+    notes: '',
+  });
+  const [savingCustodyEdit, setSavingCustodyEdit] = useState(false);
+  const [editCustodyError, setEditCustodyError] = useState<string | null>(null);
+
+  const [deletingCustody, setDeletingCustody] = useState<FinancialCustodyRecord | null>(null);
+  const [printingCustody, setPrintingCustody] = useState<FinancialCustodyRecord | null>(null);
+
+  // Audit Logs / Activity Trail state
+  interface AuditLogItem {
+    id: number;
+    actorUserId: number | null;
+    actorName: string;
+    actorEmail: string;
+    action: string;
+    actionAr: string;
+    entityType: string;
+    entityId: string;
+    beforeJson?: any;
+    afterJson?: any;
+    ipAddress?: string;
+    createdAt: string;
+  }
+  const [auditLogsList, setAuditLogsList] = useState<AuditLogItem[]>([]);
+  const [auditLogsLoading, setAuditLogsLoading] = useState(false);
+
+  const loadAuditLogs = useCallback(async () => {
+    setAuditLogsLoading(true);
+    try {
+      const res = await apiFetch<{ auditLogs: AuditLogItem[] }>('/api/finance/audit-logs');
+      setAuditLogsList(res.auditLogs);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'تعذر تحميل سجل النشاط المالي');
+    } finally {
+      setAuditLogsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === 'auditLogs') {
+      loadAuditLogs();
+    }
+  }, [tab, loadAuditLogs]);
+
+  const [employeesList, setEmployeesList] = useState<
+    Array<{ id: number; fullName: string; phone?: string; schoolId?: number | null; schoolName?: string }>
+  >([]);
+
   useEscapeKey(
     Boolean(
       billingModalSchool ||
@@ -257,7 +384,13 @@ export const FinanceModule: React.FC = () => {
         deletingCoverage ||
         editingCoverage ||
         deletingAdvance ||
-        editingAdvance
+        editingAdvance ||
+        deletingLedgerTx ||
+        newCustodyModalOpen ||
+        settlingCustody ||
+        editingCustody ||
+        deletingCustody ||
+        printingCustody
     ),
     () => {
       if (billingModalSchool) setBillingModalSchool(null);
@@ -268,6 +401,12 @@ export const FinanceModule: React.FC = () => {
       else if (editingCoverage) setEditingCoverage(null);
       else if (deletingAdvance) setDeletingAdvance(null);
       else if (editingAdvance) setEditingAdvance(null);
+      else if (deletingLedgerTx) setDeletingLedgerTx(null);
+      else if (newCustodyModalOpen) setNewCustodyModalOpen(false);
+      else if (settlingCustody) setSettlingCustody(null);
+      else if (editingCustody) setEditingCustody(null);
+      else if (deletingCustody) setDeletingCustody(null);
+      else if (printingCustody) setPrintingCustody(null);
     }
   );
 
@@ -2440,6 +2579,78 @@ export const FinanceModule: React.FC = () => {
           </div>
         </div>
       )}
+
+      {tab === 'auditLogs' && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+          <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+            <div>
+              <h3 className="font-display text-sm font-bold text-[#0B1F3A]">
+                سجل النشاط والرقابة المالية (Audit Log)
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                تتبع كامل لكل عملية إضافة، تعديل، أو حذف تمت على السلف، التغطيات، العهد، ودفتر الأستاذ مع اسم المستخدم والوقت.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={loadAuditLogs}
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+            >
+              تحديث السجل
+            </button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-right text-xs">
+              <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                <tr>
+                  <th className="py-3 px-4">#</th>
+                  <th className="py-3 px-4">التاريخ والوقت</th>
+                  <th className="py-3 px-4">المسؤول (المستخدم)</th>
+                  <th className="py-3 px-4">نوع الإجراء</th>
+                  <th className="py-3 px-4">الكيان والمعرف</th>
+                  <th className="py-3 px-4">تفاصيل التعديل</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {auditLogsList.map((log) => (
+                  <tr key={log.id}>
+                    <td className="py-3 px-4 font-mono text-slate-400">{log.id}</td>
+                    <td className="py-3 px-4 font-mono text-slate-600 tabular-nums">
+                      {new Date(log.createdAt).toLocaleString('ar-EG', {
+                        timeZone: 'Africa/Cairo',
+                      })}
+                    </td>
+                    <td className="py-3 px-4 font-semibold text-slate-900">
+                      <div>{log.actorName}</div>
+                      {log.actorEmail && <div className="text-[11px] text-slate-400 font-mono">{log.actorEmail}</div>}
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-bold text-[#0B1F3A]">
+                        {log.actionAr}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 font-mono text-slate-600">
+                      {log.entityType} #{log.entityId}
+                    </td>
+                    <td className="py-3 px-4 text-slate-500 text-[11px]">
+                      {log.afterJson ? JSON.stringify(log.afterJson).slice(0, 100) + '...' : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {auditLogsList.length === 0 && !auditLogsLoading && (
+              <div className="py-12 text-center text-slate-400">لا توجد سجلات نشاط مالي مسجلة بعد</div>
+            )}
+            {auditLogsLoading && (
+              <div className="py-12 text-center text-slate-400">جاري تحميل سجل النشاط...</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === 'invoices' && <InvoicesModule initialView="create" />}
+      {tab === 'invoice_archive' && <InvoicesModule initialView="archive" />}
 
       {tab === 'ledger' && (
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">

@@ -743,5 +743,118 @@ export const dailyReportsRelations = relations(dailyReports, ({ one }) => ({
   school: one(schools, { fields: [dailyReports.schoolId], references: [schools.id] }),
 }));
 
+// 26. Financial Custodies (العهد المالية - تسليم واستلام وتصفية العهد)
+export const financialCustodies = pgTable(
+  'financial_custodies',
+  {
+    id: serial('id').primaryKey(),
+    custodyCode: text('custody_code').notNull(),
+    schoolId: integer('school_id').references(() => schools.id),
+    beneficiaryType: text('beneficiary_type').notNull().default('driver'), // driver | supervisor | employee | other
+    driverId: integer('driver_id').references(() => drivers.id),
+    supervisorId: integer('supervisor_id').references(() => supervisors.id),
+    employeeId: integer('employee_id').references(() => employees.id, { onDelete: 'set null' }),
+    beneficiaryName: text('beneficiary_name').notNull(),
+    beneficiaryPhone: text('beneficiary_phone').default(''),
+    amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+    spentAmount: numeric('spent_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+    returnedAmount: numeric('returned_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+    handoverDate: text('handover_date').notNull(), // YYYY-MM-DD
+    settlementDate: text('settlement_date'), // YYYY-MM-DD
+    purpose: text('purpose').notNull(),
+    paymentMethod: text('payment_method').notNull().default('كاش'),
+    handedByUserId: integer('handed_by_user_id').references(() => users.id),
+    handedByName: text('handed_by_name').default(''),
+    settledByUserId: integer('settled_by_user_id').references(() => users.id),
+    settledByName: text('settled_by_name').default(''),
+    status: text('status').notNull().default('active'), // active | settled | partial
+    notes: text('notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_custodies_status').on(table.status),
+    index('idx_custodies_school').on(table.schoolId),
+    index('idx_custodies_driver').on(table.driverId),
+    index('idx_custodies_handover_date').on(table.handoverDate),
+  ]
+);
+
+export const financialCustodiesRelations = relations(financialCustodies, ({ one }) => ({
+  school: one(schools, { fields: [financialCustodies.schoolId], references: [schools.id] }),
+  driver: one(drivers, { fields: [financialCustodies.driverId], references: [drivers.id] }),
+  supervisor: one(supervisors, { fields: [financialCustodies.supervisorId], references: [supervisors.id] }),
+  employee: one(employees, { fields: [financialCustodies.employeeId], references: [employees.id] }),
+  handedByUser: one(users, { fields: [financialCustodies.handedByUserId], references: [users.id] }),
+  settledByUser: one(users, { fields: [financialCustodies.settledByUserId], references: [users.id] }),
+}));
+
+// 27. Supervisor Notes / Task Notebook (مفكرة مهام وملاحظات المشرفة)
+export const supervisorNotes = pgTable(
+  'supervisor_notes',
+  {
+    id: serial('id').primaryKey(),
+    supervisorId: integer('supervisor_id').notNull().references(() => supervisors.id),
+    schoolId: integer('school_id').references(() => schools.id),
+    category: text('category').notNull().default('students_trip'), // students_trip | financial_tips | urgent_admin | other
+    title: text('title').notNull(),
+    content: text('content').notNull(),
+    notifyAdmin: boolean('notify_admin').notNull().default(false),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_sup_notes_supervisor').on(table.supervisorId),
+    index('idx_sup_notes_school').on(table.schoolId),
+  ]
+);
+
+export const supervisorNotesRelations = relations(supervisorNotes, ({ one }) => ({
+  supervisor: one(supervisors, { fields: [supervisorNotes.supervisorId], references: [supervisors.id] }),
+  school: one(schools, { fields: [supervisorNotes.schoolId], references: [schools.id] }),
+}));
+
+// 28. Commercial / Tax Invoices & Archive (وحدة إصدار الفواتير وأرشيف الفواتير الصادرة)
+export const invoices = pgTable(
+  'invoices',
+  {
+    id: serial('id').primaryKey(),
+    invoiceNumber: integer('invoice_number').notNull().unique(),
+    invoiceCode: text('invoice_code').notNull(), // Zero-padded sequential e.g. 0001
+    issueDate: text('issue_date').notNull(), // YYYY-MM-DD
+    billToName: text('bill_to_name')
+      .notNull()
+      .default('السيد إسلام عصام الدين (شركة الإسراء للرحلات)'),
+    billingMonth: integer('billing_month').notNull(), // 1..12
+    billingYear: integer('billing_year').notNull(),
+    vehicleCount: integer('vehicle_count').notNull().default(35),
+    schoolName: text('school_name').notNull().default('مدرسة إشراقة الغد'),
+    statementText: text('statement_text').notNull(),
+    totalAmount: numeric('total_amount', { precision: 14, scale: 2 }).notNull(),
+    amountInWords: text('amount_in_words').notNull(),
+    status: text('status').notNull().default('issued'), // issued | cancelled
+    cancelledReason: text('cancelled_reason').default(''),
+    cancelledAt: timestamp('cancelled_at'),
+    cancelledByUserId: integer('cancelled_by_user_id').references(() => users.id),
+    createdByUserId: integer('created_by_user_id').references(() => users.id),
+    createdByName: text('created_by_name').default(''),
+    notes: text('notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_invoices_number').on(table.invoiceNumber),
+    index('idx_invoices_status').on(table.status),
+    index('idx_invoices_issue_date').on(table.issueDate),
+    index('idx_invoices_period').on(table.billingYear, table.billingMonth),
+  ]
+);
+
+export const invoicesRelations = relations(invoices, ({ one }) => ({
+  createdByUser: one(users, { fields: [invoices.createdByUserId], references: [users.id] }),
+  cancelledByUser: one(users, { fields: [invoices.cancelledByUserId], references: [users.id] }),
+}));
+
+
+
 
 
