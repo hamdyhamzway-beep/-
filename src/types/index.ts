@@ -613,6 +613,88 @@ export interface InvoiceRecord {
   updatedAt: string;
 }
 
+export type ExternalAccountKind = 'debt_receivable' | 'debt_payable' | 'external_account';
+export type ExternalAccountPartyType =
+  | 'external'
+  | 'driver'
+  | 'supervisor'
+  | 'employee'
+  | 'school'
+  | 'supplier';
+export type ExternalAccountEntryType = 'payment' | 'addition' | 'adjustment';
+
+export interface ExternalAccountEntryRecord {
+  id: number;
+  accountId: number;
+  entryType: ExternalAccountEntryType;
+  amount: number;
+  entryDate: string;
+  paymentMethod: string;
+  recordedByUserId?: number | null;
+  recordedByName: string;
+  notes: string;
+  createdAt: string;
+}
+
+export interface ExternalAccountRecord {
+  id: number;
+  accountCode: string;
+  accountKind: ExternalAccountKind;
+  category: string;
+  partyType: ExternalAccountPartyType;
+  partyName: string;
+  partyPhone: string;
+  schoolId: number | null;
+  schoolName: string;
+  driverId: number | null;
+  driverCode: string | null;
+  driverName: string | null;
+  supervisorId: number | null;
+  supervisorName: string | null;
+  employeeId: number | null;
+  employeeName: string | null;
+  title: string;
+  principalAmount: number;
+  settledAmount: number;
+  remainingAmount: number;
+  openedDate: string;
+  dueDate: string | null;
+  lastMovementDate: string | null;
+  paymentMethod: string;
+  status: 'open' | 'partial' | 'settled';
+  isOverdue: boolean;
+  entriesCount: number;
+  createdByName: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExternalAccountsStats {
+  receivableTotalPrincipal: number;
+  receivableTotalSettled: number;
+  receivableTotalRemaining: number;
+  receivableOpenCount: number;
+  payableTotalPrincipal: number;
+  payableTotalSettled: number;
+  payableTotalRemaining: number;
+  payableOpenCount: number;
+  externalTotalPrincipal: number;
+  externalTotalSettled: number;
+  externalTotalRemaining: number;
+  externalOpenCount: number;
+  overdueCount: number;
+  totalCount: number;
+}
+
+export interface CustodyLookupData {
+  schools: Array<{ id: number; name: string }>;
+  drivers: Array<{ id: number; fullName: string; driverCode: string; phone?: string; schoolId?: number | null }>;
+  supervisors: Array<{ id: number; fullName: string; phone?: string; schoolId?: number | null }>;
+  employees: Array<{ id: number; fullName: string; phone?: string; jobTitle?: string; schoolId?: number | null }>;
+}
+
+
 
 
 

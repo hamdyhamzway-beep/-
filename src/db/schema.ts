@@ -854,6 +854,87 @@ export const invoicesRelations = relations(invoices, ({ one }) => ({
   cancelledByUser: one(users, { fields: [invoices.cancelledByUserId], references: [users.id] }),
 }));
 
+// 29. External Accounts, Debts & Receivables (المديونيات والحسابات الخاصة والخارجية - مستقلة عن الحسابات الأساسية)
+export const externalAccounts = pgTable(
+  'external_accounts',
+  {
+    id: serial('id').primaryKey(),
+    accountCode: text('account_code').notNull(), // Sequential e.g. DEB-0001 / EXT-0001
+    accountKind: text('account_kind').notNull().default('debt_receivable'), // debt_receivable | debt_payable | external_account
+    category: text('category').notNull().default('أخرى'),
+    partyType: text('party_type').notNull().default('external'), // external | driver | supervisor | employee | school | supplier
+    partyName: text('party_name').notNull(),
+    partyPhone: text('party_phone').default(''),
+    schoolId: integer('school_id').references(() => schools.id, { onDelete: 'set null' }),
+    driverId: integer('driver_id').references(() => drivers.id, { onDelete: 'set null' }),
+    supervisorId: integer('supervisor_id').references(() => supervisors.id, { onDelete: 'set null' }),
+    employeeId: integer('employee_id').references(() => employees.id, { onDelete: 'set null' }),
+    title: text('title').notNull(),
+    principalAmount: numeric('principal_amount', { precision: 12, scale: 2 }).notNull(),
+    settledAmount: numeric('settled_amount', { precision: 12, scale: 2 }).notNull().default('0'),
+    openedDate: text('opened_date').notNull(), // YYYY-MM-DD
+    dueDate: text('due_date'), // YYYY-MM-DD optional
+    lastMovementDate: text('last_movement_date'), // YYYY-MM-DD
+    paymentMethod: text('payment_method').notNull().default('كاش'),
+    status: text('status').notNull().default('open'), // open | partial | settled
+    createdByUserId: integer('created_by_user_id').references(() => users.id),
+    createdByName: text('created_by_name').default(''),
+    notes: text('notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_ext_acc_kind').on(table.accountKind),
+    index('idx_ext_acc_status').on(table.status),
+    index('idx_ext_acc_school').on(table.schoolId),
+    index('idx_ext_acc_opened').on(table.openedDate),
+  ]
+);
+
+export const externalAccountsRelations = relations(externalAccounts, ({ one, many }) => ({
+  school: one(schools, { fields: [externalAccounts.schoolId], references: [schools.id] }),
+  driver: one(drivers, { fields: [externalAccounts.driverId], references: [drivers.id] }),
+  supervisor: one(supervisors, { fields: [externalAccounts.supervisorId], references: [supervisors.id] }),
+  employee: one(employees, { fields: [externalAccounts.employeeId], references: [employees.id] }),
+  createdByUser: one(users, { fields: [externalAccounts.createdByUserId], references: [users.id] }),
+  entries: many(externalAccountEntries),
+}));
+
+// 30. External Account Entries / Installments / Movements (حركات وسداد الحسابات الخارجية والمديونيات)
+export const externalAccountEntries = pgTable(
+  'external_account_entries',
+  {
+    id: serial('id').primaryKey(),
+    accountId: integer('account_id')
+      .notNull()
+      .references(() => externalAccounts.id, { onDelete: 'cascade' }),
+    entryType: text('entry_type').notNull().default('payment'), // payment | addition | adjustment
+    amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+    entryDate: text('entry_date').notNull(), // YYYY-MM-DD
+    paymentMethod: text('payment_method').notNull().default('كاش'),
+    recordedByUserId: integer('recorded_by_user_id').references(() => users.id),
+    recordedByName: text('recorded_by_name').default(''),
+    notes: text('notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_ext_entries_account').on(table.accountId),
+    index('idx_ext_entries_date').on(table.entryDate),
+  ]
+);
+
+export const externalAccountEntriesRelations = relations(externalAccountEntries, ({ one }) => ({
+  account: one(externalAccounts, {
+    fields: [externalAccountEntries.accountId],
+    references: [externalAccounts.id],
+  }),
+  recordedByUser: one(users, {
+    fields: [externalAccountEntries.recordedByUserId],
+    references: [users.id],
+  }),
+}));
+
+
 
 
 

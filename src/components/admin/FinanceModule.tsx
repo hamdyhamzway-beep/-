@@ -32,13 +32,12 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatEGP, getLocalTodayDateString } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { CustodiesAndExternalAccountsModule } from './CustodiesAndExternalAccountsModule';
 import { InvoicesModule } from './InvoicesModule';
 import type {
   AdvanceRecord,
   CoverageRecord,
   FinanceGrandTotals,
-  FinancialCustodyRecord,
-  FinancialCustodyStats,
   FinancialTransaction,
   SalaryRecord,
   SchoolFinanceContract,
@@ -175,7 +174,7 @@ export const FinanceModule: React.FC = () => {
     ...(canCoverageWrite || canFinanceRead
       ? [{ id: 'coverage' as const, label: 'تغطية الغياب' }]
       : []),
-    ...(canFinanceRead ? [{ id: 'custodies' as const, label: 'العهد المالية' }] : []),
+    ...(canFinanceRead ? [{ id: 'custodies' as const, label: 'العهد والمديونيات' }] : []),
     ...(canFinanceRead ? [{ id: 'invoices' as const, label: 'إصدار الفواتير' }] : []),
     ...(canFinanceRead ? [{ id: 'invoice_archive' as const, label: 'سجل الفواتير' }] : []),
     ...(canFinanceRead ? [{ id: 'ledger' as const, label: 'دفتر الأستاذ المالي' }] : []),
@@ -279,62 +278,6 @@ export const FinanceModule: React.FC = () => {
   // Ledger transaction deletion state
   const [deletingLedgerTx, setDeletingLedgerTx] = useState<FinancialTransaction | null>(null);
 
-  // Financial Custodies (العهد المالية) state
-  const [custodies, setCustodies] = useState<FinancialCustodyRecord[]>([]);
-  const [custodyStats, setCustodyStats] = useState<FinancialCustodyStats | null>(null);
-  const [custodiesLoading, setCustodiesLoading] = useState(false);
-  const [custodyFilterStatus, setCustodyFilterStatus] = useState<string>('all');
-  const [custodyFilterBeneficiary, setCustodyFilterBeneficiary] = useState<string>('all');
-  const [custodySearch, setCustodySearch] = useState<string>('');
-
-  const [newCustodyModalOpen, setNewCustodyModalOpen] = useState(false);
-  const [newCustodyForm, setNewCustodyForm] = useState({
-    beneficiaryType: 'driver' as 'driver' | 'supervisor' | 'employee' | 'other',
-    selectedDriverId: '',
-    selectedSupervisorId: '',
-    selectedEmployeeId: '',
-    beneficiaryName: '',
-    beneficiaryPhone: '',
-    schoolId: '',
-    amount: '',
-    handoverDate: getLocalTodayDateString(),
-    purpose: '',
-    paymentMethod: 'كاش',
-    handedByName: dbUser?.fullName || 'الإدارة المالية',
-    notes: '',
-  });
-  const [savingNewCustody, setSavingNewCustody] = useState(false);
-  const [newCustodyError, setNewCustodyError] = useState<string | null>(null);
-
-  const [settlingCustody, setSettlingCustody] = useState<FinancialCustodyRecord | null>(null);
-  const [settleForm, setSettleForm] = useState({
-    spentAmount: '',
-    returnedAmount: '',
-    settlementDate: getLocalTodayDateString(),
-    settledByName: dbUser?.fullName || 'الإدارة المالية',
-    notes: '',
-  });
-  const [savingSettlement, setSavingSettlement] = useState(false);
-  const [settleError, setSettleError] = useState<string | null>(null);
-
-  const [editingCustody, setEditingCustody] = useState<FinancialCustodyRecord | null>(null);
-  const [editCustodyForm, setEditCustodyForm] = useState({
-    beneficiaryName: '',
-    beneficiaryPhone: '',
-    schoolId: '',
-    amount: '',
-    handoverDate: '',
-    purpose: '',
-    paymentMethod: 'كاش',
-    handedByName: '',
-    notes: '',
-  });
-  const [savingCustodyEdit, setSavingCustodyEdit] = useState(false);
-  const [editCustodyError, setEditCustodyError] = useState<string | null>(null);
-
-  const [deletingCustody, setDeletingCustody] = useState<FinancialCustodyRecord | null>(null);
-  const [printingCustody, setPrintingCustody] = useState<FinancialCustodyRecord | null>(null);
-
   // Audit Logs / Activity Trail state
   interface AuditLogItem {
     id: number;
@@ -371,10 +314,6 @@ export const FinanceModule: React.FC = () => {
     }
   }, [tab, loadAuditLogs]);
 
-  const [employeesList, setEmployeesList] = useState<
-    Array<{ id: number; fullName: string; phone?: string; schoolId?: number | null; schoolName?: string }>
-  >([]);
-
   useEscapeKey(
     Boolean(
       billingModalSchool ||
@@ -385,12 +324,7 @@ export const FinanceModule: React.FC = () => {
         editingCoverage ||
         deletingAdvance ||
         editingAdvance ||
-        deletingLedgerTx ||
-        newCustodyModalOpen ||
-        settlingCustody ||
-        editingCustody ||
-        deletingCustody ||
-        printingCustody
+        deletingLedgerTx
     ),
     () => {
       if (billingModalSchool) setBillingModalSchool(null);
@@ -402,11 +336,6 @@ export const FinanceModule: React.FC = () => {
       else if (deletingAdvance) setDeletingAdvance(null);
       else if (editingAdvance) setEditingAdvance(null);
       else if (deletingLedgerTx) setDeletingLedgerTx(null);
-      else if (newCustodyModalOpen) setNewCustodyModalOpen(false);
-      else if (settlingCustody) setSettlingCustody(null);
-      else if (editingCustody) setEditingCustody(null);
-      else if (deletingCustody) setDeletingCustody(null);
-      else if (printingCustody) setPrintingCustody(null);
     }
   );
 
@@ -2649,6 +2578,7 @@ export const FinanceModule: React.FC = () => {
         </div>
       )}
 
+      {tab === 'custodies' && <CustodiesAndExternalAccountsModule initialSection="custodies" />}
       {tab === 'invoices' && <InvoicesModule initialView="create" />}
       {tab === 'invoice_archive' && <InvoicesModule initialView="archive" />}
 

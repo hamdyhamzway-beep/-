@@ -294,7 +294,10 @@ export const ReportsModule: React.FC = () => {
     setSharingWhatsApp(true);
     setError(null);
     try {
-      const blob = await captureElementAsPngBlob(reportCaptureRef.current);
+      const blob = await captureElementAsPngBlob(reportCaptureRef.current, {
+        width: 1020,
+        backgroundColor: '#ffffff',
+      });
       const label = reportTabs.find((r) => r.id === reportType)?.label || 'تقرير';
       const filename = `تقرير-${reportType}-${month}-${year}.png`;
       const schoolLabel = data.period?.schoolName ? ` — ${data.period.schoolName}` : '';
@@ -302,23 +305,7 @@ export const ReportsModule: React.FC = () => {
       const caption = `الوليد ترافيل — ${label}${schoolLabel}${rangeLabel}`;
       const whatsappUrl = buildWhatsAppUrl('', caption);
 
-      const webShareResult = await shareImageFileViaWebShare(blob, filename, caption, caption);
-      if (webShareResult === 'shared') {
-        clearWhatsappPreview();
-        const url = URL.createObjectURL(blob);
-        setWhatsappPreview({
-          blob,
-          url,
-          filename,
-          copied: false,
-          statusText: 'تم فتح المشاركة بالصورة بنجاح.',
-          whatsappUrl,
-        });
-        return;
-      }
-
       const copied = await copyPngBlobToClipboard(blob);
-      downloadBlob(blob, filename);
       clearWhatsappPreview();
       const url = URL.createObjectURL(blob);
       setWhatsappPreview({
@@ -327,8 +314,8 @@ export const ReportsModule: React.FC = () => {
         filename,
         copied,
         statusText: copied
-          ? 'تم تجهيز صورة التقرير ونسخها للحافظة وتحميلها — اضغط فتح واتساب ثم الصق الصورة (Ctrl+V) أو أرفقها.'
-          : 'تم تجهيز صورة التقرير وتحميلها — اضغط فتح واتساب وأرفق الصورة المحمّلة.',
+          ? 'تم تجهيز صورة التقرير كاملة ونسخها للحافظة — راجع المعاينة ثم اضغط تحميل الصورة أو فتح واتساب.'
+          : 'تم تجهيز صورة التقرير كاملة — راجع المعاينة ثم اضغط تحميل الصورة أو فتح واتساب.',
         whatsappUrl,
       });
     } catch (err: unknown) {
@@ -472,30 +459,76 @@ export const ReportsModule: React.FC = () => {
       </div>
 
       {whatsappPreview && (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 space-y-3 text-xs">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="font-bold text-emerald-900 flex items-center gap-1.5">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-3 sm:p-5 backdrop-blur-xs">
+          <div className="w-full max-w-4xl max-h-[92vh] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden flex flex-col text-xs">
+            <div className="px-5 py-3.5 bg-[#0B1F3A] text-white flex items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-2">
                 <MessageCircle className="w-4 h-4 text-[#25D366]" />
-                <span>جاهز للإرسال عبر واتساب</span>
+                <span className="font-display font-bold text-sm">
+                  معاينة صورة التقرير الكاملة قبل الإرسال / التحميل
+                </span>
               </div>
-              <p className="text-[11px] text-emerald-800 mt-1">{whatsappPreview.statusText}</p>
+              <button
+                type="button"
+                onClick={clearWhatsappPreview}
+                aria-label="إغلاق المعاينة"
+                className="text-slate-300 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={clearWhatsappPreview}
-              className="text-emerald-700 hover:text-emerald-950 cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-            <img
-              src={whatsappPreview.url}
-              alt="معاينة صورة التقرير"
-              className="w-full sm:w-80 h-48 sm:h-56 object-contain object-top rounded-xl border border-emerald-300 bg-slate-900 shadow-md shrink-0"
-            />
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="p-4 sm:p-5 overflow-y-auto bg-slate-100 space-y-4">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 font-semibold text-emerald-900">
+                {whatsappPreview.statusText}
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-2 shadow-xs">
+                <img
+                  src={whatsappPreview.url}
+                  alt="معاينة صورة التقرير"
+                  className="w-full h-auto block rounded-lg bg-white"
+                />
+              </div>
+            </div>
+            <div className="px-5 py-3.5 border-t border-slate-200 bg-white flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => downloadBlob(whatsappPreview.blob, whatsappPreview.filename)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-4 py-2 text-xs font-bold text-white cursor-pointer"
+                >
+                  <Download className="w-4 h-4 text-[#C89B3C]" />
+                  تحميل الصورة (PNG)
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const copied = await copyPngBlobToClipboard(whatsappPreview.blob);
+                    setWhatsappPreview((prev) => (prev ? { ...prev, copied } : null));
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-semibold text-[#0B1F3A] cursor-pointer"
+                >
+                  {whatsappPreview.copied ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
+                  {whatsappPreview.copied ? 'تم نسخ الصورة' : 'نسخ الصورة'}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await shareImageFileViaWebShare(
+                      whatsappPreview.blob,
+                      whatsappPreview.filename,
+                      'تقرير الوليد ترافيل',
+                      whatsappPreview.filename
+                    );
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 px-3.5 py-2 text-xs font-bold text-emerald-900 cursor-pointer"
+                >
+                  مشاركة مباشرة بالصورة
+                </button>
+              </div>
               <a
                 href={whatsappPreview.whatsappUrl}
                 target="_blank"
@@ -505,29 +538,6 @@ export const ReportsModule: React.FC = () => {
                 <MessageCircle className="w-4 h-4" />
                 فتح واتساب وإرسال الصورة
               </a>
-              <button
-                type="button"
-                onClick={async () => {
-                  const copied = await copyPngBlobToClipboard(whatsappPreview.blob);
-                  setWhatsappPreview((prev) => (prev ? { ...prev, copied } : null));
-                }}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
-              >
-                {whatsappPreview.copied ? (
-                  <Check className="w-3.5 h-3.5 text-emerald-600" />
-                ) : (
-                  <Copy className="w-3.5 h-3.5" />
-                )}
-                {whatsappPreview.copied ? 'تم نسخ الصورة' : 'نسخ الصورة'}
-              </button>
-              <button
-                type="button"
-                onClick={() => downloadBlob(whatsappPreview.blob, whatsappPreview.filename)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                تحميل الصورة
-              </button>
             </div>
           </div>
         </div>

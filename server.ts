@@ -16,6 +16,8 @@ import {
   driverAssignments,
   drivers,
   employees,
+  externalAccountEntries,
+  externalAccounts,
   financialCustodies,
   financialTransactions,
   gpsLocations,
@@ -4331,6 +4333,7 @@ async function startServer() {
 
         const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
           return await db.transaction(async (tx) => {
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(780202)`);
             const [lastCustody] = await tx
               .select({ id: financialCustodies.id })
               .from(financialCustodies)
@@ -4647,6 +4650,833 @@ async function startServer() {
       } catch (error: unknown) {
         console.error('Delete custody error:', error);
         const msg = error instanceof Error ? error.message : 'تعذر حذف العهدة';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  // Scoped lookups for Custodies & External Accounts page (accessible to accountants & finance roles)
+  app.get(
+    '/api/finance/custodies-lookups',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'finance:write']),
+    async (req: AuthRequest, res) => {
+      try {
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [allSchools, allDrivers, currentAssignments, allSupervisors, allEmployees] =
+            await Promise.all([
+              db.select().from(schools).where(eq(schools.isActive, true)).orderBy(schools.name),
+              db
+                .select()
+                .from(drivers)
+                .where(eq(drivers.accountStatus, 'active'))
+                .orderBy(drivers.fullName),
+              db
+                .select()
+                .from(driverAssignments)
+                .where(eq(driverAssignments.isCurrent, true)),
+              db
+                .select()
+                .from(supervisors)
+                .where(eq(supervisors.accountStatus, 'active'))
+                .orderBy(supervisors.fullName),
+              db
+                .select()
+                .from(employees)
+                .where(eq(employees.status, 'active'))
+                .orderBy(employees.fullName),
+            ]);
+
+          const driverSchoolMap = new Map<number, number | null>(
+            currentAssignments.map((a) => [a.driverId, a.schoolId ?? null])
+          );
+
+          return {
+            schools: allSchools
+              .filter((s) => isSchoolAllowed(req.dbUser, s.id))
+              .map((s) => ({ id: s.id, name: s.name })),
+            drivers: allDrivers
+              .map((d) => ({
+                id: d.id,
+                fullName: d.fullName,
+                driverCode: d.driverCode,
+                phone: d.phone || '',
+                schoolId: driverSchoolMap.get(d.id) ?? null,
+              }))
+              .filter((d) => !d.schoolId || isSchoolAllowed(req.dbUser, d.schoolId)),
+            supervisors: allSupervisors
+              .filter((sv) => !sv.schoolId || isSchoolAllowed(req.dbUser, sv.schoolId))
+              .map((sv) => ({
+                id: sv.id,
+                fullName: sv.fullName,
+                phone: sv.phone || '',
+                schoolId: sv.schoolId ?? null,
+              })),
+            employees: allEmployees
+              .filter((em) => !em.schoolId || isSchoolAllowed(req.dbUser, em.schoolId))
+              .map((em) => ({
+                id: em.id,
+                fullName: em.fullName,
+                phone: em.phone || '',
+                jobTitle: em.jobTitle || '',
+                schoolId: em.schoolId ?? null,
+              })),
+          };
+        });
+
+        res.json(outcome);
+      } catch (error) {
+        console.error('Custody lookups error:', error);
+        res.status(500).json({ error: 'تعذر تحميل قوائم البيانات المساعدة' });
+      }
+    }
+  );
+
+  // 5b-1. External Accounts, Debts & Off-Ledger Accounts (المديونيات والحسابات الخاصة والخارجية)
+  const ALLOWED_ACCOUNT_KINDS = new Set(['debt_receivable', 'debt_payable', 'external_account']);
+  const ALLOWED_PARTY_TYPES = new Set([
+    'external',
+    'driver',
+    'supervisor',
+    'employee',
+    'school',
+    'supplier',
+  ]);
+  const ALLOWED_ENTRY_TYPES = new Set(['payment', 'addition', 'adjustment']);
+
+  function computeExternalAccountStatus(principal: number, settled: number): 'open' | 'partial' | 'settled' {
+    if (principal > 0 && settled >= principal - 0.001) return 'settled';
+    if (settled > 0.001) return 'partial';
+    return 'open';
+  }
+
+  app.get(
+    '/api/finance/external-accounts',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'finance:write']),
+    async (req: AuthRequest, res) => {
+      try {
+        const kindFilter = req.query.kind ? String(req.query.kind) : null;
+        const statusFilter = req.query.status ? String(req.query.status) : null;
+        const rawSchoolIdParam = req.query.schoolId;
+        const selectedSchoolId =
+          rawSchoolIdParam && rawSchoolIdParam !== 'all' ? Number(rawSchoolIdParam) : null;
+        if (selectedSchoolId && !isSchoolAllowed(req.dbUser, selectedSchoolId)) {
+          return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+        }
+        const search = req.query.search ? String(req.query.search).trim().toLowerCase() : '';
+        const todayIso = getTodayDateString();
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [rawAccounts, allEntries, allSchools, allDrivers, allSupervisors, allEmployees] =
+            await Promise.all([
+              db
+                .select()
+                .from(externalAccounts)
+                .orderBy(desc(externalAccounts.openedDate), desc(externalAccounts.id)),
+              db
+                .select({
+                  id: externalAccountEntries.id,
+                  accountId: externalAccountEntries.accountId,
+                })
+                .from(externalAccountEntries),
+              db.select().from(schools),
+              db.select().from(drivers),
+              db.select().from(supervisors),
+              db.select().from(employees),
+            ]);
+
+          const entriesCountMap = new Map<number, number>();
+          for (const e of allEntries) {
+            entriesCountMap.set(e.accountId, (entriesCountMap.get(e.accountId) || 0) + 1);
+          }
+          const schoolMap = new Map(allSchools.map((s) => [s.id, s]));
+          const driverMap = new Map(allDrivers.map((d) => [d.id, d]));
+          const supervisorMap = new Map(allSupervisors.map((sv) => [sv.id, sv]));
+          const employeeMap = new Map(allEmployees.map((em) => [em.id, em]));
+
+          const scoped = rawAccounts.filter((acc) => {
+            if (acc.schoolId && !isSchoolAllowed(req.dbUser, acc.schoolId)) return false;
+            if (selectedSchoolId && acc.schoolId !== selectedSchoolId) return false;
+            return true;
+          });
+
+          const enrichItem = (acc: typeof externalAccounts.$inferSelect) => {
+            const sc = acc.schoolId ? schoolMap.get(acc.schoolId) : null;
+            const drv = acc.driverId ? driverMap.get(acc.driverId) : null;
+            const sup = acc.supervisorId ? supervisorMap.get(acc.supervisorId) : null;
+            const emp = acc.employeeId ? employeeMap.get(acc.employeeId) : null;
+            const principalAmount = Number(acc.principalAmount || 0);
+            const settledAmount = Number(acc.settledAmount || 0);
+            const remainingAmount = Math.max(0, principalAmount - settledAmount);
+            const status = computeExternalAccountStatus(principalAmount, settledAmount);
+            const isOverdue = Boolean(
+              acc.dueDate && status !== 'settled' && acc.dueDate < todayIso
+            );
+
+            return {
+              ...acc,
+              principalAmount,
+              settledAmount,
+              remainingAmount,
+              status,
+              isOverdue,
+              entriesCount: entriesCountMap.get(acc.id) || 0,
+              schoolName: sc?.name || (acc.schoolId ? `مدرسة #${acc.schoolId}` : 'حساب حر / الإدارة العامة'),
+              driverCode: drv?.driverCode || null,
+              driverName: drv?.fullName || null,
+              supervisorName: sup?.fullName || null,
+              employeeName: emp?.fullName || null,
+              partyPhone: acc.partyPhone || '',
+              createdByName: acc.createdByName || '',
+              notes: acc.notes || '',
+            };
+          };
+
+          const allEnriched = scoped.map(enrichItem);
+
+          const stats = {
+            receivableTotalPrincipal: allEnriched
+              .filter((a) => a.accountKind === 'debt_receivable')
+              .reduce((s, a) => s + a.principalAmount, 0),
+            receivableTotalSettled: allEnriched
+              .filter((a) => a.accountKind === 'debt_receivable')
+              .reduce((s, a) => s + a.settledAmount, 0),
+            receivableTotalRemaining: allEnriched
+              .filter((a) => a.accountKind === 'debt_receivable' && a.status !== 'settled')
+              .reduce((s, a) => s + a.remainingAmount, 0),
+            receivableOpenCount: allEnriched.filter(
+              (a) => a.accountKind === 'debt_receivable' && a.status !== 'settled'
+            ).length,
+            payableTotalPrincipal: allEnriched
+              .filter((a) => a.accountKind === 'debt_payable')
+              .reduce((s, a) => s + a.principalAmount, 0),
+            payableTotalSettled: allEnriched
+              .filter((a) => a.accountKind === 'debt_payable')
+              .reduce((s, a) => s + a.settledAmount, 0),
+            payableTotalRemaining: allEnriched
+              .filter((a) => a.accountKind === 'debt_payable' && a.status !== 'settled')
+              .reduce((s, a) => s + a.remainingAmount, 0),
+            payableOpenCount: allEnriched.filter(
+              (a) => a.accountKind === 'debt_payable' && a.status !== 'settled'
+            ).length,
+            externalTotalPrincipal: allEnriched
+              .filter((a) => a.accountKind === 'external_account')
+              .reduce((s, a) => s + a.principalAmount, 0),
+            externalTotalSettled: allEnriched
+              .filter((a) => a.accountKind === 'external_account')
+              .reduce((s, a) => s + a.settledAmount, 0),
+            externalTotalRemaining: allEnriched
+              .filter((a) => a.accountKind === 'external_account' && a.status !== 'settled')
+              .reduce((s, a) => s + a.remainingAmount, 0),
+            externalOpenCount: allEnriched.filter(
+              (a) => a.accountKind === 'external_account' && a.status !== 'settled'
+            ).length,
+            overdueCount: allEnriched.filter((a) => a.isOverdue).length,
+            totalCount: allEnriched.length,
+          };
+
+          const filtered = allEnriched.filter((a) => {
+            if (kindFilter && kindFilter !== 'all') {
+              if (kindFilter === 'debts') {
+                if (a.accountKind !== 'debt_receivable' && a.accountKind !== 'debt_payable') {
+                  return false;
+                }
+              } else if (a.accountKind !== kindFilter) {
+                return false;
+              }
+            }
+            if (statusFilter && statusFilter !== 'all') {
+              if (statusFilter === 'overdue') {
+                if (!a.isOverdue) return false;
+              } else if (a.status !== statusFilter) {
+                return false;
+              }
+            }
+            if (search) {
+              const hay = `${a.accountCode} ${a.partyName} ${a.partyPhone} ${a.title} ${a.category} ${a.notes}`.toLowerCase();
+              if (!hay.includes(search)) return false;
+            }
+            return true;
+          });
+
+          return { accounts: filtered, stats };
+        });
+
+        res.json(outcome);
+      } catch (error) {
+        console.error('Get external accounts error:', error);
+        res.status(500).json({ error: 'تعذر تحميل المديونيات والحسابات الخارجية' });
+      }
+    }
+  );
+
+  app.get(
+    '/api/finance/external-accounts/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['finance:read', 'finance:write']),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف الحساب غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [acc] = await db
+            .select()
+            .from(externalAccounts)
+            .where(eq(externalAccounts.id, id))
+            .limit(1);
+          if (!acc) return { status: 404 as const, body: { error: 'الحساب غير موجود' } };
+          if (acc.schoolId && !isSchoolAllowed(req.dbUser, acc.schoolId)) {
+            return { status: 403 as const, body: { error: 'الحساب خارج نطاق صلاحياتك' } };
+          }
+
+          const entries = await db
+            .select()
+            .from(externalAccountEntries)
+            .where(eq(externalAccountEntries.accountId, id))
+            .orderBy(desc(externalAccountEntries.entryDate), desc(externalAccountEntries.id));
+
+          return {
+            status: 200 as const,
+            body: {
+              account: {
+                ...acc,
+                principalAmount: Number(acc.principalAmount || 0),
+                settledAmount: Number(acc.settledAmount || 0),
+                remainingAmount: Math.max(
+                  0,
+                  Number(acc.principalAmount || 0) - Number(acc.settledAmount || 0)
+                ),
+              },
+              entries: entries.map((e) => ({
+                ...e,
+                amount: Number(e.amount || 0),
+                notes: e.notes || '',
+                recordedByName: e.recordedByName || '',
+              })),
+            },
+          };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error) {
+        console.error('Get external account detail error:', error);
+        res.status(500).json({ error: 'تعذر تحميل كشف حركات الحساب' });
+      }
+    }
+  );
+
+  app.post(
+    '/api/finance/external-accounts',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const {
+          accountKind = 'debt_receivable',
+          category = 'أخرى',
+          partyType = 'external',
+          partyName,
+          partyPhone = '',
+          schoolId,
+          driverId,
+          supervisorId,
+          employeeId,
+          title,
+          principalAmount,
+          initialSettledAmount = 0,
+          openedDate,
+          dueDate,
+          paymentMethod = 'كاش',
+          notes = '',
+        } = req.body;
+
+        const cleanKind = String(accountKind);
+        if (!ALLOWED_ACCOUNT_KINDS.has(cleanKind)) {
+          return res.status(400).json({ error: 'نوع الحساب غير صالح' });
+        }
+        const cleanPartyType = String(partyType || 'external');
+        if (!ALLOWED_PARTY_TYPES.has(cleanPartyType)) {
+          return res.status(400).json({ error: 'نوع الطرف غير صالح' });
+        }
+        if (!partyName || !String(partyName).trim()) {
+          return res.status(400).json({ error: 'يرجى إدخال اسم الشخص أو الجهة' });
+        }
+        if (!title || !String(title).trim()) {
+          return res.status(400).json({ error: 'يرجى إدخال بيان الحساب أو سبب المديونية' });
+        }
+        const numPrincipal = Number(principalAmount);
+        if (!Number.isFinite(numPrincipal) || numPrincipal <= 0) {
+          return res.status(400).json({ error: 'يرجى إدخال مبلغ صحيح أكبر من صفر' });
+        }
+        const numInitialSettled = Math.max(0, Number(initialSettledAmount) || 0);
+        if (numInitialSettled > numPrincipal + 0.001) {
+          return res.status(400).json({ error: 'المبلغ المسدد مقدماً لا يمكن أن يتجاوز أصل الحساب' });
+        }
+
+        const cleanSchoolId = schoolId ? Number(schoolId) : null;
+        if (cleanSchoolId && !isSchoolAllowed(req.dbUser, cleanSchoolId)) {
+          return res.status(403).json({ error: 'المدرسة خارج نطاق صلاحياتك' });
+        }
+
+        const cleanOpenedDate = openedDate
+          ? normalizeIsoDateInput(String(openedDate))
+          : getTodayDateString();
+        const cleanDueDate = dueDate && String(dueDate).trim() ? normalizeIsoDateInput(String(dueDate)) : null;
+        const status = computeExternalAccountStatus(numPrincipal, numInitialSettled);
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          return await db.transaction(async (tx) => {
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(780203)`);
+            const [lastRow] = await tx
+              .select({ id: externalAccounts.id })
+              .from(externalAccounts)
+              .orderBy(desc(externalAccounts.id))
+              .limit(1);
+
+            const prefix = cleanKind === 'external_account' ? 'EXT' : 'DEB';
+            const accountCode = `${prefix}-${String((lastRow?.id || 0) + 1).padStart(4, '0')}`;
+
+            const [inserted] = await tx
+              .insert(externalAccounts)
+              .values({
+                accountCode,
+                accountKind: cleanKind,
+                category: String(category || 'أخرى').trim(),
+                partyType: cleanPartyType,
+                partyName: String(partyName).trim(),
+                partyPhone: partyPhone ? String(partyPhone).trim() : '',
+                schoolId: cleanSchoolId,
+                driverId: driverId ? Number(driverId) : null,
+                supervisorId: supervisorId ? Number(supervisorId) : null,
+                employeeId: employeeId ? Number(employeeId) : null,
+                title: String(title).trim(),
+                principalAmount: numPrincipal.toFixed(2),
+                settledAmount: numInitialSettled.toFixed(2),
+                openedDate: cleanOpenedDate,
+                dueDate: cleanDueDate,
+                lastMovementDate: numInitialSettled > 0 ? cleanOpenedDate : null,
+                paymentMethod: String(paymentMethod || 'كاش').trim(),
+                status,
+                createdByUserId: req.dbUser?.id || null,
+                createdByName: req.dbUser?.fullName || 'الإدارة المالية',
+                notes: notes ? String(notes).trim() : '',
+              })
+              .returning();
+
+            if (numInitialSettled > 0) {
+              await tx.insert(externalAccountEntries).values({
+                accountId: inserted.id,
+                entryType: 'payment',
+                amount: numInitialSettled.toFixed(2),
+                entryDate: cleanOpenedDate,
+                paymentMethod: String(paymentMethod || 'كاش').trim(),
+                recordedByUserId: req.dbUser?.id || null,
+                recordedByName: req.dbUser?.fullName || 'الإدارة المالية',
+                notes: 'دفعة مقدمة مسجلة عند فتح الحساب',
+              });
+            }
+
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'ADD_EXTERNAL_ACCOUNT',
+              entityType: 'external_accounts',
+              entityId: String(inserted.id),
+              afterJson: inserted,
+              ipAddress: req.ip || '',
+            });
+
+            const kindLabel =
+              cleanKind === 'debt_receivable'
+                ? 'مديونية لنا عند الغير'
+                : cleanKind === 'debt_payable'
+                ? 'مديونية علينا للغير'
+                : 'حساب خاص خارجي';
+
+            await tx.insert(notifications).values({
+              targetRole: 'super_admin',
+              type: 'financial_action',
+              title: `تسجيل ${kindLabel}`,
+              body: `قام ${inserted.createdByName} بتسجيل (${inserted.accountCode}) باسم ${inserted.partyName} — ${inserted.title} بقيمة ${numPrincipal.toLocaleString()} ج.م.`,
+              isRead: false,
+            });
+
+            return inserted;
+          });
+        });
+
+        res.status(201).json({ account: outcome });
+      } catch (error: unknown) {
+        console.error('Create external account error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر حفظ السجل';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.patch(
+    '/api/finance/external-accounts/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف الحساب غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(externalAccounts)
+            .where(eq(externalAccounts.id, id))
+            .limit(1);
+          if (!existing) return { status: 404 as const, body: { error: 'الحساب غير موجود' } };
+          if (existing.schoolId && !isSchoolAllowed(req.dbUser, existing.schoolId)) {
+            return { status: 403 as const, body: { error: 'الحساب خارج نطاق صلاحياتك' } };
+          }
+
+          const {
+            accountKind,
+            category,
+            partyType,
+            partyName,
+            partyPhone,
+            schoolId,
+            title,
+            principalAmount,
+            openedDate,
+            dueDate,
+            paymentMethod,
+            notes,
+          } = req.body;
+
+          const newKind = accountKind !== undefined ? String(accountKind) : existing.accountKind;
+          if (!ALLOWED_ACCOUNT_KINDS.has(newKind)) {
+            return { status: 400 as const, body: { error: 'نوع الحساب غير صالح' } };
+          }
+          const newPartyType = partyType !== undefined ? String(partyType) : existing.partyType;
+          if (!ALLOWED_PARTY_TYPES.has(newPartyType)) {
+            return { status: 400 as const, body: { error: 'نوع الطرف غير صالح' } };
+          }
+
+          const newPrincipal =
+            principalAmount !== undefined ? Number(principalAmount) : Number(existing.principalAmount);
+          if (!Number.isFinite(newPrincipal) || newPrincipal <= 0) {
+            return { status: 400 as const, body: { error: 'أصل المبلغ يجب أن يكون أكبر من صفر' } };
+          }
+          const currentSettled = Number(existing.settledAmount || 0);
+          if (currentSettled > newPrincipal + 0.001) {
+            return {
+              status: 400 as const,
+              body: {
+                error: `لا يمكن خفض أصل الحساب عن إجمالي المسدد الحالي (${currentSettled.toLocaleString()} ج.م)`,
+              },
+            };
+          }
+          const newSchoolId =
+            schoolId !== undefined ? (schoolId ? Number(schoolId) : null) : existing.schoolId;
+          if (newSchoolId && !isSchoolAllowed(req.dbUser, newSchoolId)) {
+            return { status: 403 as const, body: { error: 'المدرسة خارج نطاق صلاحياتك' } };
+          }
+
+          const status = computeExternalAccountStatus(newPrincipal, currentSettled);
+
+          const [updated] = await db
+            .update(externalAccounts)
+            .set({
+              accountKind: newKind,
+              category: category !== undefined ? String(category).trim() : existing.category,
+              partyType: newPartyType,
+              partyName: partyName !== undefined ? String(partyName).trim() : existing.partyName,
+              partyPhone: partyPhone !== undefined ? String(partyPhone).trim() : existing.partyPhone,
+              schoolId: newSchoolId,
+              title: title !== undefined ? String(title).trim() : existing.title,
+              principalAmount: newPrincipal.toFixed(2),
+              openedDate:
+                openedDate !== undefined
+                  ? normalizeIsoDateInput(String(openedDate))
+                  : existing.openedDate,
+              dueDate:
+                dueDate !== undefined
+                  ? dueDate && String(dueDate).trim()
+                    ? normalizeIsoDateInput(String(dueDate))
+                    : null
+                  : existing.dueDate,
+              paymentMethod:
+                paymentMethod !== undefined ? String(paymentMethod).trim() : existing.paymentMethod,
+              notes: notes !== undefined ? String(notes).trim() : existing.notes,
+              status,
+              updatedAt: new Date(),
+            })
+            .where(eq(externalAccounts.id, id))
+            .returning();
+
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'UPDATE_EXTERNAL_ACCOUNT',
+            entityType: 'external_accounts',
+            entityId: String(id),
+            beforeJson: existing,
+            afterJson: updated,
+            ipAddress: req.ip || '',
+          });
+
+          return { status: 200 as const, body: { account: updated } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Update external account error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر تعديل الحساب';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.post(
+    '/api/finance/external-accounts/:id/entries',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف الحساب غير صالح' });
+
+        const {
+          entryType = 'payment',
+          amount,
+          entryDate,
+          paymentMethod = 'كاش',
+          notes = '',
+        } = req.body;
+
+        const cleanEntryType = String(entryType);
+        if (!ALLOWED_ENTRY_TYPES.has(cleanEntryType)) {
+          return res.status(400).json({ error: 'نوع الحركة غير صالح' });
+        }
+        const numAmount = Number(amount);
+        if (!Number.isFinite(numAmount) || numAmount <= 0) {
+          return res.status(400).json({ error: 'يرجى إدخال مبلغ حركة صحيح أكبر من صفر' });
+        }
+        const cleanDate = entryDate ? normalizeIsoDateInput(String(entryDate)) : getTodayDateString();
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          return await db.transaction(async (tx) => {
+            const [existing] = await tx
+              .select()
+              .from(externalAccounts)
+              .where(eq(externalAccounts.id, id))
+              .limit(1);
+            if (!existing) return { status: 404 as const, body: { error: 'الحساب غير موجود' } };
+            if (existing.schoolId && !isSchoolAllowed(req.dbUser, existing.schoolId)) {
+              return { status: 403 as const, body: { error: 'الحساب خارج نطاق صلاحياتك' } };
+            }
+
+            let principal = Number(existing.principalAmount || 0);
+            let settled = Number(existing.settledAmount || 0);
+
+            if (cleanEntryType === 'addition') {
+              principal += numAmount;
+            } else {
+              const remaining = Math.max(0, principal - settled);
+              if (numAmount > remaining + 0.001) {
+                return {
+                  status: 400 as const,
+                  body: {
+                    error: `المبلغ المدخل (${numAmount.toLocaleString()} ج.م) يتجاوز المتبقي على الحساب (${remaining.toLocaleString()} ج.م)`,
+                  },
+                };
+              }
+              settled += numAmount;
+            }
+
+            const status = computeExternalAccountStatus(principal, settled);
+
+            const [entry] = await tx
+              .insert(externalAccountEntries)
+              .values({
+                accountId: id,
+                entryType: cleanEntryType,
+                amount: numAmount.toFixed(2),
+                entryDate: cleanDate,
+                paymentMethod: String(paymentMethod || 'كاش').trim(),
+                recordedByUserId: req.dbUser?.id || null,
+                recordedByName: req.dbUser?.fullName || 'الإدارة المالية',
+                notes: notes ? String(notes).trim() : '',
+              })
+              .returning();
+
+            const [updated] = await tx
+              .update(externalAccounts)
+              .set({
+                principalAmount: principal.toFixed(2),
+                settledAmount: settled.toFixed(2),
+                lastMovementDate: cleanDate,
+                status,
+                updatedAt: new Date(),
+              })
+              .where(eq(externalAccounts.id, id))
+              .returning();
+
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'ADD_EXTERNAL_ACCOUNT_ENTRY',
+              entityType: 'external_account_entries',
+              entityId: String(entry.id),
+              afterJson: { entry, accountCode: existing.accountCode, newStatus: status },
+              ipAddress: req.ip || '',
+            });
+
+            await tx.insert(notifications).values({
+              targetRole: 'super_admin',
+              type: 'financial_action',
+              title: cleanEntryType === 'addition' ? 'إضافة على حساب خارجي' : 'سداد/تحصيل حساب خارجي',
+              body: `سجّل ${entry.recordedByName} حركة (${cleanEntryType === 'addition' ? 'زيادة أصل' : cleanEntryType === 'adjustment' ? 'تسوية' : 'سداد/تحصيل'}) بقيمة ${numAmount.toLocaleString()} ج.م على الحساب (${existing.accountCode} - ${existing.partyName}).`,
+              isRead: false,
+            });
+
+            return { status: 201 as const, body: { account: updated, entry } };
+          });
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Add external account entry error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر تسجيل الحركة';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/finance/external-accounts/:id/entries/:entryId',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        const entryId = Number(req.params.entryId);
+        if (!id || !entryId) return res.status(400).json({ error: 'المعرف غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          return await db.transaction(async (tx) => {
+            const [existing] = await tx
+              .select()
+              .from(externalAccounts)
+              .where(eq(externalAccounts.id, id))
+              .limit(1);
+            if (!existing) return { status: 404 as const, body: { error: 'الحساب غير موجود' } };
+            if (existing.schoolId && !isSchoolAllowed(req.dbUser, existing.schoolId)) {
+              return { status: 403 as const, body: { error: 'الحساب خارج نطاق صلاحياتك' } };
+            }
+
+            const [entry] = await tx
+              .select()
+              .from(externalAccountEntries)
+              .where(and(eq(externalAccountEntries.id, entryId), eq(externalAccountEntries.accountId, id)))
+              .limit(1);
+            if (!entry) return { status: 404 as const, body: { error: 'الحركة غير موجودة' } };
+
+            let principal = Number(existing.principalAmount || 0);
+            let settled = Number(existing.settledAmount || 0);
+            const amt = Number(entry.amount || 0);
+
+            if (entry.entryType === 'addition') {
+              const nextPrincipal = principal - amt;
+              if (nextPrincipal < settled - 0.001 || nextPrincipal <= 0) {
+                return {
+                  status: 400 as const,
+                  body: { error: 'لا يمكن حذف حركة الإضافة لأن إجمالي المسدد يتجاوز المتبقي من الأصل' },
+                };
+              }
+              principal = nextPrincipal;
+            } else {
+              settled = Math.max(0, settled - amt);
+            }
+
+            const status = computeExternalAccountStatus(principal, settled);
+            await tx.delete(externalAccountEntries).where(eq(externalAccountEntries.id, entryId));
+
+            const [updated] = await tx
+              .update(externalAccounts)
+              .set({
+                principalAmount: principal.toFixed(2),
+                settledAmount: settled.toFixed(2),
+                status,
+                updatedAt: new Date(),
+              })
+              .where(eq(externalAccounts.id, id))
+              .returning();
+
+            await tx.insert(auditLogs).values({
+              actorUserId: req.dbUser!.id,
+              action: 'DELETE_EXTERNAL_ACCOUNT_ENTRY',
+              entityType: 'external_account_entries',
+              entityId: String(entryId),
+              beforeJson: entry,
+              afterJson: { accountId: id, newStatus: status },
+              ipAddress: req.ip || '',
+            });
+
+            return { status: 200 as const, body: { account: updated } };
+          });
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Delete external account entry error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر حذف الحركة';
+        res.status(400).json({ error: msg });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/finance/external-accounts/:id',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('finance:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return res.status(400).json({ error: 'معرف الحساب غير صالح' });
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(externalAccounts)
+            .where(eq(externalAccounts.id, id))
+            .limit(1);
+          if (!existing) return { status: 404 as const, body: { error: 'الحساب غير موجود' } };
+          if (existing.schoolId && !isSchoolAllowed(req.dbUser, existing.schoolId)) {
+            return { status: 403 as const, body: { error: 'الحساب خارج نطاق صلاحياتك' } };
+          }
+
+          await db.delete(externalAccounts).where(eq(externalAccounts.id, id));
+
+          await db.insert(auditLogs).values({
+            actorUserId: req.dbUser!.id,
+            action: 'DELETE_EXTERNAL_ACCOUNT',
+            entityType: 'external_accounts',
+            entityId: String(id),
+            beforeJson: existing,
+            ipAddress: req.ip || '',
+          });
+
+          return { status: 200 as const, body: { ok: true, deletedId: id } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error: unknown) {
+        console.error('Delete external account error:', error);
+        const msg = error instanceof Error ? error.message : 'تعذر حذف الحساب';
         res.status(400).json({ error: msg });
       }
     }
@@ -5071,11 +5901,14 @@ async function startServer() {
                   eq(auditLogs.entityType, 'coverage_records'),
                   eq(auditLogs.entityType, 'financial_transactions'),
                   eq(auditLogs.entityType, 'financial_custodies'),
+                  eq(auditLogs.entityType, 'external_accounts'),
+                  eq(auditLogs.entityType, 'external_account_entries'),
                   eq(auditLogs.entityType, 'invoices'),
                   like(auditLogs.action, '%ADVANCE%'),
                   like(auditLogs.action, '%COVERAGE%'),
                   like(auditLogs.action, '%ADJUSTMENT%'),
                   like(auditLogs.action, '%CUSTODY%'),
+                  like(auditLogs.action, '%EXTERNAL_ACCOUNT%'),
                   like(auditLogs.action, '%INVOICE%'),
                   like(auditLogs.action, '%LEDGER%')
                 )
@@ -5098,6 +5931,20 @@ async function startServer() {
               actionAr = 'تعديل تسوية راتب (مكافأة/خصم)';
             } else if (log.action.includes('CUSTODY') || log.entityType === 'financial_custodies') {
               actionAr = log.action.includes('ADD') ? 'تسليم عهدة' : log.action.includes('UPDATE') ? 'تعديل عهدة' : log.action.includes('SETTLE') ? 'تصفية عهدة' : 'حذف عهدة';
+            } else if (
+              log.action.includes('EXTERNAL_ACCOUNT') ||
+              log.entityType === 'external_accounts' ||
+              log.entityType === 'external_account_entries'
+            ) {
+              actionAr = log.entityType === 'external_account_entries'
+                ? log.action.includes('DELETE')
+                  ? 'حذف حركة حساب خارجي'
+                  : 'سداد/حركة حساب خارجي'
+                : log.action.includes('ADD')
+                ? 'تسجيل مديونية/حساب خارجي'
+                : log.action.includes('UPDATE')
+                ? 'تعديل مديونية/حساب خارجي'
+                : 'حذف مديونية/حساب خارجي';
             } else if (log.action.includes('INVOICE') || log.entityType === 'invoices') {
               actionAr = log.action.includes('ISSUE')
                 ? 'إصدار فاتورة'

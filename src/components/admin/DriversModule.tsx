@@ -11,6 +11,7 @@ import {
   Plus,
   RadioTower,
   Search,
+  Share2,
   Trash2,
   Edit3,
   Wallet,
@@ -757,7 +758,10 @@ export const DriversModule: React.FC<{
       let blob: Blob;
       if (statementCaptureRef.current) {
         try {
-          blob = await captureElementAsPngBlob(statementCaptureRef.current);
+          blob = await captureElementAsPngBlob(statementCaptureRef.current, {
+            width: 960,
+            backgroundColor: '#ffffff',
+          });
         } catch {
           blob = await renderStatementFallbackBlob(statementData);
         }
@@ -770,31 +774,7 @@ export const DriversModule: React.FC<{
       const caption = `كشف حساب ${statementData.driver.fullName} (كود ${statementData.driver.driverCode}) - شهر ${statementData.period.month}/${statementData.period.year} - صافي المستحق: ${formatEGP(statementData.salary.netSalary)}`;
       const whatsappUrl = buildWhatsAppUrl(statementData.driver.phone, caption);
 
-      const webShareResult = await shareImageFileViaWebShare(
-        blob,
-        filename,
-        `كشف حساب ${statementData.driver.fullName}`,
-        caption
-      );
-
-      if (webShareResult === 'shared') {
-        clearWhatsappPreview();
-        const url = URL.createObjectURL(blob);
-        setWhatsappPreview({
-          blob,
-          url,
-          filename,
-          copied: false,
-          statusText: 'تم فتح المشاركة بالصورة بنجاح.',
-          whatsappUrl,
-          driverPhone: statementData.driver.phone || '',
-        });
-        return;
-      }
-
       const copied = await copyPngBlobToClipboard(blob);
-      downloadBlob(blob, filename);
-
       clearWhatsappPreview();
       const url = URL.createObjectURL(blob);
       setWhatsappPreview({
@@ -803,8 +783,8 @@ export const DriversModule: React.FC<{
         filename,
         copied,
         statusText: copied
-          ? 'تم تجهيز صورة كشف الحساب ونسخها للحافظة وتحميلها — اضغط فتح الواتساب ثم الصق الصورة (Ctrl+V) أو أرفقها.'
-          : 'تم تجهيز صورة كشف الحساب وتحميلها — اضغط فتح الواتساب وأرفق الصورة المحمّلة داخل المحادثة.',
+          ? 'تم توليد صورة كشف الحساب كاملة ونسخها للحافظة — راجع المعاينة أدناه ثم اضغط إرسال عبر واتساب أو تحميل الصورة.'
+          : 'تم توليد صورة كشف الحساب كاملة — راجع المعاينة أدناه ثم اضغط تحميل الصورة أو فتح واتساب.',
         whatsappUrl,
         driverPhone: statementData.driver.phone || '',
       });
@@ -1662,69 +1642,6 @@ export const DriversModule: React.FC<{
                 </div>
               )}
 
-              {/* WhatsApp Image Preview & Send Bar */}
-              {whatsappPreview && (
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="font-bold text-emerald-900 flex items-center gap-1.5">
-                        <MessageCircle className="w-4 h-4 text-[#25D366]" />
-                        <span>جاهز للإرسال عبر واتساب</span>
-                      </div>
-                      <p className="text-[11px] text-emerald-800 leading-relaxed">
-                        {whatsappPreview.statusText}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={clearWhatsappPreview}
-                      className="self-start text-emerald-700 hover:text-emerald-950 cursor-pointer"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                    <img
-                      src={whatsappPreview.url}
-                      alt="معاينة صورة كشف الحساب"
-                      className="w-full sm:w-80 h-48 sm:h-56 object-contain object-top rounded-xl border border-emerald-300 bg-slate-900 shadow-md shrink-0"
-                    />
-                    <div className="flex flex-wrap items-center gap-2">
-                      <a
-                        href={whatsappPreview.whatsappUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#25D366] px-4 py-2 text-xs font-bold text-white hover:bg-[#1ebe5d]"
-                      >
-                        <MessageCircle className="w-4 h-4" />
-                        فتح واتساب {whatsappPreview.driverPhone ? `(${whatsappPreview.driverPhone})` : ''}
-                      </a>
-                      <button
-                        type="button"
-                        onClick={handleRecopyWhatsappImage}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
-                      >
-                        {whatsappPreview.copied ? (
-                          <Check className="w-3.5 h-3.5 text-emerald-600" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5" />
-                        )}
-                        {whatsappPreview.copied ? 'تم نسخ الصورة' : 'نسخ الصورة'}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => downloadBlob(whatsappPreview.blob, whatsappPreview.filename)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100 cursor-pointer"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        تحميل الصورة
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
               {statementLoading || !statementData ? (
                 <div className="py-10 text-center text-slate-400">جاري تحميل حساب السائق...</div>
               ) : (
@@ -1734,8 +1651,7 @@ export const DriversModule: React.FC<{
                     <div
                       ref={statementCaptureRef}
                       dir="rtl"
-                      style={{ width: '960px', minWidth: '960px' }}
-                      className="bg-white rounded-xl border border-slate-200 p-6 space-y-5 mx-auto shadow-sm"
+                      className="w-full max-w-[960px] bg-white rounded-xl border border-slate-200 p-4 sm:p-6 space-y-5 mx-auto shadow-sm"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
                         <div className="flex items-center gap-3">
@@ -2434,6 +2350,106 @@ export const DriversModule: React.FC<{
         onClose={() => setShowBroadcastModal(false)}
         onOpenDriversChat={onOpenDriversChat}
       />
+
+      {/* Full Uncropped Statement Image Preview Modal (before Share / Download) */}
+      {whatsappPreview && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-3 sm:p-5 backdrop-blur-xs">
+          <div className="w-full max-w-4xl max-h-[92vh] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden flex flex-col">
+            <div className="px-5 py-3.5 bg-[#0B1F3A] text-white flex items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <MessageCircle className="w-4 h-4 text-[#25D366]" />
+                <span className="font-display font-bold text-sm">
+                  معاينة صورة كشف حساب السائق الكاملة قبل الإرسال / التحميل
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={clearWhatsappPreview}
+                aria-label="إغلاق المعاينة"
+                className="text-slate-300 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 overflow-y-auto bg-slate-100 space-y-4">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-900">
+                {whatsappPreview.statusText}
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-2 shadow-xs">
+                <img
+                  src={whatsappPreview.url}
+                  alt="معاينة صورة كشف الحساب الكاملة"
+                  className="w-full h-auto block rounded-lg bg-white"
+                />
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-slate-200 bg-white flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => downloadBlob(whatsappPreview.blob, whatsappPreview.filename)}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-4 py-2 text-xs font-bold text-white whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Download className="w-4 h-4 text-[#C89B3C]" />
+                  تحميل الصورة (PNG)
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRecopyWhatsappImage}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-3.5 py-2 text-xs font-semibold text-[#0B1F3A] whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  {whatsappPreview.copied ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-600" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
+                  {whatsappPreview.copied ? 'تم نسخ الصورة' : 'نسخ الصورة'}
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!statementData) return;
+                    const caption = `كشف حساب ${statementData.driver.fullName} (كود ${statementData.driver.driverCode}) - شهر ${statementData.period.month}/${statementData.period.year} - صافي المستحق: ${formatEGP(statementData.salary.netSalary)}`;
+                    const status = await shareImageFileViaWebShare(
+                      whatsappPreview.blob,
+                      whatsappPreview.filename,
+                      `كشف حساب ${statementData.driver.fullName}`,
+                      caption
+                    );
+                    if (status === 'unsupported') {
+                      downloadBlob(whatsappPreview.blob, whatsappPreview.filename);
+                      setWhatsappPreview((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              statusText:
+                                'المتصفح لا يدعم الإرسال المباشر للملفات — تم تنزيل الصورة الآن، يمكنك إرفاقها مباشرة داخل واتساب.',
+                            }
+                          : null
+                      );
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 px-3.5 py-2 text-xs font-bold text-emerald-900 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  مشاركة مباشرة بالصورة
+                </button>
+              </div>
+              <a
+                href={whatsappPreview.whatsappUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#25D366] hover:bg-[#1ebe5d] px-4 py-2 text-xs font-bold text-white whitespace-nowrap shrink-0"
+              >
+                <MessageCircle className="w-4 h-4" />
+                فتح واتساب {whatsappPreview.driverPhone ? `(${whatsappPreview.driverPhone})` : ''}
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

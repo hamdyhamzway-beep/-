@@ -6,6 +6,7 @@ import {
   Bus,
   FileSpreadsheet,
   FileText,
+  HandCoins,
   LayoutDashboard,
   LogOut,
   MapPin,
@@ -43,6 +44,7 @@ import { DriverApp } from './components/driver/DriverApp';
 import { SupervisorApp } from './components/supervisor/SupervisorApp';
 import { ChatHubModule } from './components/chat/ChatHubModule';
 import { InvoicesModule } from './components/admin/InvoicesModule';
+import { CustodiesAndExternalAccountsModule } from './components/admin/CustodiesAndExternalAccountsModule';
 import { ArrowRight, MessageSquare, UserCheck } from 'lucide-react';
 
 type AdminTabId =
@@ -52,6 +54,7 @@ type AdminTabId =
   | 'employees'
   | 'schools'
   | 'finance'
+  | 'custodies_external'
   | 'invoices'
   | 'daily_reports'
   | 'map'
@@ -194,6 +197,12 @@ const AppShell: React.FC = () => {
           can('finance:write') ||
           can('advances:write') ||
           can('coverage:write'),
+      },
+      {
+        id: 'custodies_external',
+        label: 'العهد والمديونيات',
+        icon: HandCoins,
+        visible: isSuperAdmin || can('finance:read') || can('finance:write'),
       },
       {
         id: 'invoices',
@@ -675,6 +684,9 @@ const AppShell: React.FC = () => {
           {activeTab === 'employees' && <EmployeesModule />}
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
           {activeTab === 'finance' && <FinanceModule />}
+          {activeTab === 'custodies_external' && (
+            <CustodiesAndExternalAccountsModule initialSection="custodies" />
+          )}
           {activeTab === 'invoices' && <InvoicesModule initialView="create" />}
           {activeTab === 'daily_reports' && <DailyReportsModule />}
           {activeTab === 'map' && <LiveMapModule />}
