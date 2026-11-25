@@ -16,6 +16,7 @@ import {
 import { apiFetch, normalizeLookupText } from '../../lib/api';
 import { PERMISSION_LABEL_MAP } from '../../lib/permissions';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { AppVersionBadge } from '../AppVersionBadge';
 import {
   StaffAccessModal,
   type StaffEmployeeOption,
@@ -190,7 +191,13 @@ export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> =
     }
   };
 
-  const staffRoleSlugs = new Set(['accountant', 'movement_manager', 'employee', 'super_admin']);
+  const staffRoleSlugs = new Set([
+    'accountant',
+    'movement_manager',
+    'school_movement_manager',
+    'employee',
+    'super_admin',
+  ]);
   const staffCount = usersList.filter((u) => staffRoleSlugs.has(u.roleSlug)).length;
 
   const filteredUsers = usersList.filter((u) => {
@@ -756,6 +763,9 @@ export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> =
           </div>
         </div>
       )}
+      <div className="pt-2 border-t border-slate-200/80">
+        <AppVersionBadge variant="light" />
+      </div>
     </div>
   );
 };

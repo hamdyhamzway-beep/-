@@ -76,7 +76,13 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
 }) => {
   const isEditing = Boolean(initialUser?.id);
   const staffRoles = roles.filter((r) =>
-    ['accountant', 'movement_manager', 'employee', 'super_admin'].includes(r.slug)
+    [
+      'accountant',
+      'movement_manager',
+      'school_movement_manager',
+      'employee',
+      'super_admin',
+    ].includes(r.slug)
   );
 
   const [fullName, setFullName] = useState('');
@@ -100,9 +106,13 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
     if (!open) return;
     setError(null);
     if (initialUser) {
-      const slug = ['accountant', 'movement_manager', 'employee', 'super_admin'].includes(
-        initialUser.roleSlug
-      )
+      const slug = [
+        'accountant',
+        'movement_manager',
+        'school_movement_manager',
+        'employee',
+        'super_admin',
+      ].includes(initialUser.roleSlug)
         ? initialUser.roleSlug
         : 'accountant';
       setFullName(initialUser.fullName || '');
@@ -161,6 +171,12 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
 
   const handleSelectRole = (nextSlug: string) => {
     setRoleSlug(nextSlug);
+    if (nextSlug === 'school_movement_manager') {
+      setSchoolScopeMode('specific');
+      setAssignedSchoolIds((prev) => (prev.length > 0 ? [prev[0]] : []));
+      setSelectedPermissions([...ROLE_DEFAULT_PERMISSIONS.school_movement_manager]);
+      return;
+    }
     if (!isEditing) {
       const defaults = ROLE_DEFAULT_PERMISSIONS[nextSlug] || [];
       setSelectedPermissions(defaults.filter((p) => p !== '*'));
@@ -178,6 +194,10 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
   };
 
   const toggleSchool = (schoolId: number) => {
+    if (roleSlug === 'school_movement_manager') {
+      setAssignedSchoolIds([schoolId]);
+      return;
+    }
     setAssignedSchoolIds((prev) =>
       prev.includes(schoolId) ? prev.filter((id) => id !== schoolId) : [...prev, schoolId]
     );
@@ -227,17 +247,27 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
       setError('يرجى إدخال اسم الموظف الكامل.');
       return;
     }
-    if (schoolScopeMode === 'specific' && assignedSchoolIds.length === 0) {
+    if (roleSlug === 'school_movement_manager') {
+      if (assignedSchoolIds.length !== 1) {
+        setError('دور «مدير حركة مدرسة» يتطلب اختيار مدرسة واحدة بالضبط.');
+        return;
+      }
+    } else if (schoolScopeMode === 'specific' && assignedSchoolIds.length === 0) {
       setError('اختر مدرسة واحدة على الأقل أو حدد «جميع المدارس».');
       return;
     }
-    if (roleSlug !== 'super_admin' && selectedPermissions.length === 0) {
+    if (
+      roleSlug !== 'super_admin' &&
+      roleSlug !== 'school_movement_manager' &&
+      selectedPermissions.length === 0
+    ) {
       setError('يرجى اختيار صلاحية واحدة على الأقل لهذا الموظف.');
       return;
     }
 
     setSaving(true);
     try {
+      const isSchoolMgr = roleSlug === 'school_movement_manager';
       const payload = {
         fullName: fullName.trim(),
         phone: phone.trim(),
@@ -245,8 +275,17 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
         staffCode: staffCode.trim().toUpperCase() || generateRandomStaffCode(),
         roleSlug,
         employeeId: employeeId ? Number(employeeId) : null,
-        assignedSchoolIds: schoolScopeMode === 'specific' ? assignedSchoolIds : [],
-        customPermissions: roleSlug === 'super_admin' ? null : selectedPermissions,
+        assignedSchoolIds: isSchoolMgr
+          ? assignedSchoolIds.slice(0, 1)
+          : schoolScopeMode === 'specific'
+          ? assignedSchoolIds
+          : [],
+        customPermissions:
+          roleSlug === 'super_admin'
+            ? null
+            : isSchoolMgr
+            ? [...ROLE_DEFAULT_PERMISSIONS.school_movement_manager]
+            : selectedPermissions,
         isActive,
       };
 
@@ -412,6 +451,7 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
                 : [
                     { id: 0, slug: 'accountant', nameAr: 'محاسب', description: 'إدارة المرتبات والسلف والتغطيات', permissions: [] },
                     { id: 0, slug: 'movement_manager', nameAr: 'مشرف حركة', description: 'متابعة السائقين والتغطيات والسلف والأسطول', permissions: [] },
+                    { id: 0, slug: 'school_movement_manager', nameAr: 'مدير حركة مدرسة', description: 'تسجيل ملاحظات المدرسة والتقرير الشهري بدون مالية', permissions: [] },
                     { id: 0, slug: 'employee', nameAr: 'موظف عادي / ميداني', description: 'تقديم التقارير اليومية والمحادثات ضمن مدرسته', permissions: [] },
                     { id: 0, slug: 'super_admin', nameAr: 'المدير العام', description: 'صلاحيات كاملة', permissions: [] },
                   ]
@@ -448,45 +488,53 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 font-bold text-[#0B1F3A]">
                 <Building2 className="w-4 h-4 text-[#C89B3C]" />
-                <span>نطاق المدارس المصرح بالوصول إليها</span>
+                <span>
+                  {roleSlug === 'school_movement_manager'
+                    ? 'اختر المدرسة المخصصة (مدرسة واحدة فقط) *'
+                    : 'نطاق المدارس المصرح بالوصول إليها'}
+                </span>
               </div>
-              <div className="inline-flex rounded-lg bg-slate-100 p-0.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSchoolScopeMode('all');
-                    setAssignedSchoolIds([]);
-                  }}
-                  className={`rounded-md px-3 py-1.5 text-[11px] font-bold cursor-pointer transition-colors ${
-                    schoolScopeMode === 'all'
-                      ? 'bg-[#0B1F3A] text-white'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  جميع المدارس
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSchoolScopeMode('specific')}
-                  className={`rounded-md px-3 py-1.5 text-[11px] font-bold cursor-pointer transition-colors ${
-                    schoolScopeMode === 'specific'
-                      ? 'bg-[#0B1F3A] text-white'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  مدارس محددة فقط
-                </button>
-              </div>
+              {roleSlug !== 'school_movement_manager' && (
+                <div className="inline-flex rounded-lg bg-slate-100 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSchoolScopeMode('all');
+                      setAssignedSchoolIds([]);
+                    }}
+                    className={`rounded-md px-3 py-1.5 text-[11px] font-bold cursor-pointer transition-colors ${
+                      schoolScopeMode === 'all'
+                        ? 'bg-[#0B1F3A] text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    جميع المدارس
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSchoolScopeMode('specific')}
+                    className={`rounded-md px-3 py-1.5 text-[11px] font-bold cursor-pointer transition-colors ${
+                      schoolScopeMode === 'specific'
+                        ? 'bg-[#0B1F3A] text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    مدارس محددة فقط
+                  </button>
+                </div>
+              )}
             </div>
 
-            {schoolScopeMode === 'all' ? (
+            {roleSlug !== 'school_movement_manager' && schoolScopeMode === 'all' ? (
               <p className="text-[11px] text-slate-500">
                 يستطيع هذا الموظف الاطلاع والعمل على جميع المدارس والسائقين المسجلين وفقاً لصلاحياته.
               </p>
             ) : (
               <div className="space-y-2">
                 <p className="text-[11px] text-slate-600">
-                  عزل كامل لبيانات المدرسة المختارة — لا يرى الموظف أي سائقين أو مركبات أو تقارير أو مرتبات لمدارس أخرى:
+                  {roleSlug === 'school_movement_manager'
+                    ? 'إجباري لمدير حركة المدرسة: اختر مدرسة واحدة فقط، ولن يتمكن من رؤية أي بيانات أو ملاحظات لأي مدرسة أخرى:'
+                    : 'عزل كامل لبيانات المدرسة المختارة — لا يرى الموظف أي سائقين أو مركبات أو تقارير أو مرتبات لمدارس أخرى:'}
                 </p>
                 {schools.length === 0 ? (
                   <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
@@ -506,7 +554,12 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
                           }`}
                         >
                           <input
-                            type="checkbox"
+                            type={roleSlug === 'school_movement_manager' ? 'radio' : 'checkbox'}
+                            name={
+                              roleSlug === 'school_movement_manager'
+                                ? 'school_movement_single_school'
+                                : undefined
+                            }
                             checked={checked}
                             onChange={() => toggleSchool(sc.id)}
                             className="rounded border-slate-300 text-[#0B1F3A] focus:ring-[#0B1F3A]"
@@ -525,6 +578,15 @@ export const StaffAccessModal: React.FC<StaffAccessModalProps> = ({
           {roleSlug === 'super_admin' ? (
             <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3.5 text-[11px] text-amber-900">
               المدير العام يمتلك جميع الصلاحيات تلقائياً (`*`) بما في ذلك إدارة المستخدمين والتصفيات والنسخ المعزولة.
+            </div>
+          ) : roleSlug === 'school_movement_manager' ? (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3.5 text-[11px] text-emerald-900 space-y-1">
+              <div className="font-bold">صلاحيات مقيدة تلقائياً لدور «مدير حركة مدرسة»:</div>
+              <div>
+                يمتلك فقط صلاحيتي <span className="font-mono font-bold">school_notes:read</span> و{' '}
+                <span className="font-mono font-bold">school_notes:write</span> — محجوب تماماً عن
+                المالية والرواتب والفواتير والعقود والمدارس الأخرى.
+              </div>
             </div>
           ) : (
             <div className="rounded-xl border border-slate-200 p-4 space-y-3.5">

@@ -25,6 +25,7 @@ import {
   normalizeTimeInputValue,
 } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { formatBusBadgeLabel, groupBySchoolSortedByBus } from '../../lib/bus-sorting';
 import {
   buildWhatsAppUrl,
   captureElementAsPngBlob,
@@ -825,6 +826,8 @@ export const DriversModule: React.FC<{
     );
   });
 
+  const groupedDrivers = groupBySchoolSortedByBus(filtered);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
@@ -928,86 +931,105 @@ export const DriversModule: React.FC<{
             لا يوجد سائقون مطابقون لخيارات البحث
           </div>
         ) : (
-          filtered.map((d) => (
-            <div key={d.id} className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <DriverAvatar name={d.fullName} photoUrl={d.photoUrl} size="md" />
-                  <div className="min-w-0">
-                    <div className="font-bold text-sm text-[#0B1F3A] truncate">{d.fullName}</div>
-                    <div className="text-xs text-slate-500 font-mono mt-0.5">
-                      كود {d.driverCode} · {d.phone}
-                    </div>
-                  </div>
-                </div>
-                <span className="text-[11px] font-bold px-2 py-0.5 rounded-md shrink-0 bg-emerald-50 text-emerald-700">
-                  نشط
-                </span>
+          groupedDrivers.map((grp) => (
+            <div key={grp.schoolKey} className="space-y-2.5">
+              <div className="px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-between text-xs font-bold text-[#0B1F3A]">
+                <span>{grp.schoolName}</span>
+                <span className="font-mono text-[11px] text-slate-500">({grp.items.length} سائق)</span>
               </div>
-
-              <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-2.5 text-[11px]">
-                <div className={canFinanceRead ? '' : 'col-span-2'}>
-                  <span className="text-slate-500">المدرسة والباص: </span>
-                  <span className="font-semibold text-slate-800">
-                    {d.schoolName} ({d.busNumber})
-                  </span>
-                </div>
-                {canFinanceRead && (
-                  <div className="text-left">
-                    <span className="text-slate-500">الراتب: </span>
-                    <span className="font-mono font-bold text-[#0B1F3A] tabular-nums">
-                      {formatEGP(d.monthlyAgreedSalary)}
+              {grp.items.map((d) => (
+                <div key={d.id} className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <DriverAvatar name={d.fullName} photoUrl={d.photoUrl} size="md" />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-sm text-[#0B1F3A] truncate">{d.fullName}</span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                              d.vehicleId
+                                ? 'bg-[#0B1F3A]/10 text-[#0B1F3A]'
+                                : 'bg-amber-50 text-amber-800 border border-amber-200'
+                            }`}
+                          >
+                            {formatBusBadgeLabel(d.busNumber, d.vehicleId)}
+                          </span>
+                        </div>
+                        <div className="text-xs text-slate-500 font-mono mt-0.5">
+                          كود {d.driverCode} · {d.phone}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-md shrink-0 bg-emerald-50 text-emerald-700">
+                      نشط
                     </span>
                   </div>
-                )}
-                <div className="col-span-2">
-                  <span className="text-slate-500">خط السير: </span>
-                  <span className="font-semibold text-[#0B1F3A]">{d.routeName || '—'}</span>
-                </div>
-              </div>
 
-              {(canViewFinancialDetails || canDriversWrite) && (
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  {(canAdvancesWrite || canCoverageWrite || canFinanceRead) && (
-                    <button
-                      onClick={() =>
-                        openStatement(d.id, canAdvancesWrite || canFinanceRead ? 'advances' : 'coverage')
-                      }
-                      className="flex items-center justify-center gap-1.5 rounded-lg bg-[#C89B3C] px-2.5 py-2 text-xs font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer"
-                    >
-                      <Wallet className="w-3.5 h-3.5" />
-                      السلف والتغطيات
-                    </button>
-                  )}
-                  {canDriversWrite && (
-                    <button
-                      onClick={() => openEdit(d)}
-                      className="flex items-center justify-center gap-1.5 rounded-lg bg-[#0B1F3A] px-2.5 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
-                    >
-                      <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
-                      تعديل البيانات
-                    </button>
-                  )}
-                  {canViewFinancialDetails && (
-                    <button
-                      onClick={() => openStatement(d.id, 'statement')}
-                      className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      كشف حساب
-                    </button>
-                  )}
-                  {canDriversWrite && (
-                    <button
-                      onClick={() => archiveDriver(d)}
-                      className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
-                    >
-                      <Archive className="w-3.5 h-3.5" />
-                      أرشفة
-                    </button>
+                  <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-2.5 text-[11px]">
+                    <div className={canFinanceRead ? '' : 'col-span-2'}>
+                      <span className="text-slate-500">المدرسة والباص: </span>
+                      <span className="font-semibold text-slate-800">
+                        {d.schoolName} ({formatBusBadgeLabel(d.busNumber, d.vehicleId)})
+                      </span>
+                    </div>
+                    {canFinanceRead && (
+                      <div className="text-left">
+                        <span className="text-slate-500">الراتب: </span>
+                        <span className="font-mono font-bold text-[#0B1F3A] tabular-nums">
+                          {formatEGP(d.monthlyAgreedSalary)}
+                        </span>
+                      </div>
+                    )}
+                    <div className="col-span-2">
+                      <span className="text-slate-500">خط السير: </span>
+                      <span className="font-semibold text-[#0B1F3A]">{d.routeName || '—'}</span>
+                    </div>
+                  </div>
+
+                  {(canViewFinancialDetails || canDriversWrite) && (
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      {(canAdvancesWrite || canCoverageWrite || canFinanceRead) && (
+                        <button
+                          onClick={() =>
+                            openStatement(d.id, canAdvancesWrite || canFinanceRead ? 'advances' : 'coverage')
+                          }
+                          className="flex items-center justify-center gap-1.5 rounded-lg bg-[#C89B3C] px-2.5 py-2 text-xs font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer"
+                        >
+                          <Wallet className="w-3.5 h-3.5" />
+                          السلف والتغطيات
+                        </button>
+                      )}
+                      {canDriversWrite && (
+                        <button
+                          onClick={() => openEdit(d)}
+                          className="flex items-center justify-center gap-1.5 rounded-lg bg-[#0B1F3A] px-2.5 py-2 text-xs font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                        >
+                          <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
+                          تعديل البيانات
+                        </button>
+                      )}
+                      {canViewFinancialDetails && (
+                        <button
+                          onClick={() => openStatement(d.id, 'statement')}
+                          className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-[#0B1F3A] hover:bg-slate-50 cursor-pointer"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          كشف حساب
+                        </button>
+                      )}
+                      {canDriversWrite && (
+                        <button
+                          onClick={() => archiveDriver(d)}
+                          className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                        >
+                          <Archive className="w-3.5 h-3.5" />
+                          أرشفة
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
-              )}
+              ))}
             </div>
           ))
         )}
@@ -1043,98 +1065,131 @@ export const DriversModule: React.FC<{
                   </td>
                 </tr>
               ) : (
-                filtered.map((d) => (
-                  <tr key={d.id} className="hover:bg-slate-50/70">
-                    <td className="py-3.5 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
-                      {d.driverCode}
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="flex items-center gap-3">
-                        <DriverAvatar name={d.fullName} photoUrl={d.photoUrl} size="sm" />
-                        <div className="min-w-0">
-                          <div className="font-semibold text-slate-900 truncate">{d.fullName}</div>
-                          <div className="text-slate-500 tabular-nums mt-0.5 truncate">
-                            {d.phone}
-                            {d.linkedEmail ? ` · ${d.linkedEmail}` : ''}
+                groupedDrivers.map((grp) => (
+                  <React.Fragment key={grp.schoolKey}>
+                    <tr className="bg-slate-100/90 border-y border-slate-200">
+                      <td
+                        colSpan={
+                          3 +
+                          1 +
+                          (canFinanceRead ? 1 : 0) +
+                          (canViewFinancialDetails || canDriversWrite ? 1 : 0)
+                        }
+                        className="py-2 px-4 font-bold text-[#0B1F3A] text-xs"
+                      >
+                        <span>{grp.schoolName}</span>
+                        <span className="mr-2 font-mono text-[11px] font-semibold text-slate-500">
+                          ({grp.items.length} سائق)
+                        </span>
+                      </td>
+                    </tr>
+                    {grp.items.map((d) => (
+                      <tr key={d.id} className="hover:bg-slate-50/70">
+                        <td className="py-3.5 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                          {d.driverCode}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="flex items-center gap-3">
+                            <DriverAvatar name={d.fullName} photoUrl={d.photoUrl} size="sm" />
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-semibold text-slate-900 truncate">{d.fullName}</span>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                                    d.vehicleId
+                                      ? 'bg-[#0B1F3A]/10 text-[#0B1F3A]'
+                                      : 'bg-amber-50 text-amber-800 border border-amber-200'
+                                  }`}
+                                >
+                                  {formatBusBadgeLabel(d.busNumber, d.vehicleId)}
+                                </span>
+                              </div>
+                              <div className="text-slate-500 tabular-nums mt-0.5 truncate">
+                                {d.phone}
+                                {d.linkedEmail ? ` · ${d.linkedEmail}` : ''}
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="font-medium text-slate-800">{d.schoolName}</div>
-                      <div className="text-slate-500 mt-0.5">{d.routeName}</div>
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="font-mono font-medium text-slate-800">
-                        {d.busNumber} · {d.registrationNumber}
-                      </div>
-                    </td>
-                    {canFinanceRead && (
-                      <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
-                        {formatEGP(d.monthlyAgreedSalary)}
-                      </td>
-                    )}
-                    {(canViewFinancialDetails || canDriversWrite) && (
-                      <td className="py-3.5 px-4">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {(canAdvancesWrite || canCoverageWrite || canFinanceRead) && (
-                            <button
-                              onClick={() =>
-                                openStatement(
-                                  d.id,
-                                  canAdvancesWrite || canFinanceRead ? 'advances' : 'coverage'
-                                )
-                              }
-                              className="flex items-center gap-1 rounded-md bg-[#C89B3C] px-2.5 py-1.5 text-[11px] font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer whitespace-nowrap"
-                              title="إضافة وتعديل السلف والتغطيات"
-                            >
-                              <Wallet className="w-3.5 h-3.5" />
-                              السلف والتغطيات
-                            </button>
-                          )}
-                          {canDriversWrite && (
-                            <button
-                              onClick={() => openEdit(d)}
-                              className="flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
-                              title="تعديل الاسم والبيانات والصورة"
-                            >
-                              <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
-                              تعديل
-                            </button>
-                          )}
-                          {canViewFinancialDetails && (
-                            <button
-                              onClick={() => openStatement(d.id, 'statement')}
-                              className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer whitespace-nowrap"
-                            >
-                              <FileText className="w-3.5 h-3.5" />
-                              كشف حساب
-                            </button>
-                          )}
-                          {canDriversWrite && (
-                            <>
-                              <button
-                                onClick={() => archiveDriver(d)}
-                                className="flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
-                                title="نقل إلى الأرشفة"
-                              >
-                                <Archive className="w-3.5 h-3.5" />
-                                أرشفة
-                              </button>
-                              <button
-                                onClick={() => openDeleteModal(d)}
-                                className="flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer whitespace-nowrap"
-                                title="حذف السائق"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                حذف
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                    )}
-                  </tr>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-medium text-slate-800">{d.schoolName}</div>
+                          <div className="text-slate-500 mt-0.5">{d.routeName}</div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-mono font-medium text-slate-800">
+                            {d.vehicleId
+                              ? `${formatBusBadgeLabel(d.busNumber, d.vehicleId)} · ${d.registrationNumber}`
+                              : formatBusBadgeLabel(d.busNumber, d.vehicleId)}
+                          </div>
+                        </td>
+                        {canFinanceRead && (
+                          <td className="py-3.5 px-4 font-mono font-semibold text-slate-900 tabular-nums">
+                            {formatEGP(d.monthlyAgreedSalary)}
+                          </td>
+                        )}
+                        {(canViewFinancialDetails || canDriversWrite) && (
+                          <td className="py-3.5 px-4">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {(canAdvancesWrite || canCoverageWrite || canFinanceRead) && (
+                                <button
+                                  onClick={() =>
+                                    openStatement(
+                                      d.id,
+                                      canAdvancesWrite || canFinanceRead ? 'advances' : 'coverage'
+                                    )
+                                  }
+                                  className="flex items-center gap-1 rounded-md bg-[#C89B3C] px-2.5 py-1.5 text-[11px] font-bold text-[#0B1F3A] hover:bg-[#d8ac4e] cursor-pointer whitespace-nowrap"
+                                  title="إضافة وتعديل السلف والتغطيات"
+                                >
+                                  <Wallet className="w-3.5 h-3.5" />
+                                  السلف والتغطيات
+                                </button>
+                              )}
+                              {canDriversWrite && (
+                                <button
+                                  onClick={() => openEdit(d)}
+                                  className="flex items-center gap-1 rounded-md bg-[#0B1F3A] px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-[#13325c] cursor-pointer whitespace-nowrap"
+                                  title="تعديل الاسم والبيانات والصورة"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5 text-[#C89B3C]" />
+                                  تعديل
+                                </button>
+                              )}
+                              {canViewFinancialDetails && (
+                                <button
+                                  onClick={() => openStatement(d.id, 'statement')}
+                                  className="flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer whitespace-nowrap"
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                  كشف حساب
+                                </button>
+                              )}
+                              {canDriversWrite && (
+                                <>
+                                  <button
+                                    onClick={() => archiveDriver(d)}
+                                    className="flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
+                                    title="نقل إلى الأرشفة"
+                                  >
+                                    <Archive className="w-3.5 h-3.5" />
+                                    أرشفة
+                                  </button>
+                                  <button
+                                    onClick={() => openDeleteModal(d)}
+                                    className="flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-100 cursor-pointer whitespace-nowrap"
+                                    title="حذف السائق"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    حذف
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </React.Fragment>
                 ))
               )}
             </tbody>

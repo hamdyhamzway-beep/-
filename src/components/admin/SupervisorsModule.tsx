@@ -25,6 +25,7 @@ import {
   normalizeLookupText,
 } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { compareBusNumbers, formatBusBadgeLabel, groupBySchoolSortedByBus } from '../../lib/bus-sorting';
 import { DriverAvatar } from '../DriverAvatar';
 import { DriverPhotoUploader } from '../DriverPhotoUploader';
 import type { FleetVehicle, SchoolItem, SupervisorRecord } from '../../types';
@@ -70,8 +71,8 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
     phone: '',
     photoUrl: '',
     linkedEmail: '',
-    schoolName: '',
-    busNumber: '',
+    schoolId: '',
+    vehicleId: '',
     routeName: '',
     pickupArea: '',
     dropoffArea: '',
@@ -79,6 +80,8 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
     accountStatus: 'active',
     notes: '',
   });
+  const [schoolVehicles, setSchoolVehicles] = useState<Array<{ id: number; busNumber: string; vehicleType?: string; registrationNumber?: string }>>([]);
+  const [loadingSchoolVehicles, setLoadingSchoolVehicles] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoadError(null);
@@ -102,6 +105,49 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
     loadAll();
   }, [loadAll]);
 
+  const fetchVehiclesForSchool = useCallback(
+    async (schoolIdStr: string) => {
+      const sid = Number(schoolIdStr);
+      if (!sid) {
+        setSchoolVehicles([]);
+        return;
+      }
+      setLoadingSchoolVehicles(true);
+      try {
+        const res = await apiFetch<{
+          vehicles: Array<{
+            id: number;
+            busNumber: string;
+            vehicleType?: string;
+            registrationNumber?: string;
+          }>;
+        }>(`/api/schools/${sid}/vehicles`);
+        setSchoolVehicles(res.vehicles || []);
+      } catch {
+        const fallback = vehiclesList
+          .filter((v) => v.schoolId === sid)
+          .sort((a, b) => compareBusNumbers(a.busNumber, b.busNumber));
+        setSchoolVehicles(fallback);
+      } finally {
+        setLoadingSchoolVehicles(false);
+      }
+    },
+    [vehiclesList]
+  );
+
+  useEffect(() => {
+    if (showModal && form.schoolId) {
+      fetchVehiclesForSchool(form.schoolId);
+    } else if (!form.schoolId) {
+      setSchoolVehicles([]);
+    }
+  }, [showModal, form.schoolId, fetchVehiclesForSchool]);
+
+  const activeSchoolsForModal = useMemo(() => {
+    const curId = form.schoolId ? Number(form.schoolId) : null;
+    return schoolsList.filter((s) => s.isActive || (curId !== null && s.id === curId));
+  }, [schoolsList, form.schoolId]);
+
   const filteredSupervisors = useMemo(() => {
     const q = normalizeLookupText(searchQuery);
     const digitsOnly = q.replace(/\D/g, '');
@@ -120,6 +166,11 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
     });
   }, [supervisorsList, searchQuery, statusFilter]);
 
+  const groupedSupervisors = useMemo(
+    () => groupBySchoolSortedByBus(filteredSupervisors),
+    [filteredSupervisors]
+  );
+
   const stats = useMemo(() => {
     const total = supervisorsList.length;
     const active = supervisorsList.filter((s) => s.accountStatus === 'active').length;
@@ -130,14 +181,16 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
   const openAddModal = () => {
     setEditingSupervisor(null);
     setFormError(null);
+    const activeOnly = schoolsList.filter((s) => s.isActive);
+    const defaultSchoolId = activeOnly.length === 1 ? String(activeOnly[0].id) : '';
     setForm({
       supervisorCode: '',
       fullName: '',
       phone: '',
       photoUrl: '',
       linkedEmail: '',
-      schoolName: '',
-      busNumber: '',
+      schoolId: defaultSchoolId,
+      vehicleId: '',
       routeName: '',
       pickupArea: '',
       dropoffArea: '',
@@ -157,8 +210,8 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
       phone: s.phone,
       photoUrl: s.photoUrl || '',
       linkedEmail: s.linkedEmail || '',
-      schoolName: cleanEditableField(s.schoolName),
-      busNumber: cleanEditableField(s.busNumber),
+      schoolId: s.schoolId ? String(s.schoolId) : '',
+      vehicleId: s.vehicleId ? String(s.vehicleId) : '',
       routeName: cleanEditableField(s.routeName),
       pickupArea: s.pickupArea || '',
       dropoffArea: s.dropoffArea || '',
@@ -179,8 +232,8 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
     const cleanCode = form.supervisorCode.trim();
     const cleanPhoto = form.photoUrl.trim();
     const cleanEmail = form.linkedEmail.trim();
-    const cleanSchool = cleanEditableField(form.schoolName);
-    const cleanBus = cleanEditableField(form.busNumber);
+    const selectedSchoolId = form.schoolId ? Number(form.schoolId) : null;
+    const selectedVehicleId = form.vehicleId ? Number(form.vehicleId) : null;
     const cleanRoute = cleanEditableField(form.routeName);
     const cleanPickupArea = form.pickupArea.trim();
     const cleanDropoffArea = form.dropoffArea.trim();
@@ -194,64 +247,27 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
 
     const emailValid = !cleanEmail || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail);
 
-    const fieldValidationLog = {
-      fullName: {
-        value: cleanName,
-        valid: cleanName.length > 0,
-        reason: cleanName.length > 0 ? 'ok' : 'اسم المشرفة الكامل مطلوب',
-      },
-      phone: {
-        value: cleanPhone,
-        digitsCount: normalizedPhoneDigits.length,
-        valid: cleanPhone.length > 0 && normalizedPhoneDigits.length >= 8,
-        reason:
-          cleanPhone.length > 0 && normalizedPhoneDigits.length >= 8
-            ? 'ok'
-            : 'رقم الموبايل يجب أن يحتوي على 8 أرقام على الأقل',
-      },
-      supervisorCode: {
-        value: cleanCode,
-        valid: cleanCode.length > 0,
-        reason: cleanCode.length > 0 ? 'ok' : 'كود المشرفة مطلوب',
-      },
-      photoUrl: { hasPhoto: Boolean(cleanPhoto), valid: true, optional: true },
-      accountStatus: {
-        value: cleanStatus,
-        valid: cleanStatus === 'active' || cleanStatus === 'inactive',
-        reason: 'ok',
-      },
-      routeName: { value: cleanRoute, valid: true, optional: true },
-      schoolName: { value: cleanSchool, valid: true, optional: true },
-      busNumber: { value: cleanBus, valid: true, optional: true },
-      pickupArea: { value: cleanPickupArea, valid: true, optional: true },
-      dropoffArea: { value: cleanDropoffArea, valid: true, optional: true },
-      linkedEmail: {
-        value: cleanEmail,
-        valid: emailValid,
-        optional: true,
-        reason: emailValid ? 'ok' : 'صيغة البريد الإلكتروني غير صحيحة',
-      },
-      notes: { value: cleanNotes, valid: true, optional: true },
-    };
-
-    console.log(
-      '[SupervisorsModule] Pre-submission field validation log:',
-      fieldValidationLog
-    );
-
-    if (!fieldValidationLog.fullName.valid) {
+    if (!selectedSchoolId) {
+      setFormError('يجب اختيار المدرسة أولاً.');
+      return;
+    }
+    if (!selectedVehicleId || !schoolVehicles.some((v) => v.id === selectedVehicleId)) {
+      setFormError('يجب اختيار الباص التابع للمدرسة المحددة.');
+      return;
+    }
+    if (!cleanName) {
       setFormError('يرجى إدخال اسم المشرفة الكامل.');
       return;
     }
-    if (!fieldValidationLog.phone.valid) {
+    if (!cleanPhone || normalizedPhoneDigits.length < 8) {
       setFormError('يرجى إدخال رقم موبايل صحيح للمشرفة (8 أرقام على الأقل).');
       return;
     }
-    if (!fieldValidationLog.supervisorCode.valid) {
+    if (!cleanCode) {
       setFormError('يرجى إدخال كود المشرفة.');
       return;
     }
-    if (!fieldValidationLog.linkedEmail.valid) {
+    if (!emailValid) {
       setFormError('صيغة البريد الإلكتروني المدخلة غير صحيحة.');
       return;
     }
@@ -262,8 +278,8 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
       phone: cleanPhone,
       photoUrl: cleanPhoto,
       linkedEmail: cleanEmail,
-      schoolName: cleanSchool,
-      busNumber: cleanBus,
+      schoolId: selectedSchoolId,
+      vehicleId: selectedVehicleId,
       routeName: cleanRoute,
       pickupArea: cleanPickupArea,
       dropoffArea: cleanDropoffArea,
@@ -491,32 +507,53 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredSupervisors.map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-50/70">
-                    <td className="py-3.5 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums whitespace-nowrap">
-                      {s.supervisorCode}
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="flex items-center gap-2.5">
-                        <DriverAvatar name={s.fullName} photoUrl={s.photoUrl} size="sm" />
-                        <div className="min-w-0">
-                          <div className="font-bold text-slate-900 truncate">{s.fullName}</div>
-                          <div className="mt-0.5 flex items-center gap-1 font-mono text-slate-500 tabular-nums">
-                            <Phone className="w-3 h-3 text-[#C89B3C] shrink-0" />
-                            <span dir="ltr">{s.phone}</span>
+                {groupedSupervisors.map((grp) => (
+                  <React.Fragment key={grp.schoolKey}>
+                    <tr className="bg-slate-100/90 border-y border-slate-200">
+                      <td colSpan={7} className="py-2 px-4 font-bold text-[#0B1F3A] text-xs">
+                        <span>{grp.schoolName}</span>
+                        <span className="mr-2 font-mono text-[11px] font-semibold text-slate-500">
+                          ({grp.items.length} مشرفة)
+                        </span>
+                      </td>
+                    </tr>
+                    {grp.items.map((s) => (
+                      <tr key={s.id} className="hover:bg-slate-50/70">
+                        <td className="py-3.5 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums whitespace-nowrap">
+                          {s.supervisorCode}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="flex items-center gap-2.5">
+                            <DriverAvatar name={s.fullName} photoUrl={s.photoUrl} size="sm" />
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-bold text-slate-900 truncate">{s.fullName}</span>
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold ${
+                                    s.vehicleId
+                                      ? 'bg-[#0B1F3A]/10 text-[#0B1F3A]'
+                                      : 'bg-amber-50 text-amber-800 border border-amber-200'
+                                  }`}
+                                >
+                                  {formatBusBadgeLabel(s.busNumber, s.vehicleId)}
+                                </span>
+                              </div>
+                              <div className="mt-0.5 flex items-center gap-1 font-mono text-slate-500 tabular-nums">
+                                <Phone className="w-3 h-3 text-[#C89B3C] shrink-0" />
+                                <span dir="ltr">{s.phone}</span>
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="font-semibold text-slate-800 flex items-center gap-1.5">
-                        <Route className="w-3.5 h-3.5 text-[#C89B3C] shrink-0" />
-                        <span>{s.routeName}</span>
-                      </div>
-                      <div className="mt-0.5 text-slate-500 tabular-nums">
-                        {s.schoolName} · باص {s.busNumber}
-                      </div>
-                    </td>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                            <Route className="w-3.5 h-3.5 text-[#C89B3C] shrink-0" />
+                            <span>{s.routeName}</span>
+                          </div>
+                          <div className="mt-0.5 text-slate-500 tabular-nums">
+                            {s.schoolName} · {formatBusBadgeLabel(s.busNumber, s.vehicleId)}
+                          </div>
+                        </td>
                     <td className="py-3.5 px-4 tabular-nums">
                       <div className="font-mono font-bold text-[#0B1F3A]">
                         {formatEGP(s.monthlySalary ?? 0)}
@@ -609,7 +646,9 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                         </button>
                       </div>
                     </td>
-                  </tr>
+                      </tr>
+                    ))}
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>
@@ -651,6 +690,75 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                   {formError}
                 </div>
               )}
+
+              {/* الخطوة 1 والخطوة 2: اختيار المدرسة أولاً ثم الباص الخاص بها */}
+              <div className="rounded-xl border border-[#C89B3C]/40 bg-amber-50/40 p-3.5 space-y-3">
+                <div className="text-[11px] font-bold text-[#0B1F3A]">
+                  تعيين المدرسة والباص (إلزامي بالترتيب)
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-[#0B1F3A] mb-1">1) المدرسة *</label>
+                    <select
+                      required
+                      value={form.schoolId}
+                      onChange={(e) => {
+                        const nextSchoolId = e.target.value;
+                        setForm((p) => ({
+                          ...p,
+                          schoolId: nextSchoolId,
+                          vehicleId: '',
+                        }));
+                      }}
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-semibold text-[#0B1F3A]"
+                    >
+                      <option value="">اختر المدرسة أولاً...</option>
+                      {activeSchoolsForModal.map((sc) => (
+                        <option key={sc.id} value={String(sc.id)}>
+                          {sc.name}{!sc.isActive ? ' (غير نشطة)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block font-bold text-[#0B1F3A] mb-1">2) الباص المخصص *</label>
+                    {!form.schoolId ? (
+                      <div className="w-full rounded-xl border border-dashed border-slate-300 bg-white/70 px-3 py-2.5 text-slate-400">
+                        اختر المدرسة أولاً لعرض باصاتها
+                      </div>
+                    ) : loadingSchoolVehicles ? (
+                      <div className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-500 flex items-center gap-1.5">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#C89B3C]" />
+                        جاري تحميل باصات المدرسة...
+                      </div>
+                    ) : schoolVehicles.length === 0 ? (
+                      <div className="w-full rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-amber-800">
+                        لا توجد باصات مسجلة لهذه المدرسة
+                      </div>
+                    ) : (
+                      <select
+                        required
+                        value={form.vehicleId}
+                        onChange={(e) => {
+                          const nextVehicleId = e.target.value;
+                          setForm((p) => ({ ...p, vehicleId: nextVehicleId }));
+                        }}
+                        className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-semibold text-[#0B1F3A]"
+                      >
+                        <option value="">اختر الباص...</option>
+                        {schoolVehicles.map((v) => (
+                          <option key={v.id} value={String(v.id)}>
+                            {v.vehicleType
+                              ? `باص ${v.busNumber} - ${v.vehicleType}`
+                              : `باص ${v.busNumber}`}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                </div>
+              </div>
 
               <DriverPhotoUploader
                 photoUrl={form.photoUrl}
@@ -739,43 +847,15 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                   />
                 </div>
                 <div className="sm:col-span-2">
-                  <label className="block font-bold text-[#0B1F3A] mb-1">اسم خط السير</label>
+                  <label className="block font-bold text-[#0B1F3A] mb-1">
+                    اسم خط السير (اختياري — يُربط تلقائياً بخط الباص إن وُجد)
+                  </label>
                   <input
                     value={form.routeName}
                     onChange={(e) => setForm((p) => ({ ...p, routeName: e.target.value }))}
-                    placeholder="مثال: خط سموحة - فيكتوريا"
+                    placeholder="اتركه فارغاً للربط التلقائي بخط الباص أو اكتب اسم الخط"
                     className="w-full rounded-xl border border-slate-300 px-3 py-2.5"
                   />
-                </div>
-                <div>
-                  <label className="block font-bold text-[#0B1F3A] mb-1">المدرسة المعينة</label>
-                  <input
-                    list="sup-mod-schools-list"
-                    value={form.schoolName}
-                    onChange={(e) => setForm((p) => ({ ...p, schoolName: e.target.value }))}
-                    placeholder="اختر أو اكتب اسم المدرسة"
-                    className="w-full rounded-xl border border-slate-300 px-3 py-2.5"
-                  />
-                  <datalist id="sup-mod-schools-list">
-                    {schoolsList.map((sc) => (
-                      <option key={sc.id} value={sc.name} />
-                    ))}
-                  </datalist>
-                </div>
-                <div>
-                  <label className="block font-bold text-[#0B1F3A] mb-1">رقم الباص المعين</label>
-                  <input
-                    list="sup-mod-vehicles-list"
-                    value={form.busNumber}
-                    onChange={(e) => setForm((p) => ({ ...p, busNumber: e.target.value }))}
-                    placeholder="مثال: 14"
-                    className="w-full rounded-xl border border-slate-300 px-3 py-2.5"
-                  />
-                  <datalist id="sup-mod-vehicles-list">
-                    {vehiclesList.map((v) => (
-                      <option key={v.id} value={v.busNumber} />
-                    ))}
-                  </datalist>
                 </div>
                 <div>
                   <label className="block font-bold text-[#0B1F3A] mb-1">نقطة التجمع / الانطلاق</label>
@@ -829,7 +909,7 @@ export const SupervisorsModule: React.FC<SupervisorsModuleProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={busy}
+                  disabled={busy || !form.schoolId || !form.vehicleId}
                   className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B1F3A] hover:bg-[#13325c] px-5 py-2.5 font-bold text-white disabled:opacity-50 cursor-pointer"
                 >
                   {busy && <Loader2 className="w-4 h-4 animate-spin" />}

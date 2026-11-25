@@ -29,6 +29,7 @@ import {
   normalizeLookupText,
 } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { formatBusBadgeLabel } from '../../lib/bus-sorting';
 import type {
   CustodyLookupData,
   ExternalAccountEntryRecord,
@@ -2012,7 +2013,8 @@ export const CustodiesAndExternalAccountsModule: React.FC<
                       <option value="">-- اختر السائق --</option>
                       {lookups.drivers.map((d) => (
                         <option key={d.id} value={d.id}>
-                          {d.fullName} ({d.driverCode})
+                          {d.fullName} — {formatBusBadgeLabel(d.busNumber, d.vehicleId)} (
+                          {d.schoolName || 'بدون مدرسة'}) — {d.driverCode}
                         </option>
                       ))}
                     </select>
@@ -2030,7 +2032,8 @@ export const CustodiesAndExternalAccountsModule: React.FC<
                       <option value="">-- اختر المشرفة --</option>
                       {lookups.supervisors.map((sv) => (
                         <option key={sv.id} value={sv.id}>
-                          {sv.fullName}
+                          {sv.fullName} — {formatBusBadgeLabel(sv.busNumber, sv.vehicleId)} (
+                          {sv.schoolName || 'بدون مدرسة'})
                         </option>
                       ))}
                     </select>
@@ -2595,7 +2598,8 @@ export const CustodiesAndExternalAccountsModule: React.FC<
                       <option value="">-- اختر --</option>
                       {lookups.drivers.map((d) => (
                         <option key={d.id} value={d.id}>
-                          {d.fullName} ({d.driverCode})
+                          {d.fullName} — {formatBusBadgeLabel(d.busNumber, d.vehicleId)} (
+                          {d.schoolName || 'بدون مدرسة'}) — {d.driverCode}
                         </option>
                       ))}
                     </select>
@@ -2613,7 +2617,8 @@ export const CustodiesAndExternalAccountsModule: React.FC<
                       <option value="">-- اختر --</option>
                       {lookups.supervisors.map((sv) => (
                         <option key={sv.id} value={sv.id}>
-                          {sv.fullName}
+                          {sv.fullName} — {formatBusBadgeLabel(sv.busNumber, sv.vehicleId)} (
+                          {sv.schoolName || 'بدون مدرسة'})
                         </option>
                       ))}
                     </select>

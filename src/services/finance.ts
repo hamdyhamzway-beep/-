@@ -16,7 +16,9 @@ import {
   schools,
   supervisors,
   supervisorTrips,
+  vehicles,
 } from '../db/schema.ts';
+import { getSchoolBusOrderBy } from '../lib/bus-sorting.ts';
 import {
   getBillingDateRangeForPeriod,
   getBillingPeriodForDate,
@@ -1514,6 +1516,8 @@ export interface SupervisorCycleSummary {
   phone: string;
   schoolId: number | null;
   schoolName: string;
+  vehicleId: number | null;
+  busNumber: string;
   monthlySalary: number;
   tripsCount: number;
   morningTripsCount: number;
@@ -1530,8 +1534,25 @@ export async function getSupervisorCycleSummaries(params: {
   allowedSchoolIds?: number[] | null;
 }): Promise<SupervisorCycleSummary[]> {
   const { month, year, schoolId, allowedSchoolIds } = params;
-  const [allSups, allSchools, allPeriodRows] = await Promise.all([
-    db.select().from(supervisors).orderBy(supervisors.fullName),
+  const [supRows, allSchools, allPeriodRows] = await Promise.all([
+    db
+      .select({
+        sup: supervisors,
+        schoolName: schools.name,
+        vehicleBusNumber: vehicles.busNumber,
+        vehicleExists: vehicles.id,
+      })
+      .from(supervisors)
+      .leftJoin(schools, eq(supervisors.schoolId, schools.id))
+      .leftJoin(vehicles, eq(supervisors.vehicleId, vehicles.id))
+      .orderBy(
+        ...getSchoolBusOrderBy(
+          schools.name,
+          vehicles.busNumber,
+          sql`CASE WHEN ${vehicles.id} IS NULL THEN 1 ELSE 0 END ASC`
+        ),
+        supervisors.id
+      ),
     db.select().from(schools),
     db.select().from(billingPeriods),
   ]);
@@ -1551,7 +1572,7 @@ export async function getSupervisorCycleSummaries(params: {
     };
   }
 
-  const scopedSups = allSups.filter((sup) => {
+  const scopedSups = supRows.filter(({ sup }) => {
     if (schoolId && sup.schoolId !== schoolId) return false;
     if (allowedSchoolIds && allowedSchoolIds.length > 0) {
       return sup.schoolId !== null && allowedSchoolIds.includes(sup.schoolId);
@@ -1567,7 +1588,7 @@ export async function getSupervisorCycleSummaries(params: {
   const rangeBySchoolId = new Map<number | 'none', SchoolBillingRange>();
   rangeBySchoolId.set('none', getBillingDateRangeForPeriod(month, year, null));
 
-  for (const sup of scopedSups) {
+  for (const { sup } of scopedSups) {
     const key = sup.schoolId ?? 'none';
     if (!rangeBySchoolId.has(key)) {
       const sc = sup.schoolId ? schoolMap[sup.schoolId] : null;
@@ -1578,7 +1599,7 @@ export async function getSupervisorCycleSummaries(params: {
     if (r.endDate > maxEnd) maxEnd = r.endDate;
   }
 
-  const supIds = scopedSups.map((s) => s.id);
+  const supIds = scopedSups.map(({ sup }) => sup.id);
   const tripsInWindow = await db
     .select()
     .from(supervisorTrips)
@@ -1597,7 +1618,7 @@ export async function getSupervisorCycleSummaries(params: {
     tripsBySup.set(t.supervisorId, list);
   }
 
-  return scopedSups.map((sup) => {
+  return scopedSups.map(({ sup, vehicleBusNumber }) => {
     const sc = sup.schoolId ? schoolMap[sup.schoolId] : null;
     const range = rangeBySchoolId.get(sup.schoolId ?? 'none')!;
     const rawTrips = tripsBySup.get(sup.id) || [];
@@ -1618,6 +1639,8 @@ export async function getSupervisorCycleSummaries(params: {
       phone: sup.phone,
       schoolId: sup.schoolId ?? null,
       schoolName: sc?.name || 'غير معين',
+      vehicleId: sup.vehicleId ?? null,
+      busNumber: vehicleBusNumber || '—',
       monthlySalary: Number(sup.monthlySalary || 0),
       tripsCount: morningTripsCount + eveningTripsCount,
       morningTripsCount,

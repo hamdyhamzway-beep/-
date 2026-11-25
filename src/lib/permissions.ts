@@ -108,6 +108,18 @@ export const STAFF_PERMISSIONS_CATALOG: PermissionDefinition[] = [
     descriptionAr: 'إضافة وتعديل وحذف الموظفين غير السائقين',
     group: 'admin',
   },
+  {
+    key: 'school_notes:read',
+    labelAr: 'عرض ملاحظات المدارس وتقاريرها',
+    descriptionAr: 'عرض ملاحظات المدارس اليومية والتقرير الشهري بدون أي بيانات مالية',
+    group: 'operations',
+  },
+  {
+    key: 'school_notes:write',
+    labelAr: 'تسجيل والرد على ملاحظات المدارس',
+    descriptionAr: 'تسجيل ملاحظات جديدة أو الرد وإغلاق الملاحظات',
+    group: 'operations',
+  },
 ];
 
 export const PERMISSION_LABEL_MAP: Record<string, string> = Object.fromEntries(
@@ -143,6 +155,7 @@ export const ROLE_DEFAULT_PERMISSIONS: Record<string, string[]> = {
     'employees:read',
   ],
   employee: ['dashboard:read'],
+  school_movement_manager: ['school_notes:read', 'school_notes:write'],
 };
 
 export function normalizeSchoolIds(raw: unknown): number[] {

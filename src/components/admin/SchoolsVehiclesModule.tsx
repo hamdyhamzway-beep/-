@@ -16,6 +16,7 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatArabicTripTime, formatEGP, normalizeTimeInputValue } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { formatBusBadgeLabel, groupBySchoolSortedByBus } from '../../lib/bus-sorting';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import type { FleetVehicle, RouteItem, SchoolItem } from '../../types';
 
@@ -824,7 +825,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                             </td>
                             <td className="py-3 px-4">
                               <div className="font-mono font-semibold text-slate-800">
-                                باص {drv.busNumber || '—'}
+                                {formatBusBadgeLabel(drv.busNumber, drv.vehicleId)}
                               </div>
                               <div className="text-slate-500">{drv.routeName || '—'}</div>
                             </td>
@@ -1002,7 +1003,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
                         {(s.drivers || []).slice(0, 4).map((drv) => (
                           <div key={drv.id} className="py-1 flex items-center justify-between gap-2">
                             <span className="font-semibold text-slate-800 truncate">
-                              {drv.fullName} ({drv.busNumber || '—'})
+                              {drv.fullName} ({formatBusBadgeLabel(drv.busNumber, drv.vehicleId)})
                             </span>
                             {canFinanceRead && (
                               <span className="font-mono font-bold text-[#0B1F3A] tabular-nums shrink-0">
@@ -1073,47 +1074,61 @@ export const SchoolsVehiclesModule: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {vehiclesList.map((v) => (
-                  <tr key={v.id} className="hover:bg-slate-50/70">
-                    <td className="py-3.5 px-4 font-mono font-bold text-[#0B1F3A]">{v.busNumber}</td>
-                    <td className="py-3.5 px-4">
-                      <div className="font-semibold text-slate-900">{v.registrationNumber}</div>
-                      <div className="text-slate-500">{v.vehicleType}</div>
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="text-slate-800">{v.schoolName}</div>
-                      <div className="text-slate-500">
-                        {v.driverName} ({v.driverCode})
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4">
-                      <div className="font-semibold text-slate-800">
-                        {v.operationalStatus === 'active'
-                          ? 'بالخدمة'
-                          : v.operationalStatus === 'maintenance'
-                          ? 'صيانة'
-                          : 'متوقفة'}
-                      </div>
-                      <div
-                        className={`text-[11px] font-medium ${
-                          v.isOnline ? 'text-emerald-700' : 'text-amber-700'
-                        }`}
-                      >
-                        {v.isOnline ? 'GPS متصل مباشر' : 'GPS غير متصل'}
-                      </div>
-                    </td>
-                    {canVehiclesWrite && (
-                      <td className="py-3.5 px-4">
-                        <button
-                          onClick={() => openEditVehicle(v)}
-                          className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
-                        >
-                          <Edit3 className="w-3 h-3" />
-                          تعديل
-                        </button>
+                {groupBySchoolSortedByBus(vehiclesList).map((grp) => (
+                  <React.Fragment key={grp.schoolKey}>
+                    <tr className="bg-slate-100/90 border-y border-slate-200">
+                      <td colSpan={canVehiclesWrite ? 5 : 4} className="py-2 px-4 font-bold text-[#0B1F3A] text-xs">
+                        <span>{grp.schoolName}</span>
+                        <span className="mr-2 font-mono text-[11px] font-semibold text-slate-500">
+                          ({grp.items.length} باص)
+                        </span>
                       </td>
-                    )}
-                  </tr>
+                    </tr>
+                    {grp.items.map((v) => (
+                      <tr key={v.id} className="hover:bg-slate-50/70">
+                        <td className="py-3.5 px-4 font-mono font-bold text-[#0B1F3A]">
+                          باص {v.busNumber}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-semibold text-slate-900">{v.registrationNumber}</div>
+                          <div className="text-slate-500">{v.vehicleType}</div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="text-slate-800">{v.schoolName}</div>
+                          <div className="text-slate-500">
+                            {v.driverName} ({v.driverCode})
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-semibold text-slate-800">
+                            {v.operationalStatus === 'active'
+                              ? 'بالخدمة'
+                              : v.operationalStatus === 'maintenance'
+                              ? 'صيانة'
+                              : 'متوقفة'}
+                          </div>
+                          <div
+                            className={`text-[11px] font-medium ${
+                              v.isOnline ? 'text-emerald-700' : 'text-amber-700'
+                            }`}
+                          >
+                            {v.isOnline ? 'GPS متصل مباشر' : 'GPS غير متصل'}
+                          </div>
+                        </td>
+                        {canVehiclesWrite && (
+                          <td className="py-3.5 px-4">
+                            <button
+                              onClick={() => openEditVehicle(v)}
+                              className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-[#0B1F3A] hover:bg-slate-100 cursor-pointer"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                              تعديل
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>
@@ -1139,7 +1154,7 @@ export const SchoolsVehiclesModule: React.FC = () => {
             <table className="w-full text-right text-xs">
               <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
                 <tr>
-                  <th className="py-3 px-4 font-semibold">اسم الخط</th>
+                  <th className="py-3 px-4 font-semibold">اسم الخط والباص</th>
                   <th className="py-3 px-4 font-semibold">المدرسة</th>
                   <th className="py-3 px-4 font-semibold">نقطة بداية الرحلة</th>
                   <th className="py-3 px-4 font-semibold">بداية ونهاية الرحلة بالوقت</th>
@@ -1152,7 +1167,16 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   const school = schoolsList.find((s) => s.id === r.schoolId);
                   return (
                     <tr key={r.id} className="hover:bg-slate-50/70">
-                      <td className="py-3 px-4 font-semibold text-[#0B1F3A]">{r.name}</td>
+                      <td className="py-3 px-4">
+                        <div className="font-semibold text-[#0B1F3A] flex items-center gap-2 flex-wrap">
+                          <span>{r.name}</span>
+                          {r.busNumber && (
+                            <span className="px-1.5 py-0.5 rounded bg-[#0B1F3A]/10 text-[#0B1F3A] font-mono text-[11px] font-bold">
+                              باص {r.busNumber}
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="py-3 px-4 text-slate-700">{school?.name || '—'}</td>
                       <td className="py-3 px-4 text-slate-600">
                         <div>{r.pickupArea || '—'}</div>
@@ -1607,31 +1631,6 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   {modalError}
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3">
-                <input
-                  required
-                  placeholder="رقم الباص *"
-                  value={vehicleForm.busNumber}
-                  onChange={(e) => setVehicleForm({ ...vehicleForm, busNumber: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono"
-                />
-                <input
-                  required
-                  placeholder="رقم اللوحة المعدنية *"
-                  value={vehicleForm.registrationNumber}
-                  onChange={(e) =>
-                    setVehicleForm({ ...vehicleForm, registrationNumber: e.target.value })
-                  }
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
-                />
-              </div>
-              <input
-                placeholder="نوع المركبة"
-                value={vehicleForm.vehicleType}
-                onChange={(e) => setVehicleForm({ ...vehicleForm, vehicleType: e.target.value })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2"
-              />
-
               {schoolsList.length > 0 && (
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-600 mb-1">
@@ -1655,11 +1654,54 @@ export const SchoolsVehiclesModule: React.FC = () => {
                   </select>
                 </div>
               )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label className="text-[11px] font-semibold text-slate-700">رقم الباص *</label>
+                    <span className="text-[10px] font-semibold text-[#0B1F3A] bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5 truncate max-w-[160px]">
+                      {schoolsList.find((s) => String(s.id) === vehicleForm.schoolId)?.name || 'بدون مدرسة'}
+                    </span>
+                  </div>
+                  <input
+                    required
+                    placeholder="مثال: 2 أو 10"
+                    value={vehicleForm.busNumber}
+                    onChange={(e) => setVehicleForm({ ...vehicleForm, busNumber: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono font-bold text-[#0B1F3A]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    رقم اللوحة المعدنية *
+                  </label>
+                  <input
+                    required
+                    placeholder="أ ب ج 1234"
+                    value={vehicleForm.registrationNumber}
+                    onChange={(e) =>
+                      setVehicleForm({ ...vehicleForm, registrationNumber: e.target.value })
+                    }
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">نوع المركبة</label>
+                <input
+                  placeholder="مثال: تويوتا هاي إس / مرسيدس"
+                  value={vehicleForm.vehicleType}
+                  onChange={(e) => setVehicleForm({ ...vehicleForm, vehicleType: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+
               <button
                 type="submit"
-                className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] cursor-pointer"
+                disabled={savingModal}
+                className="w-full rounded-lg bg-[#0B1F3A] py-2.5 font-semibold text-white hover:bg-[#13325c] disabled:opacity-50 cursor-pointer"
               >
-                حفظ المركبة
+                {savingModal ? 'جاري الحفظ...' : 'حفظ المركبة'}
               </button>
             </form>
           </div>

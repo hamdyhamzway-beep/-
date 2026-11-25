@@ -27,6 +27,7 @@ import {
   routes,
   salaries,
   schools,
+  schoolNotes,
   supervisors,
   supervisorNotes,
   supervisorTrips,
@@ -68,6 +69,7 @@ import {
   normalizeEgyptPhone,
 } from './src/lib/driver-session.ts';
 import {
+  ROLE_DEFAULT_PERMISSIONS,
   normalizePermissionsList,
   normalizeSchoolIds,
 } from './src/lib/permissions.ts';
@@ -118,6 +120,12 @@ import {
   initChatWebSocketServer,
   saveMessageToDb,
 } from './src/services/chat-service.ts';
+import {
+  compareBusNumbers,
+  compareSchoolAndBus,
+  getBusNumericOrderBy,
+  getSchoolBusOrderBy,
+} from './src/lib/bus-sorting.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -217,9 +225,28 @@ function sanitizeLicensePhotos(
 }
 
 async function getEnrichedDrivers() {
-  const [allDrivers, currentAssignments, allSchools, allVehicles, allRoutes] =
+  const [orderedDriverRows, currentAssignments, allSchools, allVehicles, allRoutes] =
     await Promise.all([
-      db.select().from(drivers).orderBy(drivers.driverCode),
+      db
+        .select({
+          driver: drivers,
+          assignId: driverAssignments.id,
+        })
+        .from(drivers)
+        .leftJoin(
+          driverAssignments,
+          and(eq(driverAssignments.driverId, drivers.id), eq(driverAssignments.isCurrent, true))
+        )
+        .leftJoin(schools, eq(driverAssignments.schoolId, schools.id))
+        .leftJoin(vehicles, eq(driverAssignments.vehicleId, vehicles.id))
+        .orderBy(
+          ...getSchoolBusOrderBy(
+            schools.name,
+            vehicles.busNumber,
+            sql`CASE WHEN ${driverAssignments.id} IS NULL OR ${vehicles.id} IS NULL THEN 1 ELSE 0 END ASC`
+          ),
+          drivers.id
+        ),
       db.select().from(driverAssignments).where(eq(driverAssignments.isCurrent, true)),
       db.select().from(schools),
       db.select().from(vehicles),
@@ -238,11 +265,21 @@ async function getEnrichedDrivers() {
   const assignByDriver: Record<number, typeof driverAssignments.$inferSelect> = {};
   for (const a of currentAssignments) assignByDriver[a.driverId] = a;
 
-  return allDrivers.map((d) => {
+  const seenDriverIds = new Set<number>();
+  const uniqueDrivers: Array<typeof drivers.$inferSelect> = [];
+  for (const row of orderedDriverRows) {
+    if (!seenDriverIds.has(row.driver.id)) {
+      seenDriverIds.add(row.driver.id);
+      uniqueDrivers.push(row.driver);
+    }
+  }
+
+  return uniqueDrivers.map((d) => {
     const assign = assignByDriver[d.id];
     const school = assign?.schoolId ? schoolById[assign.schoolId] : undefined;
     const vehicle = assign?.vehicleId ? vehicleById[assign.vehicleId] : undefined;
     const route = assign?.routeId ? routeById[assign.routeId] : undefined;
+    const hasCurrentVehicle = Boolean(assign && vehicle?.id);
 
     return {
       ...d,
@@ -252,6 +289,7 @@ async function getEnrichedDrivers() {
       schoolId: school?.id || null,
       schoolName: school?.name || 'غير معين',
       vehicleId: vehicle?.id || null,
+      hasCurrentVehicle,
       busNumber: vehicle?.busNumber || '—',
       registrationNumber: vehicle?.registrationNumber || '—',
       routeId: route?.id || null,
@@ -266,14 +304,18 @@ async function getEnrichedDrivers() {
 
 async function getFleetWithLatestGps() {
   const [
-    allVehicles,
+    orderedVehicles,
     allSchools,
     allRoutes,
     allDrivers,
     currentAssignments,
     latestGpsRows,
   ] = await Promise.all([
-    db.select().from(vehicles).orderBy(vehicles.busNumber),
+    db
+      .select({ v: vehicles })
+      .from(vehicles)
+      .leftJoin(schools, eq(vehicles.schoolId, schools.id))
+      .orderBy(...getSchoolBusOrderBy(schools.name, vehicles.busNumber), vehicles.id),
     db.select().from(schools),
     db.select().from(routes),
     db.select().from(drivers),
@@ -302,45 +344,47 @@ async function getFleetWithLatestGps() {
     if (a.vehicleId) assignByVehicle[a.vehicleId] = a;
   }
 
-  return allVehicles.map((v) => {
-    const assign = assignByVehicle[v.id];
-    const rawDriver = assign ? driverById[assign.driverId] : undefined;
-    const driver = rawDriver && rawDriver.accountStatus === 'active' ? rawDriver : undefined;
-    const effectiveSchoolId = v.schoolId ?? assign?.schoolId ?? null;
-    const school = effectiveSchoolId ? schoolById[effectiveSchoolId] : undefined;
-    const route = assign?.routeId ? routeById[assign.routeId] : undefined;
-    const gps = latestByVehicle[v.id] || null;
-    const fresh = gps ? isGpsFresh(gps.recordedAt, gps.isLive) : false;
+  return orderedVehicles
+    .map(({ v }) => {
+      const assign = assignByVehicle[v.id];
+      const rawDriver = assign ? driverById[assign.driverId] : undefined;
+      const driver = rawDriver && rawDriver.accountStatus === 'active' ? rawDriver : undefined;
+      const effectiveSchoolId = v.schoolId ?? assign?.schoolId ?? null;
+      const school = effectiveSchoolId ? schoolById[effectiveSchoolId] : undefined;
+      const route = assign?.routeId ? routeById[assign.routeId] : undefined;
+      const gps = latestByVehicle[v.id] || null;
+      const fresh = gps ? isGpsFresh(gps.recordedAt, gps.isLive) : false;
 
-    return {
-      ...v,
-      driverId: driver?.id || null,
-      driverName: driver?.fullName || 'غير معين',
-      driverCode: driver?.driverCode || '—',
-      driverPhone: driver?.phone || '',
-      schoolId: school?.id ?? effectiveSchoolId ?? null,
-      schoolName: school?.name || 'غير معين',
-      routeId: route?.id || null,
-      routeName: route?.name || '—',
-      gps: gps
-        ? {
-            lat: gps.lat,
-            lng: gps.lng,
-            speedKmh: fresh ? Math.round(gps.speedKmh) : 0,
-            accuracyMeters: gps.accuracyMeters,
-            recordedAt: gps.recordedAt,
-            isLive: fresh,
-            statusLabel:
-              v.gpsStatus === 'paused'
-                ? 'متوقف مؤقتاً'
-                : fresh
-                ? 'متصل مباشر'
-                : 'آخر موقع مسجل (غير متصل)',
-          }
-        : null,
-      isOnline: v.gpsStatus !== 'paused' && fresh,
-    };
-  });
+      return {
+        ...v,
+        driverId: driver?.id || null,
+        driverName: driver?.fullName || 'غير معين',
+        driverCode: driver?.driverCode || '—',
+        driverPhone: driver?.phone || '',
+        schoolId: school?.id ?? effectiveSchoolId ?? null,
+        schoolName: school?.name || 'غير معين',
+        routeId: route?.id || null,
+        routeName: route?.name || '—',
+        gps: gps
+          ? {
+              lat: gps.lat,
+              lng: gps.lng,
+              speedKmh: fresh ? Math.round(gps.speedKmh) : 0,
+              accuracyMeters: gps.accuracyMeters,
+              recordedAt: gps.recordedAt,
+              isLive: fresh,
+              statusLabel:
+                v.gpsStatus === 'paused'
+                  ? 'متوقف مؤقتاً'
+                  : fresh
+                  ? 'متصل مباشر'
+                  : 'آخر موقع مسجل (غير متصل)',
+            }
+          : null,
+        isOnline: v.gpsStatus !== 'paused' && fresh,
+      };
+    })
+    .sort((a, b) => compareSchoolAndBus(a, b));
 }
 
 async function startServer() {
@@ -1322,6 +1366,8 @@ async function startServer() {
     await tx.update(dailyReports).set({ userId: null }).where(eq(dailyReports.userId, userId));
     await tx.update(financialCustodies).set({ handedByUserId: null }).where(eq(financialCustodies.handedByUserId, userId));
     await tx.update(financialCustodies).set({ settledByUserId: null }).where(eq(financialCustodies.settledByUserId, userId));
+    await tx.update(schoolNotes).set({ createdByUserId: fallbackAdminUserId }).where(eq(schoolNotes.createdByUserId, userId));
+    await tx.update(schoolNotes).set({ resolvedByUserId: null }).where(eq(schoolNotes.resolvedByUserId, userId));
 
     // 3. Delete the user row permanently
     await tx.delete(users).where(eq(users.id, userId));
@@ -1384,25 +1430,50 @@ async function startServer() {
 
   async function resolveVehicleIdForDriver(
     tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
-    opts: { vehicleId?: unknown; busNumber?: unknown }
+    opts: { vehicleId?: unknown; busNumber?: unknown; schoolId?: number | null }
   ): Promise<number | null> {
+    if (opts.vehicleId && Number(opts.vehicleId) > 0 && opts.busNumber === undefined) {
+      return Number(opts.vehicleId);
+    }
+
     if (opts.busNumber !== undefined) {
       const trimmed = normalizeArabicDigits(String(opts.busNumber ?? '')).trim();
       if (!trimmed || PLACEHOLDER_ASSIGNMENTS.has(trimmed)) return null;
 
+      const schoolScopeCond =
+        opts.schoolId !== undefined && opts.schoolId !== null
+          ? eq(vehicles.schoolId, opts.schoolId)
+          : isNull(vehicles.schoolId);
+
       const [existingVehicle] = await tx
         .select()
         .from(vehicles)
-        .where(or(eq(vehicles.busNumber, trimmed), eq(vehicles.registrationNumber, trimmed)))
+        .where(
+          and(
+            schoolScopeCond,
+            or(eq(vehicles.busNumber, trimmed), eq(vehicles.registrationNumber, trimmed))
+          )
+        )
         .limit(1);
       if (existingVehicle) return existingVehicle.id;
+
+      // Ensure unique registrationNumber if auto-creating a stub vehicle for this school
+      const [existingReg] = await tx
+        .select({ id: vehicles.id })
+        .from(vehicles)
+        .where(eq(vehicles.registrationNumber, trimmed))
+        .limit(1);
+      const safeReg = existingReg
+        ? `${trimmed}-S${opts.schoolId ?? 0}-${Date.now().toString().slice(-4)}`
+        : trimmed;
 
       const [created] = await tx
         .insert(vehicles)
         .values({
           busNumber: trimmed,
-          registrationNumber: trimmed,
+          registrationNumber: safeReg,
           vehicleType: '',
+          schoolId: opts.schoolId ?? null,
           operationalStatus: 'active',
         })
         .returning();
@@ -1617,7 +1688,11 @@ async function startServer() {
               schoolId: scopedTargetSchoolId ?? schoolId,
               schoolName,
             });
-            const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
+            const resolvedVehicleId = await resolveVehicleIdForDriver(tx, {
+              vehicleId,
+              busNumber,
+              schoolId: resolvedSchoolId,
+            });
             const resolvedRouteId = await resolveRouteIdForDriver(tx, {
               schoolId: resolvedSchoolId,
               routeId,
@@ -1776,7 +1851,11 @@ async function startServer() {
             if (!isSchoolUnrestricted(req.dbUser) && (!resolvedSchoolId || !isSchoolAllowed(req.dbUser, resolvedSchoolId))) {
               throw new Error('SCHOOL_FORBIDDEN');
             }
-            const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
+            const resolvedVehicleId = await resolveVehicleIdForDriver(tx, {
+              vehicleId,
+              busNumber,
+              schoolId: resolvedSchoolId,
+            });
             const resolvedRouteId = await resolveRouteIdForDriver(tx, {
               schoolId: resolvedSchoolId,
               routeId,
@@ -2248,15 +2327,60 @@ async function startServer() {
   app.get('/api/schools', requireAuth, requireAdminOrStaff, requirePermission('schools:read'), async (req: AuthRequest, res) => {
     try {
       const activePeriod = await getActiveBillingPeriod();
-      const [rawAllSchools, rawAllRoutes, enrichedDrivers, fleet] = await Promise.all([
+      const [rawAllSchools, rawAllRoutes, enrichedDrivers, fleet, activeAssignments, rawSupervisors] = await Promise.all([
         db.select().from(schools).orderBy(schools.name),
         db.select().from(routes).orderBy(routes.name),
         getEnrichedDrivers(),
         getFleetWithLatestGps(),
+        db
+          .select({
+            routeId: driverAssignments.routeId,
+            vehicleId: driverAssignments.vehicleId,
+          })
+          .from(driverAssignments)
+          .where(eq(driverAssignments.isCurrent, true)),
+        db
+          .select({
+            routeId: supervisors.routeId,
+            vehicleId: supervisors.vehicleId,
+          })
+          .from(supervisors),
       ]);
 
+      const fleetById = new Map(fleet.map((v) => [v.id, v]));
+      const vehicleByRouteId = new Map<number, (typeof fleet)[number]>();
+      for (const a of activeAssignments) {
+        if (a.routeId && a.vehicleId && !vehicleByRouteId.has(a.routeId)) {
+          const v = fleetById.get(a.vehicleId);
+          if (v) vehicleByRouteId.set(a.routeId, v);
+        }
+      }
+      for (const sv of rawSupervisors) {
+        if (sv.routeId && sv.vehicleId && !vehicleByRouteId.has(sv.routeId)) {
+          const v = fleetById.get(sv.vehicleId);
+          if (v) vehicleByRouteId.set(sv.routeId, v);
+        }
+      }
+
+      const enrichRouteWithVehicle = (r: (typeof rawAllRoutes)[number]) => {
+        const linkedVehicle = vehicleByRouteId.get(r.id);
+        return {
+          ...r,
+          vehicleId: linkedVehicle?.id ?? null,
+          busNumber: linkedVehicle?.busNumber || '',
+          vehicleType: linkedVehicle?.vehicleType || '',
+        };
+      };
+
       const allSchools = rawAllSchools.filter((s) => isSchoolAllowed(req.dbUser, s.id));
-      const allRoutes = rawAllRoutes.filter((r) => isSchoolAllowed(req.dbUser, r.schoolId));
+      const allRoutes = rawAllRoutes
+        .filter((r) => isSchoolAllowed(req.dbUser, r.schoolId))
+        .map(enrichRouteWithVehicle)
+        .sort(
+          (a, b) =>
+            compareBusNumbers(a.busNumber, b.busNumber) ||
+            a.name.localeCompare(b.name, 'ar')
+        );
 
       const data = await runWithRlsContext({ role: 'system', driverId: null }, async () =>
         Promise.all(
@@ -2267,13 +2391,19 @@ async function startServer() {
             const currentBillingRange = getCurrentBillingRangeForSchool(schoolCfg);
             const activePeriodRange = getBillingDateRangeForPeriod(scPeriod.month, scPeriod.year, schoolCfg);
 
-            const schoolVehicles = fleet.filter(
-              (v) => v.schoolId === s.id && v.operationalStatus !== 'inactive'
-            );
-            const schoolDrivers = enrichedDrivers.filter(
-              (d) => d.schoolId === s.id && d.accountStatus === 'active'
-            );
-            const schoolRoutes = allRoutes.filter((r) => r.schoolId === s.id);
+            const schoolVehicles = fleet
+              .filter((v) => v.schoolId === s.id && v.operationalStatus !== 'inactive')
+              .sort((a, b) => compareBusNumbers(a.busNumber, b.busNumber));
+            const schoolDrivers = enrichedDrivers
+              .filter((d) => d.schoolId === s.id && d.accountStatus === 'active')
+              .sort((a, b) => compareSchoolAndBus(a, b));
+            const schoolRoutes = allRoutes
+              .filter((r) => r.schoolId === s.id)
+              .sort(
+                (a, b) =>
+                  compareBusNumbers(a.busNumber, b.busNumber) ||
+                  a.name.localeCompare(b.name, 'ar')
+              );
 
             const driverSummaries = await Promise.all(
               schoolDrivers.map(async (d) => {
@@ -2296,6 +2426,7 @@ async function startServer() {
                   driverCode: d.driverCode,
                   fullName: d.fullName,
                   phone: d.phone,
+                  vehicleId: d.vehicleId ?? null,
                   busNumber: d.busNumber,
                   routeName: d.routeName,
                   monthlyAgreedSalary: Number(d.monthlyAgreedSalary || 0),
@@ -2538,6 +2669,9 @@ async function startServer() {
   // التحكم المباشر في بداية ونهاية كل فترة شهرية لكل مدرسة
   app.get('/api/schools/:id/billing-period', requireAuth, requireAdminOrStaff, async (req: AuthRequest, res) => {
     try {
+      if (req.dbUser?.roleSlug === 'school_movement_manager') {
+        return res.status(403).json({ error: 'ليس لديك صلاحية الاطلاع على البيانات المالية للمدارس' });
+      }
       const id = Number(req.params.id);
       if (!isSchoolAllowed(req.dbUser, id)) {
         return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
@@ -2729,7 +2863,9 @@ async function startServer() {
         operationalStatus,
         notes,
       } = req.body;
-      if (!busNumber || !registrationNumber) {
+      const cleanBusNumber = normalizeArabicDigits(String(busNumber ?? '')).trim();
+      const cleanRegNumber = normalizeArabicDigits(String(registrationNumber ?? '')).trim();
+      if (!cleanBusNumber || !cleanRegNumber) {
         return res.status(400).json({ error: 'رقم الباص ورقم اللوحة مطلوبان' });
       }
       const created = await db.transaction(async (tx) => {
@@ -2750,11 +2886,25 @@ async function startServer() {
         ) {
           throw new Error('SCHOOL_FORBIDDEN');
         }
+
+        const schoolScopeCond =
+          resolvedSchoolId !== null
+            ? eq(vehicles.schoolId, resolvedSchoolId)
+            : isNull(vehicles.schoolId);
+        const [dupBusInSchool] = await tx
+          .select({ id: vehicles.id })
+          .from(vehicles)
+          .where(and(schoolScopeCond, eq(vehicles.busNumber, cleanBusNumber)))
+          .limit(1);
+        if (dupBusInSchool) {
+          throw new Error('DUPLICATE_SCHOOL_BUS');
+        }
+
         const [v] = await tx
           .insert(vehicles)
           .values({
-            busNumber: String(busNumber).trim(),
-            registrationNumber: String(registrationNumber).trim(),
+            busNumber: cleanBusNumber,
+            registrationNumber: cleanRegNumber,
             vehicleType: vehicleType || '',
             schoolId: resolvedSchoolId ?? null,
             operationalStatus: operationalStatus || 'active',
@@ -2780,8 +2930,18 @@ async function startServer() {
       if (error instanceof Error && error.message === 'SCHOOL_FORBIDDEN') {
         return res.status(403).json({ error: 'لا يمكنك إضافة مركبة خارج نطاق المدارس المصرح لك بها' });
       }
+      if (error instanceof Error && error.message === 'DUPLICATE_SCHOOL_BUS') {
+        return res.status(409).json({ error: 'رقم الباص ده مستخدم في عربية تانية في نفس المدرسة' });
+      }
+      const pgInfo = extractDatabaseErrorInfo(error);
+      if (pgInfo.code === '23505') {
+        if (pgInfo.constraint === 'vehicles_school_id_bus_number_unique') {
+          return res.status(409).json({ error: 'رقم الباص ده مستخدم في عربية تانية في نفس المدرسة' });
+        }
+        return res.status(409).json({ error: 'رقم اللوحة مسجل في مركبة أخرى بالفعل' });
+      }
       console.error('Create vehicle error:', error);
-      res.status(500).json({ error: 'تعذر إضافة المركبة (تأكد من عدم تكرار رقم الباص أو اللوحة)' });
+      res.status(500).json({ error: 'تعذر إضافة المركبة (تأكد من عدم تكرار رقم الباص في نفس المدرسة أو رقم اللوحة)' });
     }
   });
 
@@ -2825,11 +2985,42 @@ async function startServer() {
         ) {
           throw new Error('SCHOOL_FORBIDDEN');
         }
+        const nextBusNumber =
+          busNumber !== undefined
+            ? normalizeArabicDigits(String(busNumber)).trim()
+            : existing.busNumber;
+        if (!nextBusNumber) {
+          throw new Error('INVALID_BUS_NUMBER');
+        }
+        const nextRegNumber =
+          registrationNumber !== undefined
+            ? normalizeArabicDigits(String(registrationNumber)).trim()
+            : existing.registrationNumber;
+
+        const schoolScopeCond =
+          nextSchoolId !== null && nextSchoolId !== undefined
+            ? eq(vehicles.schoolId, nextSchoolId)
+            : isNull(vehicles.schoolId);
+        const [dupBusInSchool] = await tx
+          .select({ id: vehicles.id })
+          .from(vehicles)
+          .where(
+            and(
+              ne(vehicles.id, id),
+              schoolScopeCond,
+              eq(vehicles.busNumber, nextBusNumber)
+            )
+          )
+          .limit(1);
+        if (dupBusInSchool) {
+          throw new Error('DUPLICATE_SCHOOL_BUS');
+        }
+
         const [v] = await tx
           .update(vehicles)
           .set({
-            busNumber: busNumber ?? existing.busNumber,
-            registrationNumber: registrationNumber ?? existing.registrationNumber,
+            busNumber: nextBusNumber,
+            registrationNumber: nextRegNumber || existing.registrationNumber,
             vehicleType: vehicleType ?? existing.vehicleType,
             schoolId: nextSchoolId ?? null,
             operationalStatus: operationalStatus ?? existing.operationalStatus,
@@ -2844,6 +3035,19 @@ async function startServer() {
     } catch (error) {
       if (error instanceof Error && error.message === 'SCHOOL_FORBIDDEN') {
         return res.status(403).json({ error: 'لا يمكنك نقل المركبة لمدرسة خارج نطاق صلاحياتك' });
+      }
+      if (error instanceof Error && error.message === 'INVALID_BUS_NUMBER') {
+        return res.status(400).json({ error: 'رقم الباص مطلوب' });
+      }
+      if (error instanceof Error && error.message === 'DUPLICATE_SCHOOL_BUS') {
+        return res.status(409).json({ error: 'رقم الباص ده مستخدم في عربية تانية في نفس المدرسة' });
+      }
+      const pgInfo = extractDatabaseErrorInfo(error);
+      if (pgInfo.code === '23505') {
+        if (pgInfo.constraint === 'vehicles_school_id_bus_number_unique') {
+          return res.status(409).json({ error: 'رقم الباص ده مستخدم في عربية تانية في نفس المدرسة' });
+        }
+        return res.status(409).json({ error: 'رقم اللوحة مسجل في مركبة أخرى بالفعل' });
       }
       console.error('Update vehicle error:', error);
       res.status(500).json({ error: 'تعذر تحديث المركبة' });
@@ -3177,25 +3381,28 @@ async function startServer() {
             return isSchoolClosedForPeriod(drv?.schoolId) || activeDriverIds.has(s.driverId);
           });
 
-        const enrichedSalariesAll = monthSalariesAll.map((s) => {
-          const drv = driverMap[s.driverId];
-          return {
-            ...s,
-            baseSalary: Number(s.baseSalary),
-            totalAdvances: Number(s.totalAdvances),
-            totalCoverageDeductions: Number(s.totalCoverageDeductions),
-            totalCoverageAdditions: Number(s.totalCoverageAdditions || 0),
-            otherDeductions: Number(s.otherDeductions),
-            bonuses: Number(s.bonuses),
-            netSalary: Number(s.netSalary),
-            driverName: drv?.fullName || '—',
-            driverCode: drv?.driverCode || '—',
-            schoolId: drv?.schoolId ?? null,
-            schoolName: drv?.schoolName || 'غير معين',
-            busNumber: drv?.busNumber || '—',
-            routeName: drv?.routeName || '—',
-          };
-        });
+        const enrichedSalariesAll = monthSalariesAll
+          .map((s) => {
+            const drv = driverMap[s.driverId];
+            return {
+              ...s,
+              baseSalary: Number(s.baseSalary),
+              totalAdvances: Number(s.totalAdvances),
+              totalCoverageDeductions: Number(s.totalCoverageDeductions),
+              totalCoverageAdditions: Number(s.totalCoverageAdditions || 0),
+              otherDeductions: Number(s.otherDeductions),
+              bonuses: Number(s.bonuses),
+              netSalary: Number(s.netSalary),
+              driverName: drv?.fullName || '—',
+              driverCode: drv?.driverCode || '—',
+              schoolId: drv?.schoolId ?? null,
+              schoolName: drv?.schoolName || 'غير معين',
+              vehicleId: drv?.vehicleId ?? null,
+              busNumber: drv?.busNumber || '—',
+              routeName: drv?.routeName || '—',
+            };
+          })
+          .sort((a, b) => compareSchoolAndBus(a, b));
 
         const salariesBySchoolKey = new Map<string, typeof enrichedSalariesAll>();
         for (const sal of enrichedSalariesAll) {
@@ -4664,54 +4871,92 @@ async function startServer() {
     async (req: AuthRequest, res) => {
       try {
         const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
-          const [allSchools, allDrivers, currentAssignments, allSupervisors, allEmployees] =
-            await Promise.all([
-              db.select().from(schools).where(eq(schools.isActive, true)).orderBy(schools.name),
-              db
-                .select()
-                .from(drivers)
-                .where(eq(drivers.accountStatus, 'active'))
-                .orderBy(drivers.fullName),
-              db
-                .select()
-                .from(driverAssignments)
-                .where(eq(driverAssignments.isCurrent, true)),
-              db
-                .select()
-                .from(supervisors)
-                .where(eq(supervisors.accountStatus, 'active'))
-                .orderBy(supervisors.fullName),
-              db
-                .select()
-                .from(employees)
-                .where(eq(employees.status, 'active'))
-                .orderBy(employees.fullName),
-            ]);
+          const [allSchools, driverRows, supervisorRows, allEmployees] = await Promise.all([
+            db.select().from(schools).where(eq(schools.isActive, true)).orderBy(schools.name),
+            db
+              .select({
+                driver: drivers,
+                schoolId: driverAssignments.schoolId,
+                schoolName: schools.name,
+                vehicleId: vehicles.id,
+                busNumber: vehicles.busNumber,
+              })
+              .from(drivers)
+              .leftJoin(
+                driverAssignments,
+                and(eq(driverAssignments.driverId, drivers.id), eq(driverAssignments.isCurrent, true))
+              )
+              .leftJoin(schools, eq(driverAssignments.schoolId, schools.id))
+              .leftJoin(vehicles, eq(driverAssignments.vehicleId, vehicles.id))
+              .where(eq(drivers.accountStatus, 'active'))
+              .orderBy(
+                ...getSchoolBusOrderBy(
+                  schools.name,
+                  vehicles.busNumber,
+                  sql`CASE WHEN ${driverAssignments.id} IS NULL OR ${vehicles.id} IS NULL THEN 1 ELSE 0 END ASC`
+                ),
+                drivers.id
+              ),
+            db
+              .select({
+                supervisor: supervisors,
+                schoolName: schools.name,
+                vehicleId: vehicles.id,
+                busNumber: vehicles.busNumber,
+              })
+              .from(supervisors)
+              .leftJoin(schools, eq(supervisors.schoolId, schools.id))
+              .leftJoin(vehicles, eq(supervisors.vehicleId, vehicles.id))
+              .where(eq(supervisors.accountStatus, 'active'))
+              .orderBy(
+                ...getSchoolBusOrderBy(
+                  schools.name,
+                  vehicles.busNumber,
+                  sql`CASE WHEN ${vehicles.id} IS NULL THEN 1 ELSE 0 END ASC`
+                ),
+                supervisors.id
+              ),
+            db
+              .select()
+              .from(employees)
+              .where(eq(employees.status, 'active'))
+              .orderBy(employees.fullName),
+          ]);
 
-          const driverSchoolMap = new Map<number, number | null>(
-            currentAssignments.map((a) => [a.driverId, a.schoolId ?? null])
-          );
+          const seenDrv = new Set<number>();
+          const uniqueDrivers = driverRows
+            .filter((row) => {
+              if (seenDrv.has(row.driver.id)) return false;
+              seenDrv.add(row.driver.id);
+              return true;
+            })
+            .filter((row) => !row.schoolId || isSchoolAllowed(req.dbUser, row.schoolId))
+            .map((row) => ({
+              id: row.driver.id,
+              fullName: row.driver.fullName,
+              driverCode: row.driver.driverCode,
+              phone: row.driver.phone || '',
+              schoolId: row.schoolId ?? null,
+              schoolName: row.schoolName || 'غير معين',
+              vehicleId: row.vehicleId ?? null,
+              busNumber: row.busNumber || '—',
+            }));
 
           return {
             schools: allSchools
               .filter((s) => isSchoolAllowed(req.dbUser, s.id))
               .map((s) => ({ id: s.id, name: s.name })),
-            drivers: allDrivers
-              .map((d) => ({
-                id: d.id,
-                fullName: d.fullName,
-                driverCode: d.driverCode,
-                phone: d.phone || '',
-                schoolId: driverSchoolMap.get(d.id) ?? null,
-              }))
-              .filter((d) => !d.schoolId || isSchoolAllowed(req.dbUser, d.schoolId)),
-            supervisors: allSupervisors
-              .filter((sv) => !sv.schoolId || isSchoolAllowed(req.dbUser, sv.schoolId))
-              .map((sv) => ({
-                id: sv.id,
-                fullName: sv.fullName,
-                phone: sv.phone || '',
-                schoolId: sv.schoolId ?? null,
+            drivers: uniqueDrivers,
+            supervisors: supervisorRows
+              .filter((row) => !row.supervisor.schoolId || isSchoolAllowed(req.dbUser, row.supervisor.schoolId))
+              .map((row) => ({
+                id: row.supervisor.id,
+                fullName: row.supervisor.fullName,
+                phone: row.supervisor.phone || '',
+                schoolId: row.supervisor.schoolId ?? null,
+                schoolName: row.schoolName || 'غير معينة',
+                vehicleId: row.vehicleId ?? null,
+                busNumber: row.busNumber || '—',
               })),
             employees: allEmployees
               .filter((em) => !em.schoolId || isSchoolAllowed(req.dbUser, em.schoolId))
@@ -6701,6 +6946,9 @@ async function startServer() {
   // ==========================================
   app.get('/api/daily-reports', requireAuth, async (req: AuthRequest, res) => {
     try {
+      if (req.dbUser?.roleSlug === 'school_movement_manager') {
+        return res.status(403).json({ error: 'غير مصرح لمدير حركة المدرسة بالاطلاع على تقارير الموظفين المالية' });
+      }
       const { reportDate, targetAudience, status, schoolId: rawSchoolFilter } = req.query;
       const user = req.dbUser!;
       const isManager = user.roleSlug === 'super_admin' || user.permissions.includes('*');
@@ -6784,6 +7032,9 @@ async function startServer() {
 
   app.post('/api/daily-reports', requireAuth, async (req: AuthRequest, res) => {
     try {
+      if (req.dbUser?.roleSlug === 'school_movement_manager') {
+        return res.status(403).json({ error: 'استخدم شاشة تسجيل الملاحظات المخصصة لمدير حركة المدرسة' });
+      }
       const user = req.dbUser!;
       const {
         rawContent,
@@ -7058,6 +7309,9 @@ async function startServer() {
   // 5d. Monthly Settlement / Closing & Fresh-Month Rollover (التصفية الشهرية وبدء شهر جديد على بياض)
   app.get('/api/finance/period', requireAuth, async (req: AuthRequest, res) => {
     try {
+      if (req.dbUser?.roleSlug === 'school_movement_manager') {
+        return res.status(403).json({ error: 'ليس لديك صلاحية الوصول إلى البيانات المالية' });
+      }
       const schoolId = req.query.schoolId && req.query.schoolId !== 'all' ? Number(req.query.schoolId) : null;
       if (schoolId && !isSchoolAllowed(req.dbUser, schoolId)) {
         return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
@@ -8148,6 +8402,9 @@ async function startServer() {
       if (req.dbUser?.roleSlug === 'supervisor' || req.supervisorRecord) {
         return res.json({ notifications: [] });
       }
+      if (req.dbUser?.roleSlug === 'school_movement_manager') {
+        return res.status(403).json({ error: 'ليس لديك صلاحية عرض إشعارات الإدارة' });
+      }
       if (req.dbUser?.roleSlug === 'driver') {
         if (!req.driverRecord) return res.json({ notifications: [] });
         const rows = await db
@@ -8421,8 +8678,28 @@ async function startServer() {
       }
 
       const nextSchools = targetRole.slug === 'super_admin' ? [] : normalizeSchoolIds(assignedSchoolIds);
+      if (targetRole.slug === 'school_movement_manager') {
+        if (nextSchools.length !== 1) {
+          return res.status(400).json({
+            error: 'دور «مدير حركة مدرسة» يتطلب اختيار مدرسة واحدة بالضبط في المدارس المخصصة',
+          });
+        }
+        const [schoolCheck] = await db
+          .select({ id: schools.id })
+          .from(schools)
+          .where(eq(schools.id, nextSchools[0]))
+          .limit(1);
+        if (!schoolCheck) {
+          return res.status(400).json({ error: 'المدرسة المختارة غير موجودة' });
+        }
+      }
+
       const nextCustomPerms =
-        targetRole.slug === 'super_admin' ? null : normalizePermissionsList(customPermissions);
+        targetRole.slug === 'super_admin'
+          ? null
+          : targetRole.slug === 'school_movement_manager'
+          ? [...ROLE_DEFAULT_PERMISSIONS.school_movement_manager]
+          : normalizePermissionsList(customPermissions);
 
       const [created] = await db
         .insert(users)
@@ -8540,9 +8817,27 @@ async function startServer() {
           ? normalizeSchoolIds(assignedSchoolIds)
           : normalizeSchoolIds(existing.assignedSchoolIds);
 
+      if (nextRole.slug === 'school_movement_manager') {
+        if (nextSchools.length !== 1) {
+          return res.status(400).json({
+            error: 'دور «مدير حركة مدرسة» يتطلب اختيار مدرسة واحدة بالضبط في المدارس المخصصة',
+          });
+        }
+        const [schoolCheck] = await db
+          .select({ id: schools.id })
+          .from(schools)
+          .where(eq(schools.id, nextSchools[0]))
+          .limit(1);
+        if (!schoolCheck) {
+          return res.status(400).json({ error: 'المدرسة المختارة غير موجودة' });
+        }
+      }
+
       const nextCustomPerms =
         nextRole.slug === 'super_admin'
           ? null
+          : nextRole.slug === 'school_movement_manager'
+          ? [...ROLE_DEFAULT_PERMISSIONS.school_movement_manager]
           : customPermissions !== undefined
           ? normalizePermissionsList(customPermissions)
           : existing.customPermissions;
@@ -8835,11 +9130,14 @@ async function startServer() {
         });
 
         const activeIds = new Set(activeDrivers.map((d) => d.id));
-        const monthSalaries = rawMonthSalaries.filter((s) => {
-          if (!scopedDriverIds.has(s.driverId)) return false;
-          const drv = driverById[s.driverId];
-          return isClosedForSchool(drv?.schoolId) || activeIds.has(s.driverId);
-        });
+        const driverOrderIdx = new Map(allDrivers.map((d, idx) => [d.id, idx]));
+        const monthSalaries = rawMonthSalaries
+          .filter((s) => {
+            if (!scopedDriverIds.has(s.driverId)) return false;
+            const drv = driverById[s.driverId];
+            return isClosedForSchool(drv?.schoolId) || activeIds.has(s.driverId);
+          })
+          .sort((a, b) => (driverOrderIdx.get(a.driverId) ?? 999999) - (driverOrderIdx.get(b.driverId) ?? 999999));
         const reportDriverIds = new Set(monthSalaries.map((s) => s.driverId));
         const enrichedDrivers = allDrivers.filter(
           (d) => reportDriverIds.has(d.id) || d.accountStatus === 'active'
@@ -9229,7 +9527,7 @@ async function startServer() {
     return runWithRlsContext({ role: 'system', driverId: null }, async () => {
       const todayDate = getTodayDateString();
       const [
-        allSups,
+        orderedSupRows,
         allSchools,
         allSchoolPeriods,
         allVehicles,
@@ -9238,7 +9536,19 @@ async function startServer() {
         allDrivers,
         todayTrips,
       ] = await Promise.all([
-        db.select().from(supervisors).orderBy(supervisors.supervisorCode),
+        db
+          .select({ sup: supervisors })
+          .from(supervisors)
+          .leftJoin(schools, eq(supervisors.schoolId, schools.id))
+          .leftJoin(vehicles, eq(supervisors.vehicleId, vehicles.id))
+          .orderBy(
+            ...getSchoolBusOrderBy(
+              schools.name,
+              vehicles.busNumber,
+              sql`CASE WHEN ${vehicles.id} IS NULL THEN 1 ELSE 0 END ASC`
+            ),
+            supervisors.id
+          ),
         db
           .select({
             id: schools.id,
@@ -9341,7 +9651,7 @@ async function startServer() {
       tripBySupervisor[t.supervisorId] = t;
     }
 
-    return allSups.map((sup) => {
+    return orderedSupRows.map(({ sup }) => {
       const school = sup.schoolId ? schoolById[sup.schoolId] : undefined;
       const billingRange =
         (sup.schoolId ? rangeBySchoolKey.get(String(sup.schoolId)) : undefined) ||
@@ -9392,7 +9702,9 @@ async function startServer() {
         schoolLat: school?.lat ?? null,
         schoolLng: school?.lng ?? null,
         vehicleId: sup.vehicleId,
+        hasCurrentVehicle: Boolean(vehicle?.id),
         busNumber: vehicle?.busNumber || '—',
+        vehicleType: vehicle?.vehicleType || '',
         registrationNumber: vehicle?.registrationNumber || '—',
         routeId: sup.routeId,
         routeName: route?.name || 'غير محدد',
@@ -9498,6 +9810,10 @@ async function startServer() {
     requireAdminOrStaff,
     async (req: AuthRequest, res) => {
       try {
+        if (req.dbUser?.roleSlug === 'school_movement_manager') {
+          return res.status(403).json({ error: 'لا تملك صلاحية إضافة مشرفات' });
+        }
+
         const {
           supervisorCode,
           fullName,
@@ -9588,16 +9904,48 @@ async function startServer() {
                 : schoolId;
             const resolvedSchoolId = await resolveSchoolIdForDriver(tx, {
               schoolId: defaultSchoolId,
-              schoolName: safeSchoolName,
+              schoolName: safeSchoolName || undefined,
             });
+            if (!resolvedSchoolId) {
+              throw new Error('INVALID_FIELDS:يجب اختيار المدرسة أولاً للمشرفة');
+            }
             if (
               !isSchoolUnrestricted(req.dbUser) &&
-              (!resolvedSchoolId || !isSchoolAllowed(req.dbUser, resolvedSchoolId))
+              !isSchoolAllowed(req.dbUser, resolvedSchoolId)
             ) {
               throw new Error('SCHOOL_FORBIDDEN');
             }
-            const resolvedVehicleId = await resolveVehicleIdForDriver(tx, { vehicleId, busNumber });
-            const resolvedRouteId = await resolveRouteIdForDriver(tx, {
+
+            let resolvedVehicleId: number | null = null;
+            if (vehicleId && Number(vehicleId) > 0) {
+              const [veh] = await tx
+                .select({ id: vehicles.id, schoolId: vehicles.schoolId })
+                .from(vehicles)
+                .where(eq(vehicles.id, Number(vehicleId)))
+                .limit(1);
+              if (!veh || (veh.schoolId ?? null) !== resolvedSchoolId) {
+                throw new Error('INVALID_FIELDS:الباص المختار غير موجود في المدرسة المحددة');
+              }
+              resolvedVehicleId = veh.id;
+            } else if (busNumber !== undefined) {
+              const cleanBus = normalizeArabicDigits(String(busNumber ?? '')).trim();
+              if (cleanBus && !PLACEHOLDER_ASSIGNMENTS.has(cleanBus)) {
+                const [veh] = await tx
+                  .select({ id: vehicles.id, schoolId: vehicles.schoolId })
+                  .from(vehicles)
+                  .where(and(eq(vehicles.schoolId, resolvedSchoolId), eq(vehicles.busNumber, cleanBus)))
+                  .limit(1);
+                if (!veh) {
+                  throw new Error('INVALID_FIELDS:الباص المختار غير موجود في المدرسة المحددة');
+                }
+                resolvedVehicleId = veh.id;
+              }
+            }
+            if (!resolvedVehicleId) {
+              throw new Error('INVALID_FIELDS:يجب اختيار الباص التابع للمدرسة المحددة');
+            }
+
+            let resolvedRouteId = await resolveRouteIdForDriver(tx, {
               schoolId: resolvedSchoolId,
               routeId,
               routeName: effectiveRouteName || undefined,
@@ -9605,6 +9953,29 @@ async function startServer() {
               pickupTime: cleanPickupTime,
               dropoffTime: cleanDropoffTime,
             });
+
+            if (!resolvedRouteId) {
+              const [curAssign] = await tx
+                .select({ routeId: driverAssignments.routeId })
+                .from(driverAssignments)
+                .where(
+                  and(
+                    eq(driverAssignments.vehicleId, resolvedVehicleId),
+                    eq(driverAssignments.isCurrent, true)
+                  )
+                )
+                .limit(1);
+              if (curAssign?.routeId) {
+                const [linkedRoute] = await tx
+                  .select({ id: routes.id, schoolId: routes.schoolId })
+                  .from(routes)
+                  .where(eq(routes.id, curAssign.routeId))
+                  .limit(1);
+                if (linkedRoute && linkedRoute.schoolId === resolvedSchoolId) {
+                  resolvedRouteId = linkedRoute.id;
+                }
+              }
+            }
 
             if (resolvedRouteId && hasTripDetails) {
               const [curRoute] = await tx
@@ -9665,6 +10036,9 @@ async function startServer() {
         }
         console.error('Create supervisor error:', error);
         const errStr = error instanceof Error ? error.message : String(error);
+        if (errStr.startsWith('INVALID_FIELDS:')) {
+          return res.status(400).json({ error: errStr.split(':')[1] });
+        }
         if (errStr.startsWith('DUPLICATE_CODE:')) {
           const supName = errStr.split(':')[1] || '';
           return res.status(409).json({
@@ -9695,6 +10069,9 @@ async function startServer() {
     requireAdminOrStaff,
     async (req: AuthRequest, res) => {
       try {
+        if (req.dbUser?.roleSlug === 'school_movement_manager') {
+          return res.status(403).json({ error: 'لا تملك صلاحية تعديل المشرفات' });
+        }
         const id = Number(req.params.id);
         const {
           supervisorCode,
@@ -9787,19 +10164,72 @@ async function startServer() {
 
           await db.transaction(async (tx) => {
             const nextSchoolId =
-              schoolName !== undefined || schoolId !== undefined
-                ? await resolveSchoolIdForDriver(tx, { schoolId, schoolName })
+              schoolId !== undefined
+                ? schoolId
+                  ? Number(schoolId)
+                  : null
+                : schoolName !== undefined
+                ? await resolveSchoolIdForDriver(tx, {
+                    schoolName: PLACEHOLDER_ASSIGNMENTS.has(String(schoolName ?? '').trim())
+                      ? ''
+                      : schoolName,
+                  })
                 : existing.schoolId;
+
+            if (!nextSchoolId) {
+              throw new Error('INVALID_FIELDS:يجب اختيار المدرسة للمشرفة');
+            }
             if (
               !isSchoolUnrestricted(req.dbUser) &&
-              (!nextSchoolId || !isSchoolAllowed(req.dbUser, nextSchoolId))
+              !isSchoolAllowed(req.dbUser, nextSchoolId)
             ) {
               throw new Error('SCHOOL_FORBIDDEN');
             }
-            const nextVehicleId =
-              busNumber !== undefined || vehicleId !== undefined
-                ? await resolveVehicleIdForDriver(tx, { vehicleId, busNumber })
-                : existing.vehicleId;
+
+            let nextVehicleId: number | null = existing.vehicleId;
+            if (vehicleId !== undefined) {
+              if (!vehicleId || Number(vehicleId) <= 0) {
+                nextVehicleId = null;
+              } else {
+                const [veh] = await tx
+                  .select({ id: vehicles.id, schoolId: vehicles.schoolId })
+                  .from(vehicles)
+                  .where(eq(vehicles.id, Number(vehicleId)))
+                  .limit(1);
+                if (!veh || (veh.schoolId ?? null) !== nextSchoolId) {
+                  throw new Error('INVALID_FIELDS:الباص المختار غير موجود في المدرسة المحددة');
+                }
+                nextVehicleId = veh.id;
+              }
+            } else if (busNumber !== undefined) {
+              const cleanBus = normalizeArabicDigits(String(busNumber ?? '')).trim();
+              if (!cleanBus || PLACEHOLDER_ASSIGNMENTS.has(cleanBus)) {
+                nextVehicleId = null;
+              } else {
+                const [veh] = await tx
+                  .select({ id: vehicles.id, schoolId: vehicles.schoolId })
+                  .from(vehicles)
+                  .where(and(eq(vehicles.schoolId, nextSchoolId), eq(vehicles.busNumber, cleanBus)))
+                  .limit(1);
+                if (!veh) {
+                  throw new Error('INVALID_FIELDS:الباص المختار غير موجود في المدرسة المحددة');
+                }
+                nextVehicleId = veh.id;
+              }
+            } else if (nextVehicleId) {
+              const [veh] = await tx
+                .select({ id: vehicles.id, schoolId: vehicles.schoolId })
+                .from(vehicles)
+                .where(eq(vehicles.id, nextVehicleId))
+                .limit(1);
+              if (!veh || (veh.schoolId ?? null) !== nextSchoolId) {
+                throw new Error('INVALID_FIELDS:الباص المختار غير موجود في المدرسة المحددة');
+              }
+            }
+
+            if (!nextVehicleId) {
+              throw new Error('INVALID_FIELDS:يجب اختيار الباص التابع للمدرسة المحددة');
+            }
 
             const hasTripUpdate = Boolean(
               cleanPickupArea || cleanDropoffArea || cleanPickupTime || cleanDropoffTime
@@ -9814,7 +10244,10 @@ async function startServer() {
                     : '')
                 : undefined;
 
-            const nextRouteId =
+            const vehicleOrSchoolChanged =
+              nextSchoolId !== existing.schoolId || nextVehicleId !== existing.vehicleId;
+
+            let nextRouteId =
               effectiveRouteName !== undefined || routeId !== undefined
                 ? await resolveRouteIdForDriver(tx, {
                     schoolId: nextSchoolId,
@@ -9825,6 +10258,30 @@ async function startServer() {
                     dropoffTime: cleanDropoffTime,
                   })
                 : existing.routeId;
+
+            if (!nextRouteId || (vehicleOrSchoolChanged && !effectiveRouteName && routeId === undefined)) {
+              const [curAssign] = await tx
+                .select({ routeId: driverAssignments.routeId })
+                .from(driverAssignments)
+                .where(
+                  and(
+                    eq(driverAssignments.vehicleId, nextVehicleId),
+                    eq(driverAssignments.isCurrent, true)
+                  )
+                )
+                .limit(1);
+              if (curAssign?.routeId) {
+                const [linkedRoute] = await tx
+                  .select({ id: routes.id, schoolId: routes.schoolId })
+                  .from(routes)
+                  .where(eq(routes.id, curAssign.routeId))
+                  .limit(1);
+                nextRouteId =
+                  linkedRoute && linkedRoute.schoolId === nextSchoolId ? linkedRoute.id : null;
+              } else if (vehicleOrSchoolChanged && !effectiveRouteName && routeId === undefined) {
+                nextRouteId = null;
+              }
+            }
 
             if (
               nextRouteId &&
@@ -9945,6 +10402,9 @@ async function startServer() {
     requireAdminOrStaff,
     async (req: AuthRequest, res) => {
       try {
+        if (req.dbUser?.roleSlug === 'school_movement_manager') {
+          return res.status(403).json({ error: 'لا تملك صلاحية حذف مشرفات' });
+        }
         const id = Number(req.params.id);
         await runWithRlsContext({ role: 'system', driverId: null }, async () => {
           const [existing] = await db
@@ -10925,6 +11385,1100 @@ async function startServer() {
     }
   });
 
+  // ==========================================
+  // SCHOOL MOVEMENT MANAGER & SCHOOL NOTES (ملاحظات المدارس والالتزام الشهري)
+  // ==========================================
+  const ON_TIME_GRACE_MINUTES = 15;
+  const VALID_NOTE_TYPES = new Set(['positive', 'negative']);
+  const VALID_NOTE_CATEGORIES = new Set(['delay', 'cleanliness', 'behavior', 'safety']);
+
+  function getCairoDateAndMinutes(date: Date): { dateStr: string; minutesOfDay: number } {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Africa/Cairo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(date);
+      const y = parts.find((p) => p.type === 'year')?.value || '1970';
+      const m = parts.find((p) => p.type === 'month')?.value || '01';
+      const d = parts.find((p) => p.type === 'day')?.value || '01';
+      const hRaw = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
+      const minRaw = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+      const h = hRaw % 24;
+      return {
+        dateStr: `${y}-${m}-${d}`,
+        minutesOfDay: h * 60 + minRaw,
+      };
+    } catch {
+      return {
+        dateStr: date.toISOString().slice(0, 10),
+        minutesOfDay: date.getUTCHours() * 60 + date.getUTCMinutes(),
+      };
+    }
+  }
+
+  function parsePickupTimeMinutes(raw: string | null | undefined): number | null {
+    const clean = normalizeArabicDigits(String(raw || '')).trim();
+    if (!clean) return null;
+    const match24 = clean.match(/^(\d{1,2}):(\d{2})$/);
+    if (match24) {
+      const h = Number(match24[1]);
+      const m = Number(match24[2]);
+      if (h >= 0 && h <= 23 && m >= 0 && m <= 59) return h * 60 + m;
+      return null;
+    }
+    const match12 = clean.match(/^(\d{1,2}):(\d{2})\s*(ص|م|AM|PM|am|pm)$/);
+    if (match12) {
+      let h = Number(match12[1]);
+      const m = Number(match12[2]);
+      const p = match12[3].toLowerCase();
+      if (h < 1 || h > 12 || m < 0 || m > 59) return null;
+      if ((p === 'م' || p === 'pm') && h < 12) h += 12;
+      if ((p === 'ص' || p === 'am') && h === 12) h = 0;
+      return h * 60 + m;
+    }
+    return null;
+  }
+
+  function sanitizeSchoolNotePhotoUrl(value: unknown): string {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    if (trimmed.length > 900_000) {
+      throw new Error('حجم الصورة كبير جداً، يرجى اختيار صورة أصغر');
+    }
+    if (
+      trimmed.startsWith('data:image/') ||
+      trimmed.startsWith('https://') ||
+      trimmed.startsWith('http://')
+    ) {
+      return trimmed;
+    }
+    throw new Error('صيغة الصورة غير مدعومة');
+  }
+
+  function resolveScopedSchoolIdForUser(
+    user: AuthRequest['dbUser'],
+    requestedSchoolIdRaw: unknown
+  ): { ok: true; schoolId: number | null } | { ok: false; status: number; error: string } {
+    if (!user) return { ok: false, status: 401, error: 'غير مصرح' };
+    const parsed =
+      requestedSchoolIdRaw !== undefined &&
+      requestedSchoolIdRaw !== null &&
+      String(requestedSchoolIdRaw).trim() !== '' &&
+      String(requestedSchoolIdRaw).trim() !== 'all'
+        ? Number(requestedSchoolIdRaw)
+        : null;
+
+    if (parsed !== null && (!Number.isInteger(parsed) || parsed <= 0)) {
+      return { ok: false, status: 400, error: 'معرف المدرسة غير صالح' };
+    }
+
+    if (user.roleSlug === 'school_movement_manager') {
+      const assigned = user.assignedSchoolIds || [];
+      if (assigned.length !== 1) {
+        return {
+          ok: false,
+          status: 403,
+          error: 'حساب مدير الحركة غير مربوط بمدرسة صالحة',
+        };
+      }
+      if (parsed !== null && parsed !== assigned[0]) {
+        return { ok: false, status: 403, error: 'هذه المدرسة خارج نطاق صلاحياتك' };
+      }
+      return { ok: true, schoolId: assigned[0] };
+    }
+
+    if (parsed !== null) {
+      if (!isSchoolAllowed(user, parsed)) {
+        return { ok: false, status: 403, error: 'هذه المدرسة خارج نطاق صلاحياتك' };
+      }
+      return { ok: true, schoolId: parsed };
+    }
+
+    if (!isSchoolUnrestricted(user)) {
+      if (user.assignedSchoolIds.length === 1) {
+        return { ok: true, schoolId: user.assignedSchoolIds[0] };
+      }
+      return { ok: true, schoolId: null };
+    }
+
+    return { ok: true, schoolId: null };
+  }
+
+  async function computeSchoolMonthlyReport(schoolId: number, monthStr: string) {
+    const [yearNum, monthNum] = monthStr.split('-').map(Number);
+    const daysInMonth = new Date(Date.UTC(yearNum, monthNum, 0)).getUTCDate();
+    const startDate = `${monthStr}-01`;
+    const endDate = `${monthStr}-${String(daysInMonth).padStart(2, '0')}`;
+    const todayCairo = getTodayDateString();
+
+    const [schoolRow] = await db
+      .select({ id: schools.id, name: schools.name })
+      .from(schools)
+      .where(eq(schools.id, schoolId))
+      .limit(1);
+
+    if (!schoolRow) {
+      return null;
+    }
+
+    const [monthNotes, schoolRoutes, allCurrentAssignments, schoolSupervisors] = await Promise.all([
+      db
+        .select()
+        .from(schoolNotes)
+        .where(
+          and(
+            eq(schoolNotes.schoolId, schoolId),
+            gte(schoolNotes.tripDate, startDate),
+            lte(schoolNotes.tripDate, endDate)
+          )
+        ),
+      db
+        .select({
+          id: routes.id,
+          name: routes.name,
+          pickupTime: routes.pickupTime,
+        })
+        .from(routes)
+        .where(eq(routes.schoolId, schoolId)),
+      db
+        .select({
+          routeId: driverAssignments.routeId,
+          driverId: driverAssignments.driverId,
+          vehicleId: driverAssignments.vehicleId,
+        })
+        .from(driverAssignments)
+        .where(eq(driverAssignments.isCurrent, true)),
+      db
+        .select({
+          id: supervisors.id,
+          routeId: supervisors.routeId,
+          vehicleId: supervisors.vehicleId,
+        })
+        .from(supervisors)
+        .where(eq(supervisors.schoolId, schoolId)),
+    ]);
+
+    let positiveCount = 0;
+    let negativeCount = 0;
+    const categories = { delay: 0, cleanliness: 0, behavior: 0, safety: 0 };
+    let complaintsClosedCount = 0;
+    let complaintsOpenCount = 0;
+
+    for (const n of monthNotes) {
+      if (n.noteType === 'positive') positiveCount += 1;
+      else if (n.noteType === 'negative') {
+        negativeCount += 1;
+        if (n.status === 'closed') complaintsClosedCount += 1;
+        else complaintsOpenCount += 1;
+      }
+      if (n.category === 'delay') categories.delay += 1;
+      else if (n.category === 'cleanliness') categories.cleanliness += 1;
+      else if (n.category === 'behavior') categories.behavior += 1;
+      else if (n.category === 'safety') categories.safety += 1;
+    }
+
+    // Build school days in month (Sunday..Thursday up to todayCairo)
+    const schoolDays: string[] = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${monthStr}-${String(d).padStart(2, '0')}`;
+      if (dateStr > todayCairo) continue;
+      const dow = new Date(Date.UTC(yearNum, monthNum - 1, d, 12, 0, 0)).getUTCDay();
+      if (dow !== 5 && dow !== 6) {
+        schoolDays.push(dateStr);
+      }
+    }
+
+    // Map routes -> driverId, vehicleId, supervisorIds
+    const assignmentByRoute = new Map<number, { driverId: number; vehicleId: number | null }>();
+    for (const a of allCurrentAssignments) {
+      if (a.routeId && !assignmentByRoute.has(a.routeId)) {
+        assignmentByRoute.set(a.routeId, {
+          driverId: a.driverId,
+          vehicleId: a.vehicleId ?? null,
+        });
+      }
+    }
+
+    const supervisorsByRoute = new Map<number, number[]>();
+    const supervisorsByVehicle = new Map<number, number[]>();
+    for (const sup of schoolSupervisors) {
+      if (sup.routeId) {
+        const list = supervisorsByRoute.get(sup.routeId) || [];
+        list.push(sup.id);
+        supervisorsByRoute.set(sup.routeId, list);
+      }
+      if (sup.vehicleId) {
+        const list = supervisorsByVehicle.get(sup.vehicleId) || [];
+        list.push(sup.id);
+        supervisorsByVehicle.set(sup.vehicleId, list);
+      }
+    }
+
+    const routeIds = new Set(schoolRoutes.map((r) => r.id));
+    const relevantDriverIds = Array.from(
+      new Set(
+        Array.from(assignmentByRoute.entries())
+          .filter(([rId]) => routeIds.has(rId))
+          .map(([, v]) => v.driverId)
+      )
+    );
+
+    const relevantVehicleIds = Array.from(
+      new Set([
+        ...Array.from(assignmentByRoute.entries())
+          .filter(([rId]) => routeIds.has(rId))
+          .map(([, v]) => v.vehicleId)
+          .filter((v): v is number => v != null),
+        ...schoolSupervisors.map((s) => s.vehicleId).filter((v): v is number => v != null),
+      ])
+    );
+
+    const relevantSupIds = schoolSupervisors.map((s) => s.id);
+
+    const monthStartUtc = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0) - 24 * 3600 * 1000);
+    const monthEndUtc = new Date(
+      Date.UTC(yearNum, monthNum - 1, daysInMonth, 23, 59, 59) + 24 * 3600 * 1000
+    );
+
+    const [monthAttendance, monthSupTrips, monthGps] = await Promise.all([
+      relevantDriverIds.length > 0 && schoolDays.length > 0
+        ? db
+            .select({
+              driverId: attendance.driverId,
+              date: attendance.date,
+              status: attendance.status,
+            })
+            .from(attendance)
+            .where(
+              and(
+                sql`${attendance.driverId} IN (${sql.join(relevantDriverIds.map((id) => sql`${id}`), sql`, `)})`,
+                gte(attendance.date, startDate),
+                lte(attendance.date, endDate)
+              )
+            )
+        : Promise.resolve([]),
+      relevantSupIds.length > 0 && schoolDays.length > 0
+        ? db
+            .select({
+              supervisorId: supervisorTrips.supervisorId,
+              vehicleId: supervisorTrips.vehicleId,
+              tripDate: supervisorTrips.tripDate,
+              morningStartedAt: supervisorTrips.morningStartedAt,
+            })
+            .from(supervisorTrips)
+            .where(
+              and(
+                sql`${supervisorTrips.supervisorId} IN (${sql.join(relevantSupIds.map((id) => sql`${id}`), sql`, `)})`,
+                gte(supervisorTrips.tripDate, startDate),
+                lte(supervisorTrips.tripDate, endDate)
+              )
+            )
+        : Promise.resolve([]),
+      relevantVehicleIds.length > 0 && schoolDays.length > 0
+        ? db
+            .select({
+              vehicleId: gpsLocations.vehicleId,
+              recordedAt: gpsLocations.recordedAt,
+            })
+            .from(gpsLocations)
+            .where(
+              and(
+                sql`${gpsLocations.vehicleId} IN (${sql.join(relevantVehicleIds.map((id) => sql`${id}`), sql`, `)})`,
+                gte(gpsLocations.recordedAt, monthStartUtc),
+                lte(gpsLocations.recordedAt, monthEndUtc)
+              )
+            )
+        : Promise.resolve([]),
+    ]);
+
+    const attMap = new Map<string, string>();
+    for (const a of monthAttendance) {
+      attMap.set(`${a.driverId}:${a.date}`, a.status);
+    }
+
+    const supTripMap = new Map<string, Date>();
+    for (const t of monthSupTrips) {
+      if (!t.morningStartedAt) continue;
+      const kSup = `${t.supervisorId}:${t.tripDate}`;
+      const prevSup = supTripMap.get(kSup);
+      if (!prevSup || t.morningStartedAt < prevSup) {
+        supTripMap.set(kSup, t.morningStartedAt);
+      }
+      if (t.vehicleId) {
+        const kVeh = `v:${t.vehicleId}:${t.tripDate}`;
+        const prevVeh = supTripMap.get(kVeh);
+        if (!prevVeh || t.morningStartedAt < prevVeh) {
+          supTripMap.set(kVeh, t.morningStartedAt);
+        }
+      }
+    }
+
+    // First GPS location after 05:00 AM Cairo time per vehicleId + date
+    const firstGpsMap = new Map<string, { recordedAt: Date; minutesOfDay: number }>();
+    for (const g of monthGps) {
+      if (!g.vehicleId || !g.recordedAt) continue;
+      const cairo = getCairoDateAndMinutes(new Date(g.recordedAt));
+      if (cairo.dateStr < startDate || cairo.dateStr > endDate) continue;
+      if (cairo.minutesOfDay < 5 * 60) continue; // after 05:00 AM Cairo time
+      const k = `${g.vehicleId}:${cairo.dateStr}`;
+      const prev = firstGpsMap.get(k);
+      if (!prev || g.recordedAt < prev.recordedAt) {
+        firstGpsMap.set(k, { recordedAt: new Date(g.recordedAt), minutesOfDay: cairo.minutesOfDay });
+      }
+    }
+
+    let measuredDaysCount = 0;
+    let measuredTripsCount = 0;
+    let onTimeTripsCount = 0;
+
+    for (const dayStr of schoolDays) {
+      let dayHasMeasuredRoute = false;
+
+      for (const r of schoolRoutes) {
+        const pickupMin = parsePickupTimeMinutes(r.pickupTime);
+        if (pickupMin === null) continue;
+
+        const assign = assignmentByRoute.get(r.id);
+        const supIdsForRoute = supervisorsByRoute.get(r.id) || [];
+        let vehicleId = assign?.vehicleId ?? null;
+        if (!vehicleId) {
+          const supWithVeh = schoolSupervisors.find((s) => s.routeId === r.id && s.vehicleId);
+          vehicleId = supWithVeh?.vehicleId ?? null;
+        }
+        const allSupIds = Array.from(
+          new Set([
+            ...supIdsForRoute,
+            ...(vehicleId ? supervisorsByVehicle.get(vehicleId) || [] : []),
+          ])
+        );
+
+        // Determine morning trip start time: supervisor_trips.morning_started_at first, else first gps_locations after 05:00
+        let morningMinutes: number | null = null;
+        let earliestSupStart: Date | null = null;
+        for (const sid of allSupIds) {
+          const ts = supTripMap.get(`${sid}:${dayStr}`);
+          if (ts && (!earliestSupStart || ts < earliestSupStart)) {
+            earliestSupStart = ts;
+          }
+        }
+        if (!earliestSupStart && vehicleId) {
+          const vTs = supTripMap.get(`v:${vehicleId}:${dayStr}`);
+          if (vTs) earliestSupStart = vTs;
+        }
+
+        if (earliestSupStart) {
+          morningMinutes = getCairoDateAndMinutes(new Date(earliestSupStart)).minutesOfDay;
+        } else if (vehicleId) {
+          const gpsFirst = firstGpsMap.get(`${vehicleId}:${dayStr}`);
+          if (gpsFirst) {
+            morningMinutes = gpsFirst.minutesOfDay;
+          }
+        }
+
+        // Skip if insufficient time data
+        if (morningMinutes === null) continue;
+
+        dayHasMeasuredRoute = true;
+        measuredTripsCount += 1;
+
+        // Condition 1: driver attendance is present or covered
+        const attStatus = assign?.driverId ? attMap.get(`${assign.driverId}:${dayStr}`) : undefined;
+        const isDriverPresentOrCovered = attStatus
+          ? attStatus === 'present' || attStatus === 'covered'
+          : Boolean(assign?.driverId);
+
+        // Condition 2: morning start <= pickup_time + 15 minutes
+        const isOnTime = morningMinutes <= pickupMin + ON_TIME_GRACE_MINUTES;
+
+        if (isDriverPresentOrCovered && isOnTime) {
+          onTimeTripsCount += 1;
+        }
+      }
+
+      if (dayHasMeasuredRoute) {
+        measuredDaysCount += 1;
+      }
+    }
+
+    const totalSchoolDays = schoolDays.length;
+    const ratePercent =
+      measuredTripsCount > 0 ? Math.round((onTimeTripsCount / measuredTripsCount) * 100) : null;
+    const summaryText =
+      ratePercent !== null
+        ? `${ratePercent}%، محسوبة على ${measuredDaysCount} يوم من أصل ${totalSchoolDays} يوم دراسي`
+        : `لا توجد بيانات وقت كافية للحساب (${measuredDaysCount} يوم من أصل ${totalSchoolDays} يوم دراسي)`;
+
+    return {
+      schoolId: schoolRow.id,
+      schoolName: schoolRow.name,
+      month: monthStr,
+      positiveCount,
+      negativeCount,
+      totalNotes: monthNotes.length,
+      categories,
+      complaintsClosedCount,
+      complaintsOpenCount,
+      punctuality: {
+        onTimeGraceMinutes: ON_TIME_GRACE_MINUTES,
+        measuredDaysCount,
+        totalSchoolDays,
+        measuredTripsCount,
+        onTimeTripsCount,
+        ratePercent,
+        summaryText,
+      },
+    };
+  }
+
+  // 1. Routes + current driver for School Movement Manager (ZERO financial fields)
+  app.get(
+    '/api/school-movement/routes',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('school_notes:read'),
+    async (req: AuthRequest, res) => {
+      try {
+        const scope = resolveScopedSchoolIdForUser(req.dbUser, req.query.schoolId);
+        if (!scope.ok) {
+          return res.status(scope.status).json({ error: scope.error });
+        }
+        if (!scope.schoolId) {
+          return res.status(400).json({ error: 'يرجى تحديد المدرسة' });
+        }
+
+        const payload = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [schoolRow] = await db
+            .select({ id: schools.id, name: schools.name })
+            .from(schools)
+            .where(eq(schools.id, scope.schoolId!))
+            .limit(1);
+          if (!schoolRow) return null;
+
+          const [schoolRoutes, activeAssignments, allDrivers, schoolVehicles, schoolSups] = await Promise.all([
+            db
+              .select({
+                id: routes.id,
+                name: routes.name,
+                pickupArea: routes.pickupArea,
+                dropoffArea: routes.dropoffArea,
+                pickupTime: routes.pickupTime,
+                dropoffTime: routes.dropoffTime,
+              })
+              .from(routes)
+              .where(eq(routes.schoolId, scope.schoolId!))
+              .orderBy(routes.name),
+            db
+              .select({
+                routeId: driverAssignments.routeId,
+                driverId: driverAssignments.driverId,
+                vehicleId: driverAssignments.vehicleId,
+              })
+              .from(driverAssignments)
+              .where(eq(driverAssignments.isCurrent, true)),
+            db
+              .select({
+                id: drivers.id,
+                fullName: drivers.fullName,
+              })
+              .from(drivers),
+            db
+              .select({
+                id: vehicles.id,
+                busNumber: vehicles.busNumber,
+                vehicleType: vehicles.vehicleType,
+              })
+              .from(vehicles)
+              .where(eq(vehicles.schoolId, scope.schoolId!)),
+            db
+              .select({
+                routeId: supervisors.routeId,
+                vehicleId: supervisors.vehicleId,
+              })
+              .from(supervisors)
+              .where(eq(supervisors.schoolId, scope.schoolId!)),
+          ]);
+
+          const driverNameById = new Map(allDrivers.map((d) => [d.id, d.fullName]));
+          const vehicleById = new Map(schoolVehicles.map((v) => [v.id, v]));
+          const driverIdByRoute = new Map<number, number>();
+          const vehicleIdByRoute = new Map<number, number>();
+          for (const a of activeAssignments) {
+            if (a.routeId) {
+              if (!driverIdByRoute.has(a.routeId)) {
+                driverIdByRoute.set(a.routeId, a.driverId);
+              }
+              if (a.vehicleId && !vehicleIdByRoute.has(a.routeId)) {
+                vehicleIdByRoute.set(a.routeId, a.vehicleId);
+              }
+            }
+          }
+          for (const sv of schoolSups) {
+            if (sv.routeId && sv.vehicleId && !vehicleIdByRoute.has(sv.routeId)) {
+              vehicleIdByRoute.set(sv.routeId, sv.vehicleId);
+            }
+          }
+
+          return {
+            school: schoolRow,
+            routes: schoolRoutes
+              .map((r) => {
+                const drvId = driverIdByRoute.get(r.id) ?? null;
+                const vehId = vehicleIdByRoute.get(r.id) ?? null;
+                const veh = vehId ? vehicleById.get(vehId) : undefined;
+                return {
+                  id: r.id,
+                  name: r.name,
+                  pickupArea: r.pickupArea || '',
+                  dropoffArea: r.dropoffArea || '',
+                  pickupTime: r.pickupTime || '',
+                  dropoffTime: r.dropoffTime || '',
+                  currentDriverId: drvId,
+                  currentDriverName: drvId ? driverNameById.get(drvId) || '' : '',
+                  vehicleId: veh?.id ?? vehId,
+                  busNumber: veh?.busNumber || '',
+                  vehicleType: veh?.vehicleType || '',
+                };
+              })
+              .sort(
+                (a, b) =>
+                  compareBusNumbers(a.busNumber, b.busNumber) ||
+                  a.name.localeCompare(b.name, 'ar')
+              ),
+          };
+        });
+
+        if (!payload) {
+          return res.status(404).json({ error: 'المدرسة غير موجودة' });
+        }
+
+        res.json(payload);
+      } catch (error) {
+        console.error('Get school movement routes error:', error);
+        res.status(500).json({ error: 'تعذر تحميل خطوط السير' });
+      }
+    }
+  );
+
+  // 2. List School Notes (School Movement Manager sees ONLY their own notes for their school; Admin sees inbox)
+  app.get(
+    '/api/school-notes',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('school_notes:read'),
+    async (req: AuthRequest, res) => {
+      try {
+        const user = req.dbUser!;
+        const scope = resolveScopedSchoolIdForUser(user, req.query.schoolId);
+        if (!scope.ok) {
+          return res.status(scope.status).json({ error: scope.error });
+        }
+
+        const statusFilter = String(req.query.status || '').trim();
+        const noteTypeFilter = String(req.query.noteType || '').trim();
+        const monthFilter = String(req.query.month || '').trim();
+
+        const rows = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const conditions: any[] = [];
+          if (user.roleSlug === 'school_movement_manager') {
+            conditions.push(eq(schoolNotes.schoolId, scope.schoolId!));
+            conditions.push(eq(schoolNotes.createdByUserId, user.id));
+          } else if (scope.schoolId !== null) {
+            conditions.push(eq(schoolNotes.schoolId, scope.schoolId));
+          }
+
+          if (statusFilter === 'open' || statusFilter === 'closed') {
+            conditions.push(eq(schoolNotes.status, statusFilter));
+          }
+          if (noteTypeFilter === 'positive' || noteTypeFilter === 'negative') {
+            conditions.push(eq(schoolNotes.noteType, noteTypeFilter));
+          }
+          if (/^\d{4}-\d{2}$/.test(monthFilter)) {
+            const [y, m] = monthFilter.split('-').map(Number);
+            const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+            conditions.push(gte(schoolNotes.tripDate, `${monthFilter}-01`));
+            conditions.push(lte(schoolNotes.tripDate, `${monthFilter}-${String(lastDay).padStart(2, '0')}`));
+          }
+
+          const [rawNotes, allSchools, allRoutes, allDrivers, allUsers] = await Promise.all([
+            conditions.length > 0
+              ? db
+                  .select()
+                  .from(schoolNotes)
+                  .where(and(...conditions))
+                  .orderBy(desc(schoolNotes.createdAt), desc(schoolNotes.id))
+                  .limit(300)
+              : db
+                  .select()
+                  .from(schoolNotes)
+                  .orderBy(desc(schoolNotes.createdAt), desc(schoolNotes.id))
+                  .limit(300),
+            db.select({ id: schools.id, name: schools.name }).from(schools),
+            db.select({ id: routes.id, name: routes.name }).from(routes),
+            db.select({ id: drivers.id, fullName: drivers.fullName }).from(drivers),
+            db.select({ id: users.id, fullName: users.fullName }).from(users),
+          ]);
+
+          const schoolMap = new Map(allSchools.map((s) => [s.id, s.name]));
+          const routeMap = new Map(allRoutes.map((r) => [r.id, r.name]));
+          const driverMap = new Map(allDrivers.map((d) => [d.id, d.fullName]));
+          const userMap = new Map(allUsers.map((u) => [u.id, u.fullName]));
+
+          return rawNotes
+            .filter((n) => isSchoolAllowed(user, n.schoolId))
+            .map((n) => ({
+              id: n.id,
+              schoolId: n.schoolId,
+              schoolName: schoolMap.get(n.schoolId) || 'مدرسة',
+              routeId: n.routeId ?? null,
+              routeName: n.routeId ? routeMap.get(n.routeId) || '' : '',
+              driverId: n.driverId ?? null,
+              driverName: n.driverId ? driverMap.get(n.driverId) || '' : '',
+              tripDate: n.tripDate,
+              noteType: n.noteType,
+              category: n.category,
+              body: n.body,
+              photoUrl: n.photoUrl || '',
+              status: n.status,
+              adminReply: n.adminReply || '',
+              resolution: n.resolution || '',
+              createdByUserId: n.createdByUserId,
+              createdByName: userMap.get(n.createdByUserId) || 'مستخدم',
+              resolvedByUserId: n.resolvedByUserId ?? null,
+              resolvedByName: n.resolvedByUserId ? userMap.get(n.resolvedByUserId) || 'الإدارة' : '',
+              resolvedAt: n.resolvedAt ? n.resolvedAt.toISOString() : null,
+              createdAt: n.createdAt.toISOString(),
+              updatedAt: n.updatedAt.toISOString(),
+            }));
+        });
+
+        res.json({ notes: rows });
+      } catch (error) {
+        console.error('Get school notes error:', error);
+        res.status(500).json({ error: 'تعذر تحميل ملاحظات المدارس' });
+      }
+    }
+  );
+
+  // 3. Create School Note (auto-links route + current driver + date + triggers super_admin notification)
+  app.post(
+    '/api/school-notes',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('school_notes:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const user = req.dbUser!;
+        const scope = resolveScopedSchoolIdForUser(user, req.body?.schoolId);
+        if (!scope.ok) {
+          return res.status(scope.status).json({ error: scope.error });
+        }
+        if (!scope.schoolId) {
+          return res.status(400).json({ error: 'يرجى تحديد المدرسة' });
+        }
+
+        const todayCairo = getTodayDateString();
+        const rawTripDate = String(req.body?.tripDate || todayCairo).trim();
+        const cleanTripDate = normalizeIsoDateInput(rawTripDate);
+        if (!cleanTripDate || !/^\d{4}-\d{2}-\d{2}$/.test(cleanTripDate)) {
+          return res.status(400).json({ error: 'صيغة التاريخ غير صالحة' });
+        }
+        if (cleanTripDate > todayCairo) {
+          return res.status(400).json({ error: 'لا يمكن اختيار تاريخ مستقبلي' });
+        }
+
+        const noteType = String(req.body?.noteType || '').trim();
+        if (!VALID_NOTE_TYPES.has(noteType)) {
+          return res.status(400).json({ error: 'نوع الملاحظة يجب أن يكون إيجابية أو سلبية' });
+        }
+
+        const category = String(req.body?.category || '').trim();
+        if (!VALID_NOTE_CATEGORIES.has(category)) {
+          return res.status(400).json({ error: 'تصنيف الملاحظة غير صالح' });
+        }
+
+        const cleanBody = String(req.body?.body || '').trim();
+        if (!cleanBody) {
+          return res.status(400).json({ error: 'يرجى كتابة نص الملاحظة' });
+        }
+        if (cleanBody.length > 500) {
+          return res.status(400).json({ error: 'نص الملاحظة بحد أقصى 500 حرف' });
+        }
+
+        const cleanPhotoUrl = sanitizeSchoolNotePhotoUrl(req.body?.photoUrl);
+        const requestedRouteId = req.body?.routeId ? Number(req.body.routeId) : null;
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          return await db.transaction(async (tx) => {
+            const [schoolRow] = await tx
+              .select({ id: schools.id, name: schools.name })
+              .from(schools)
+              .where(eq(schools.id, scope.schoolId!))
+              .limit(1);
+            if (!schoolRow) {
+              throw new Error('المدرسة غير موجودة');
+            }
+
+            let resolvedRouteId: number | null = null;
+            let resolvedRouteName = '';
+            let resolvedDriverId: number | null = null;
+            let resolvedDriverName = '';
+
+            if (requestedRouteId) {
+              const [routeRow] = await tx
+                .select({ id: routes.id, name: routes.name, schoolId: routes.schoolId })
+                .from(routes)
+                .where(eq(routes.id, requestedRouteId))
+                .limit(1);
+              if (!routeRow) {
+                throw new Error('خط السير المحدد غير موجود');
+              }
+              if (routeRow.schoolId !== schoolRow.id) {
+                const err = new Error('خط السير المحدد تابع لمدرسة أخرى') as Error & { status?: number };
+                err.status = 403;
+                throw err;
+              }
+              resolvedRouteId = routeRow.id;
+              resolvedRouteName = routeRow.name;
+
+              const [curAssign] = await tx
+                .select({ driverId: driverAssignments.driverId })
+                .from(driverAssignments)
+                .where(
+                  and(
+                    eq(driverAssignments.routeId, routeRow.id),
+                    eq(driverAssignments.isCurrent, true)
+                  )
+                )
+                .limit(1);
+              if (curAssign?.driverId) {
+                resolvedDriverId = curAssign.driverId;
+                const [drvRow] = await tx
+                  .select({ fullName: drivers.fullName })
+                  .from(drivers)
+                  .where(eq(drivers.id, curAssign.driverId))
+                  .limit(1);
+                resolvedDriverName = drvRow?.fullName || '';
+              }
+            }
+
+            const [inserted] = await tx
+              .insert(schoolNotes)
+              .values({
+                schoolId: schoolRow.id,
+                routeId: resolvedRouteId,
+                driverId: resolvedDriverId,
+                tripDate: cleanTripDate,
+                noteType,
+                category,
+                body: cleanBody,
+                photoUrl: cleanPhotoUrl,
+                status: 'open',
+                adminReply: '',
+                resolution: '',
+                createdByUserId: user.id,
+              })
+              .returning();
+
+            const noteTypeAr = noteType === 'positive' ? 'إيجابية' : 'سلبية';
+            const categoryAr =
+              category === 'delay'
+                ? 'تأخير'
+                : category === 'cleanliness'
+                ? 'نظافة'
+                : category === 'behavior'
+                ? 'تعامل'
+                : 'أمان';
+
+            await tx.insert(notifications).values({
+              targetRole: 'super_admin',
+              type: 'school_note',
+              title: `ملاحظة ${noteTypeAr} — ${schoolRow.name}`,
+              body: `${categoryAr}${resolvedRouteName ? ` · ${resolvedRouteName}` : ''}${
+                resolvedDriverName ? ` (${resolvedDriverName})` : ''
+              }: ${cleanBody.slice(0, 180)}`,
+              isRead: false,
+            });
+
+            await tx.insert(auditLogs).values({
+              actorUserId: user.id,
+              action: 'CREATE_SCHOOL_NOTE',
+              entityType: 'school_notes',
+              entityId: String(inserted.id),
+              afterJson: {
+                schoolId: inserted.schoolId,
+                routeId: inserted.routeId,
+                driverId: inserted.driverId,
+                tripDate: inserted.tripDate,
+                noteType: inserted.noteType,
+                category: inserted.category,
+              },
+              ipAddress: req.ip || '',
+            });
+
+            return {
+              id: inserted.id,
+              schoolId: inserted.schoolId,
+              schoolName: schoolRow.name,
+              routeId: inserted.routeId,
+              routeName: resolvedRouteName,
+              driverId: inserted.driverId,
+              driverName: resolvedDriverName,
+              tripDate: inserted.tripDate,
+              noteType: inserted.noteType,
+              category: inserted.category,
+              body: inserted.body,
+              photoUrl: inserted.photoUrl,
+              status: inserted.status,
+              adminReply: inserted.adminReply,
+              resolution: inserted.resolution,
+              createdByUserId: inserted.createdByUserId,
+              createdByName: user.fullName,
+              resolvedByUserId: null,
+              resolvedByName: '',
+              resolvedAt: null,
+              createdAt: inserted.createdAt.toISOString(),
+              updatedAt: inserted.updatedAt.toISOString(),
+            };
+          });
+        });
+
+        res.status(201).json({ note: outcome });
+      } catch (error: unknown) {
+        console.error('Create school note error:', error);
+        const errObj = error as { status?: number; message?: string } | null;
+        const status = errObj?.status || 400;
+        res.status(status).json({ error: errObj?.message || 'تعذر حفظ الملاحظة' });
+      }
+    }
+  );
+
+  // 4. Admin Reply to School Note
+  app.patch(
+    '/api/school-notes/:id/reply',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('school_notes:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const user = req.dbUser!;
+        if (user.roleSlug === 'school_movement_manager') {
+          return res.status(403).json({ error: 'الرد على ملاحظات المدارس متاح للإدارة فقط' });
+        }
+
+        const noteId = Number(req.params.id);
+        if (!noteId) return res.status(400).json({ error: 'معرف الملاحظة غير صالح' });
+
+        const cleanReply = String(req.body?.adminReply ?? '').trim();
+        if (!cleanReply) {
+          return res.status(400).json({ error: 'يرجى كتابة نص الرد' });
+        }
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(schoolNotes)
+            .where(eq(schoolNotes.id, noteId))
+            .limit(1);
+          if (!existing) return { status: 404 as const, body: { error: 'الملاحظة غير موجودة' } };
+          if (!isSchoolAllowed(user, existing.schoolId)) {
+            return { status: 403 as const, body: { error: 'هذه المدرسة خارج نطاق صلاحياتك' } };
+          }
+
+          const [updated] = await db
+            .update(schoolNotes)
+            .set({
+              adminReply: cleanReply,
+              updatedAt: new Date(),
+            })
+            .where(eq(schoolNotes.id, noteId))
+            .returning();
+
+          await db.insert(auditLogs).values({
+            actorUserId: user.id,
+            action: 'REPLY_SCHOOL_NOTE',
+            entityType: 'school_notes',
+            entityId: String(noteId),
+            beforeJson: { adminReply: existing.adminReply },
+            afterJson: { adminReply: updated.adminReply },
+            ipAddress: req.ip || '',
+          });
+
+          return { status: 200 as const, body: { note: updated } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error) {
+        console.error('Reply school note error:', error);
+        res.status(500).json({ error: 'تعذر حفظ الرد' });
+      }
+    }
+  );
+
+  // 5. Admin Close School Note with Mandatory Resolution + Audit Log
+  app.patch(
+    '/api/school-notes/:id/close',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('school_notes:write'),
+    async (req: AuthRequest, res) => {
+      try {
+        const user = req.dbUser!;
+        if (user.roleSlug === 'school_movement_manager') {
+          return res.status(403).json({ error: 'إغلاق الملاحظات متاح للإدارة فقط' });
+        }
+
+        const noteId = Number(req.params.id);
+        if (!noteId) return res.status(400).json({ error: 'معرف الملاحظة غير صالح' });
+
+        const cleanResolution = String(req.body?.resolution ?? '').trim();
+        if (!cleanResolution) {
+          return res.status(400).json({ error: 'يجب كتابة الحل قبل إغلاق الملاحظة' });
+        }
+
+        const outcome = await runWithRlsContext({ role: 'system', driverId: null }, async () => {
+          const [existing] = await db
+            .select()
+            .from(schoolNotes)
+            .where(eq(schoolNotes.id, noteId))
+            .limit(1);
+          if (!existing) return { status: 404 as const, body: { error: 'الملاحظة غير موجودة' } };
+          if (!isSchoolAllowed(user, existing.schoolId)) {
+            return { status: 403 as const, body: { error: 'هذه المدرسة خارج نطاق صلاحياتك' } };
+          }
+
+          const now = new Date();
+          const [updated] = await db
+            .update(schoolNotes)
+            .set({
+              status: 'closed',
+              resolution: cleanResolution,
+              resolvedByUserId: user.id,
+              resolvedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(schoolNotes.id, noteId))
+            .returning();
+
+          await db.insert(auditLogs).values({
+            actorUserId: user.id,
+            action: 'CLOSE_SCHOOL_NOTE',
+            entityType: 'school_notes',
+            entityId: String(noteId),
+            beforeJson: {
+              status: existing.status,
+              resolution: existing.resolution,
+            },
+            afterJson: {
+              status: updated.status,
+              resolution: updated.resolution,
+              resolvedByUserId: updated.resolvedByUserId,
+              resolvedAt: updated.resolvedAt?.toISOString() || null,
+            },
+            ipAddress: req.ip || '',
+          });
+
+          return { status: 200 as const, body: { note: updated } };
+        });
+
+        res.status(outcome.status).json(outcome.body);
+      } catch (error) {
+        console.error('Close school note error:', error);
+        res.status(500).json({ error: 'تعذر إغلاق الملاحظة' });
+      }
+    }
+  );
+
+  // 6. Monthly Report (Notes counts + Category breakdown + Punctuality rate) — ZERO financial fields
+  app.get(
+    '/api/school-notes/monthly-report',
+    requireAuth,
+    requireAdminOrStaff,
+    requirePermission('school_notes:read'),
+    async (req: AuthRequest, res) => {
+      try {
+        const user = req.dbUser!;
+        const scope = resolveScopedSchoolIdForUser(user, req.query.schoolId);
+        if (!scope.ok) {
+          return res.status(scope.status).json({ error: scope.error });
+        }
+
+        const defaultMonth = getTodayDateString().slice(0, 7);
+        const monthStr = String(req.query.month || defaultMonth).trim();
+        if (!/^\d{4}-\d{2}$/.test(monthStr)) {
+          return res.status(400).json({ error: 'صيغة الشهر غير صالحة (المطلوب YYYY-MM)' });
+        }
+
+        let targetSchoolId = scope.schoolId;
+        if (!targetSchoolId) {
+          const allSchools = await db
+            .select({ id: schools.id, isActive: schools.isActive })
+            .from(schools)
+            .orderBy(schools.name);
+          const firstAllowed = allSchools.find(
+            (s) => s.isActive && isSchoolAllowed(user, s.id)
+          ) || allSchools.find((s) => isSchoolAllowed(user, s.id));
+          if (!firstAllowed) {
+            return res.status(404).json({ error: 'لا توجد مدارس متاحة للتقرير' });
+          }
+          targetSchoolId = firstAllowed.id;
+        }
+
+        const report = await runWithRlsContext({ role: 'system', driverId: null }, () =>
+          computeSchoolMonthlyReport(targetSchoolId!, monthStr)
+        );
+        if (!report) {
+          return res.status(404).json({ error: 'المدرسة غير موجودة' });
+        }
+
+        res.json({ report });
+      } catch (error) {
+        console.error('Monthly school report error:', error);
+        res.status(500).json({ error: 'تعذر احتساب التقرير الشهري' });
+      }
+    }
+  );
+
+  // GET /api/schools/:schoolId/vehicles — sorted numerically by bus_number for Supervisor & Fleet selectors
+  app.get(
+    '/api/schools/:schoolId/vehicles',
+    requireAuth,
+    requireAdminOrStaff,
+    requireAnyPermission(['vehicles:read', 'drivers:read', 'gps:read']),
+    async (req: AuthRequest, res) => {
+      try {
+        if (req.dbUser?.roleSlug === 'school_movement_manager') {
+          return res.status(403).json({ error: 'لا تملك صلاحية عرض مركبات المدرسة' });
+        }
+        const schoolIdParam = Number(req.params.schoolId);
+        if (!Number.isInteger(schoolIdParam) || schoolIdParam <= 0) {
+          return res.status(400).json({ error: 'معرف المدرسة غير صالح' });
+        }
+        if (!isSchoolAllowed(req.dbUser, schoolIdParam)) {
+          return res.status(403).json({ error: 'هذه المدرسة خارج نطاق صلاحياتك' });
+        }
+
+        const rows = await runWithRlsContext({ role: 'system', driverId: null }, () =>
+          db
+            .select()
+            .from(vehicles)
+            .where(eq(vehicles.schoolId, schoolIdParam))
+            .orderBy(...getBusNumericOrderBy(vehicles.busNumber), vehicles.id)
+        );
+
+        res.json({ vehicles: rows });
+      } catch (error) {
+        console.error('Get school vehicles error:', error);
+        res.status(500).json({ error: 'تعذر تحميل باصات المدرسة' });
+      }
+    }
+  );
+
   await ensureRlsPoliciesApplied().catch((err) => {
     console.warn('[RLS] Startup policy sync warning:', err);
   });
@@ -10945,8 +12499,48 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
+    app.use(
+      express.static(distPath, {
+        setHeaders(res, filePath) {
+          const normalizedPath = filePath.replace(/\\/g, '/');
+          const fileName = path.basename(normalizedPath);
+
+          if (normalizedPath.includes('/assets/')) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+            return;
+          }
+
+          if (
+            fileName === 'index.html' ||
+            fileName === 'sw.js' ||
+            fileName === 'registerSW.js' ||
+            fileName === 'sw-gps-sync.js' ||
+            fileName === 'manifest.webmanifest' ||
+            fileName === 'manifest.json' ||
+            /^workbox-.*\.js$/i.test(fileName)
+          ) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            if (fileName === 'manifest.webmanifest') {
+              res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+            }
+            return;
+          }
+
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+        },
+      })
+    );
+
+    app.get('*', (req, res) => {
+      if (
+        req.path === '/api' ||
+        req.path.startsWith('/api/') ||
+        /\.[a-zA-Z0-9]{1,8}$/.test(req.path)
+      ) {
+        res.status(404).json({ error: 'Not found' });
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

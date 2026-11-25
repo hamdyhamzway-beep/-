@@ -11,6 +11,7 @@ import {
   serial,
   text,
   timestamp,
+  unique,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
@@ -66,17 +67,21 @@ export const schools = pgTable('schools', {
 });
 
 // 4. Vehicles (previously vehicleOwners removed)
-export const vehicles = pgTable('vehicles', {
-  id: serial('id').primaryKey(),
-  busNumber: text('bus_number').notNull().unique(),
-  registrationNumber: text('registration_number').notNull().unique(),
-  vehicleType: text('vehicle_type').notNull().default(''),
-  schoolId: integer('school_id').references(() => schools.id),
-  operationalStatus: text('operational_status').notNull().default('active'), // active | maintenance | inactive
-  gpsStatus: text('gps_status').notNull().default('offline'), // online | offline | paused
-  notes: text('notes').default(''),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+export const vehicles = pgTable(
+  'vehicles',
+  {
+    id: serial('id').primaryKey(),
+    busNumber: text('bus_number').notNull(),
+    registrationNumber: text('registration_number').notNull().unique(),
+    vehicleType: text('vehicle_type').notNull().default(''),
+    schoolId: integer('school_id').references(() => schools.id),
+    operationalStatus: text('operational_status').notNull().default('active'), // active | maintenance | inactive
+    gpsStatus: text('gps_status').notNull().default('offline'), // online | offline | paused
+    notes: text('notes').default(''),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => [unique('vehicles_school_id_bus_number_unique').on(table.schoolId, table.busNumber)]
+);
 
 // 6. Routes
 export const routes = pgTable('routes', {
@@ -933,6 +938,48 @@ export const externalAccountEntriesRelations = relations(externalAccountEntries,
     references: [users.id],
   }),
 }));
+
+// 31. School Notes (ملاحظات مديري حركة المدارس اليومية)
+export const schoolNotes = pgTable(
+  'school_notes',
+  {
+    id: serial('id').primaryKey(),
+    schoolId: integer('school_id')
+      .notNull()
+      .references(() => schools.id),
+    routeId: integer('route_id').references(() => routes.id),
+    driverId: integer('driver_id').references(() => drivers.id),
+    tripDate: text('trip_date').notNull(), // YYYY-MM-DD (Africa/Cairo)
+    noteType: text('note_type').notNull(), // positive | negative
+    category: text('category').notNull(), // delay | cleanliness | behavior | safety
+    body: text('body').notNull(), // max 500 chars
+    photoUrl: text('photo_url').notNull().default(''),
+    status: text('status').notNull().default('open'), // open | closed
+    adminReply: text('admin_reply').notNull().default(''),
+    resolution: text('resolution').notNull().default(''),
+    createdByUserId: integer('created_by_user_id')
+      .notNull()
+      .references(() => users.id),
+    resolvedByUserId: integer('resolved_by_user_id').references(() => users.id),
+    resolvedAt: timestamp('resolved_at'),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_school_notes_school_date').on(table.schoolId, table.tripDate),
+    index('idx_school_notes_driver').on(table.driverId),
+    index('idx_school_notes_status').on(table.status),
+  ]
+);
+
+export const schoolNotesRelations = relations(schoolNotes, ({ one }) => ({
+  school: one(schools, { fields: [schoolNotes.schoolId], references: [schools.id] }),
+  route: one(routes, { fields: [schoolNotes.routeId], references: [routes.id] }),
+  driver: one(drivers, { fields: [schoolNotes.driverId], references: [drivers.id] }),
+  createdByUser: one(users, { fields: [schoolNotes.createdByUserId], references: [users.id] }),
+  resolvedByUser: one(users, { fields: [schoolNotes.resolvedByUserId], references: [users.id] }),
+}));
+
 
 
 

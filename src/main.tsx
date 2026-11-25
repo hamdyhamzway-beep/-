@@ -3,6 +3,11 @@ import { createRoot } from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
 import App from './App.tsx';
 import './index.css';
+import {
+  notifyUpdateNeeded,
+  setRegisteredSW,
+  setUpdateSWHandler,
+} from './lib/pwa-update';
 
 // Tier 1: Google Maps Platform Demo Key Quota / Auth Failure Listener
 (window as unknown as { gm_authFailure?: () => void }).gm_authFailure = () => {
@@ -30,7 +35,40 @@ if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' i
     })
     .catch(() => undefined);
 } else {
-  registerSW({ immediate: false });
+  let updateCheckTimerId: number | undefined;
+  let visibilityListenerBound = false;
+
+  const updateSW = registerSW({
+    immediate: true,
+    onNeedRefresh() {
+      notifyUpdateNeeded(false);
+    },
+    onRegisteredSW(_swUrl, registration) {
+      setRegisteredSW(registration);
+      if (!registration) return;
+
+      const triggerUpdateCheck = () => {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+        registration.update().catch(() => undefined);
+      };
+
+      if (updateCheckTimerId) {
+        window.clearInterval(updateCheckTimerId);
+      }
+      updateCheckTimerId = window.setInterval(triggerUpdateCheck, 15 * 60 * 1000);
+
+      if (!visibilityListenerBound) {
+        visibilityListenerBound = true;
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            triggerUpdateCheck();
+          }
+        });
+      }
+    },
+  });
+
+  setUpdateSWHandler(updateSW);
 }
 
 createRoot(document.getElementById('root')!).render(

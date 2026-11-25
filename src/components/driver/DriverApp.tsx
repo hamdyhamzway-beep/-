@@ -32,6 +32,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import { AppVersionBadge } from '../AppVersionBadge';
 import {
   ApiHttpError,
   apiFetch,
@@ -2119,6 +2120,7 @@ export const DriverApp: React.FC<{
           compact
           className="rounded-2xl border border-slate-200 shadow-xs mt-6"
         />
+        <AppVersionBadge variant="light" className="mt-3 px-1" />
       </main>
 
       {/* Bottom Thumb-Zone Navigation Bar */}

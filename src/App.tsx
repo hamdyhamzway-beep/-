@@ -4,6 +4,7 @@ import {
   Archive,
   Briefcase,
   Bus,
+  ClipboardList,
   FileSpreadsheet,
   FileText,
   HandCoins,
@@ -23,7 +24,9 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { AppLogoBackdrop } from './components/AppLogoBackdrop';
 import { BrandLogo } from './components/BrandLogo';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstall';
+import { AppVersionBadge } from './components/AppVersionBadge';
 import { CompanyLegalFooter } from './components/CompanyLegalFooter';
+import { UpdateBanner } from './components/UpdateBanner';
 import { SignInScreen } from './components/SignInScreen';
 import { SplashScreen } from './components/SplashScreen';
 import splashScreenImg from './assets/images/alwaleed_splash_screen_1794752422708.jpg';
@@ -45,6 +48,8 @@ import { SupervisorApp } from './components/supervisor/SupervisorApp';
 import { ChatHubModule } from './components/chat/ChatHubModule';
 import { InvoicesModule } from './components/admin/InvoicesModule';
 import { CustodiesAndExternalAccountsModule } from './components/admin/CustodiesAndExternalAccountsModule';
+import { SchoolNotesAdminModule } from './components/admin/SchoolNotesAdminModule';
+import { SchoolMovementApp } from './components/school-movement/SchoolMovementApp';
 import { ArrowRight, MessageSquare, UserCheck } from 'lucide-react';
 
 type AdminTabId =
@@ -53,6 +58,7 @@ type AdminTabId =
   | 'supervisors'
   | 'employees'
   | 'schools'
+  | 'school_notes'
   | 'finance'
   | 'custodies_external'
   | 'invoices'
@@ -188,6 +194,12 @@ const AppShell: React.FC = () => {
         visible: isSuperAdmin || can('schools:read') || can('vehicles:read'),
       },
       {
+        id: 'school_notes',
+        label: 'ملاحظات المدارس',
+        icon: ClipboardList,
+        visible: isSuperAdmin || can('school_notes:read'),
+      },
+      {
         id: 'finance',
         label: 'المالية والمرتبات',
         icon: Wallet,
@@ -281,7 +293,13 @@ const AppShell: React.FC = () => {
       lastAutoRoutedUserIdRef.current = null;
       return;
     }
-    if (dbUser.roleSlug === 'driver' || dbUser.roleSlug === 'supervisor') return;
+    if (
+      dbUser.roleSlug === 'driver' ||
+      dbUser.roleSlug === 'supervisor' ||
+      dbUser.roleSlug === 'school_movement_manager'
+    ) {
+      return;
+    }
     if (lastAutoRoutedUserIdRef.current !== dbUser.id) {
       lastAutoRoutedUserIdRef.current = dbUser.id;
       setTabHistory([]);
@@ -309,12 +327,32 @@ const AppShell: React.FC = () => {
 
   // Strict Data & UI Isolation: Driver accounts only ever see the mobile-first Driver App
   if (dbUser.roleSlug === 'driver') {
-    return <DriverApp allowDriverSelector={false} />;
+    return (
+      <>
+        <DriverApp allowDriverSelector={false} />
+        <UpdateBanner hasBottomNav />
+      </>
+    );
   }
 
   // Strict Data & UI Isolation: Supervisor accounts ONLY see non-financial Supervisor App
   if (dbUser.roleSlug === 'supervisor') {
-    return <SupervisorApp allowSupervisorSelector={false} />;
+    return (
+      <>
+        <SupervisorApp allowSupervisorSelector={false} />
+        <UpdateBanner />
+      </>
+    );
+  }
+
+  // Strict Data & UI Isolation: School Movement Manager ONLY sees isolated non-financial portal for their single school
+  if (dbUser.roleSlug === 'school_movement_manager') {
+    return (
+      <>
+        <SchoolMovementApp />
+        <UpdateBanner />
+      </>
+    );
   }
 
   // Admin previewing Driver App (fixed always-visible return bar)
@@ -346,6 +384,7 @@ const AppShell: React.FC = () => {
           </div>
         </div>
         <DriverApp allowDriverSelector={true} hasPreviewBar={true} />
+        <UpdateBanner hasBottomNav />
       </div>
     );
   }
@@ -383,6 +422,7 @@ const AppShell: React.FC = () => {
           initialSupervisorId={previewSupervisorId}
           hasPreviewBar={true}
         />
+        <UpdateBanner />
       </div>
     );
   }
@@ -510,6 +550,7 @@ const AppShell: React.FC = () => {
               <LogOut className="w-4 h-4" />
             </button>
           </div>
+          <AppVersionBadge variant="dark" className="pt-2 border-t border-white/10" />
         </div>
       </aside>
 
@@ -609,6 +650,7 @@ const AppShell: React.FC = () => {
                 <LogOut className="w-4 h-4" />
                 تسجيل الخروج
               </button>
+              <AppVersionBadge variant="dark" className="pt-2 border-t border-white/10" />
             </div>
           </div>
         </div>
@@ -683,6 +725,7 @@ const AppShell: React.FC = () => {
           )}
           {activeTab === 'employees' && <EmployeesModule />}
           {activeTab === 'schools' && <SchoolsVehiclesModule />}
+          {activeTab === 'school_notes' && <SchoolNotesAdminModule />}
           {activeTab === 'finance' && <FinanceModule />}
           {activeTab === 'custodies_external' && (
             <CustodiesAndExternalAccountsModule initialSection="custodies" />
@@ -712,6 +755,7 @@ const AppShell: React.FC = () => {
           onClose={() => setQuickReportModalOpen(false)}
         />
       </div>
+      <UpdateBanner />
     </div>
   );
 };

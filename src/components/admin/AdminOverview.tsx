@@ -46,6 +46,11 @@ import {
   renderStatementFallbackBlob,
   shareImageFileViaWebShare,
 } from '../../lib/whatsapp-statement';
+import {
+  compareSchoolAndBus,
+  formatBusBadgeLabel,
+  groupBySchoolSortedByBus,
+} from '../../lib/bus-sorting';
 import { BrandLogo } from '../BrandLogo';
 import { ContactPhoneInput } from '../ContactPhoneInput';
 import { DriverAvatar } from '../DriverAvatar';
@@ -407,7 +412,7 @@ export const AdminOverview: React.FC<{
 
   const filterDriversByQuery = useCallback(
     (rawQuery: string) => {
-      const list = data?.drivers || [];
+      const list = [...(data?.drivers || [])].sort(compareSchoolAndBus);
       const q = normalizeLookupText(rawQuery);
       if (!q) return list;
       const digitsOnly = q.replace(/\D/g, '');
@@ -433,6 +438,11 @@ export const AdminOverview: React.FC<{
   const matchedDrivers = useMemo(
     () => filterDriversByQuery(driverLookup),
     [filterDriversByQuery, driverLookup]
+  );
+
+  const groupedMatchedDrivers = useMemo(
+    () => groupBySchoolSortedByBus(matchedDrivers),
+    [matchedDrivers]
   );
 
   const quickSwitchMatches = useMemo(
@@ -1252,9 +1262,12 @@ export const AdminOverview: React.FC<{
                           كود {d.driverCode} · {d.phone}
                         </div>
                       </div>
-                      <span className="font-mono text-[11px] font-semibold text-slate-600">
-                        {d.schoolName}
-                      </span>
+                      <div className="text-left shrink-0">
+                        <div className="text-[11px] font-bold text-[#0B1F3A]">
+                          {formatBusBadgeLabel(d.busNumber, d.hasCurrentVehicle)}
+                        </div>
+                        <div className="text-[10px] text-slate-500">{d.schoolName}</div>
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -1321,7 +1334,9 @@ export const AdminOverview: React.FC<{
                         <span className="text-slate-300">·</span>
                         <span>المدرسة: {activeDriver.schoolName || 'غير معين'}</span>
                         <span className="text-slate-300">·</span>
-                        <span>باص: {activeDriver.busNumber || '—'}</span>
+                        <span>
+                          {formatBusBadgeLabel(activeDriver.busNumber, activeDriver.hasCurrentVehicle)}
+                        </span>
                         {activeDriver.routeName && activeDriver.routeName !== '—' && (
                           <>
                             <span className="text-slate-300">·</span>
@@ -1515,8 +1530,9 @@ export const AdminOverview: React.FC<{
                       </div>
                       <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2 mt-1">
                         <span>
-                          كود {activeDriver.driverCode} · {activeDriver.schoolName || '—'} · باص{' '}
-                          {activeDriver.busNumber || '—'} · {activeDriver.routeName || '—'}
+                          كود {activeDriver.driverCode} · {activeDriver.schoolName || '—'} ·{' '}
+                          {formatBusBadgeLabel(activeDriver.busNumber, activeDriver.hasCurrentVehicle)} ·{' '}
+                          {activeDriver.routeName || '—'}
                         </span>
                         {statement.period.startDate && statement.period.endDate && (
                           <span className="rounded bg-amber-50 border border-amber-200 px-2 py-0.5 font-mono text-[11px] font-bold text-[#0B1F3A] tabular-nums">
@@ -2552,9 +2568,9 @@ export const AdminOverview: React.FC<{
               (() => {
                 const currentSchool = data.schools.find((s) => s.id === overviewSchoolFilter);
                 if (!currentSchool) return null;
-                const schoolDrivers = (data.drivers || []).filter(
-                  (d) => d.schoolId === currentSchool.id
-                );
+                const schoolDrivers = (data.drivers || [])
+                  .filter((d) => d.schoolId === currentSchool.id)
+                  .sort(compareSchoolAndBus);
                 const schoolVehicles = (data.fleet || []).filter(
                   (v) => v.schoolId === currentSchool.id
                 );
@@ -2647,7 +2663,8 @@ export const AdminOverview: React.FC<{
                                     {d.fullName} <span className="font-mono text-slate-500" dir="ltr">({d.phone})</span>
                                   </td>
                                   <td className="py-2.5 px-3 text-slate-700 font-mono">
-                                    باص {d.busNumber || '—'} · {d.routeName || '—'}
+                                    {formatBusBadgeLabel(d.busNumber, d.hasCurrentVehicle)} ·{' '}
+                                    {d.routeName || '—'}
                                   </td>
                                   <td className="py-2.5 px-3 font-mono font-bold text-[#0B1F3A] tabular-nums">
                                     {formatEGP(d.currentSalary?.netSalary ?? d.monthlyAgreedSalary)}
@@ -2768,69 +2785,98 @@ export const AdminOverview: React.FC<{
                       </td>
                     </tr>
                   ) : (
-                    matchedDrivers.map((d) => {
-                      const sal = d.currentSalary;
-                      return (
-                        <tr
-                          key={d.id}
-                          onClick={() => openDriverWorkspace(d)}
-                          className="hover:bg-slate-50 cursor-pointer transition-colors"
-                        >
-                          <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
-                            {d.driverCode}
-                          </td>
-                          <td className="py-3 px-4">
-                            <div className="flex items-center gap-2.5">
-                              <DriverAvatar name={d.fullName} photoUrl={d.photoUrl} size="xs" />
-                              <div>
-                                <div className="font-bold text-slate-900">{d.fullName}</div>
-                                <div className="font-mono text-slate-500 tabular-nums" dir="ltr">
-                                  {d.phone}
-                                </div>
-                              </div>
+                    groupedMatchedDrivers.map((grp) => (
+                      <React.Fragment key={grp.schoolKey}>
+                        <tr className="bg-slate-100/80 border-y border-slate-200">
+                          <td colSpan={8} className="py-2 px-4 font-bold text-[#0B1F3A] text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="flex items-center gap-1.5">
+                                <Building2 className="w-3.5 h-3.5 text-[#C89B3C]" />
+                                {grp.schoolName}
+                              </span>
+                              <span className="font-mono text-[11px] text-slate-600 tabular-nums">
+                                {grp.items.length} سائق
+                              </span>
                             </div>
                           </td>
-                          <td className="py-3 px-4">
-                            <div className="text-slate-800">{d.schoolName || '—'}</div>
-                            <div className="text-slate-500 font-mono">{d.busNumber || '—'}</div>
-                          </td>
-                          {canFinanceRead && (
-                            <td className="py-3 px-4 font-mono tabular-nums">
-                              {formatEGP(sal?.baseSalary ?? d.monthlyAgreedSalary)}
-                            </td>
-                          )}
-                          {(canFinanceRead || canAdvancesWrite) && (
-                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                              {formatEGP(sal?.totalAdvances ?? 0)}
-                            </td>
-                          )}
-                          {(canFinanceRead || canCoverageWrite) && (
-                            <td className="py-3 px-4 font-mono tabular-nums">
-                              <div className="text-red-700">
-                                {Number(sal?.totalCoverageDeductions ?? 0) > 0 ? '− ' : ''}
-                                {formatEGP(sal?.totalCoverageDeductions ?? 0)}
-                              </div>
-                              {Number(sal?.totalCoverageAdditions ?? 0) > 0 && (
-                                <div className="text-[11px] font-semibold text-emerald-700">
-                                  + {formatEGP(sal?.totalCoverageAdditions ?? 0)} بديل
-                                </div>
-                              )}
-                            </td>
-                          )}
-                          {canFinanceRead && (
-                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
-                              {formatEGP(sal?.netSalary ?? d.monthlyAgreedSalary)}
-                            </td>
-                          )}
-                          <td className="py-3 px-4">
-                            <span className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white">
-                              <Users className="w-3 h-3 text-[#C89B3C]" />
-                              إدارة السائق
-                            </span>
-                          </td>
                         </tr>
-                      );
-                    })
+                        {grp.items.map((d) => {
+                          const sal = d.currentSalary;
+                          const busLabel = formatBusBadgeLabel(d.busNumber, d.hasCurrentVehicle);
+                          return (
+                            <tr
+                              key={d.id}
+                              onClick={() => openDriverWorkspace(d)}
+                              className="hover:bg-slate-50 cursor-pointer transition-colors"
+                            >
+                              <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                                {d.driverCode}
+                              </td>
+                              <td className="py-3 px-4">
+                                <div className="flex items-center gap-2.5">
+                                  <DriverAvatar name={d.fullName} photoUrl={d.photoUrl} size="xs" />
+                                  <div>
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="font-bold text-slate-900">{d.fullName}</span>
+                                      <span
+                                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                                          busLabel === 'بدون باص حالي'
+                                            ? 'bg-slate-100 text-slate-500'
+                                            : 'bg-amber-50 text-[#0B1F3A] border border-amber-200'
+                                        }`}
+                                      >
+                                        {busLabel}
+                                      </span>
+                                    </div>
+                                    <div className="font-mono text-slate-500 tabular-nums" dir="ltr">
+                                      {d.phone}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="py-3 px-4">
+                                <div className="text-slate-800">{d.schoolName || '—'}</div>
+                                <div className="text-slate-500 font-mono">{busLabel}</div>
+                              </td>
+                              {canFinanceRead && (
+                                <td className="py-3 px-4 font-mono tabular-nums">
+                                  {formatEGP(sal?.baseSalary ?? d.monthlyAgreedSalary)}
+                                </td>
+                              )}
+                              {(canFinanceRead || canAdvancesWrite) && (
+                                <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                                  {formatEGP(sal?.totalAdvances ?? 0)}
+                                </td>
+                              )}
+                              {(canFinanceRead || canCoverageWrite) && (
+                                <td className="py-3 px-4 font-mono tabular-nums">
+                                  <div className="text-red-700">
+                                    {Number(sal?.totalCoverageDeductions ?? 0) > 0 ? '− ' : ''}
+                                    {formatEGP(sal?.totalCoverageDeductions ?? 0)}
+                                  </div>
+                                  {Number(sal?.totalCoverageAdditions ?? 0) > 0 && (
+                                    <div className="text-[11px] font-semibold text-emerald-700">
+                                      + {formatEGP(sal?.totalCoverageAdditions ?? 0)} بديل
+                                    </div>
+                                  )}
+                                </td>
+                              )}
+                              {canFinanceRead && (
+                                <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                                  {formatEGP(sal?.netSalary ?? d.monthlyAgreedSalary)}
+                                </td>
+                              )}
+                              <td className="py-3 px-4">
+                                <span className="inline-flex items-center gap-1 rounded-lg bg-[#0B1F3A] px-3 py-1.5 text-[11px] font-semibold text-white">
+                                  <Users className="w-3 h-3 text-[#C89B3C]" />
+                                  إدارة السائق
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </React.Fragment>
+                    ))
                   )}
                 </tbody>
               </table>

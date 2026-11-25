@@ -15,6 +15,7 @@ import {
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, formatEGP, normalizeLookupText } from '../../lib/api';
 import { useEscapeKey } from '../../lib/useEscapeKey';
+import { compareSchoolAndBus, formatBusBadgeLabel } from '../../lib/bus-sorting';
 import { DriverAvatar } from '../DriverAvatar';
 import type {
   EmployeeRecord,
@@ -246,14 +247,16 @@ export const ArchiveModule: React.FC = () => {
 
   const q = normalizeLookupText(search);
   const digitsOnly = q.replace(/\D/g, '');
-  const filteredDrivers = data.drivers.filter(
-    (d) =>
-      !q ||
-      normalizeLookupText(d.fullName).includes(q) ||
-      normalizeLookupText(d.driverCode).includes(q) ||
-      normalizeLookupText(d.phone).includes(q) ||
-      (digitsOnly.length >= 2 && normalizeLookupText(d.phone).replace(/\D/g, '').includes(digitsOnly))
-  );
+  const filteredDrivers = data.drivers
+    .filter(
+      (d) =>
+        !q ||
+        normalizeLookupText(d.fullName).includes(q) ||
+        normalizeLookupText(d.driverCode).includes(q) ||
+        normalizeLookupText(d.phone).includes(q) ||
+        (digitsOnly.length >= 2 && normalizeLookupText(d.phone).replace(/\D/g, '').includes(digitsOnly))
+    )
+    .sort(compareSchoolAndBus);
   const filteredEmployees = data.employees.filter(
     (e) =>
       !q ||
@@ -261,13 +264,15 @@ export const ArchiveModule: React.FC = () => {
       normalizeLookupText(e.employeeCode).includes(q) ||
       normalizeLookupText(e.jobTitle).includes(q)
   );
-  const filteredVehicles = data.vehicles.filter(
-    (v) =>
-      !q ||
-      normalizeLookupText(v.busNumber).includes(q) ||
-      normalizeLookupText(v.registrationNumber).includes(q) ||
-      normalizeLookupText(v.schoolName || '').includes(q)
-  );
+  const filteredVehicles = data.vehicles
+    .filter(
+      (v) =>
+        !q ||
+        normalizeLookupText(v.busNumber).includes(q) ||
+        normalizeLookupText(v.registrationNumber).includes(q) ||
+        normalizeLookupText(v.schoolName || '').includes(q)
+    )
+    .sort(compareSchoolAndBus);
   const filteredSchools = data.schools.filter(
     (s) =>
       !q ||
@@ -380,7 +385,7 @@ export const ArchiveModule: React.FC = () => {
                         كود {d.driverCode} · {d.phone} · الراتب: {formatEGP(d.monthlyAgreedSalary)}
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">
-                        {d.schoolName} · باص {d.busNumber}
+                        {d.schoolName} · {formatBusBadgeLabel(d.busNumber, d.hasCurrentVehicle)}
                       </div>
                     </div>
                   </div>
@@ -482,7 +487,7 @@ export const ArchiveModule: React.FC = () => {
                   <div key={v.id} className="p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
                     <div>
                       <div className="font-bold text-[#0B1F3A] font-mono">
-                        {v.busNumber} · {v.registrationNumber}
+                        {formatBusBadgeLabel(v.busNumber)} · {v.registrationNumber}
                       </div>
                       <div className="text-slate-500 mt-0.5">
                         {v.schoolName || 'غير معين بمدرسة'}

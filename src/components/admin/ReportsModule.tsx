@@ -9,6 +9,11 @@ import {
   downloadBlob,
   shareImageFileViaWebShare,
 } from '../../lib/whatsapp-statement';
+import {
+  compareSchoolAndBus,
+  formatBusBadgeLabel,
+  groupBySchoolSortedByBus,
+} from '../../lib/bus-sorting';
 import type {
   AdvanceRecord,
   CoverageRecord,
@@ -152,6 +157,45 @@ export const ReportsModule: React.FC = () => {
     for (const d of data.drivers) driverById[d.id] = d;
   }
 
+  const sortedSalaries = data
+    ? [...data.salaries].sort((a, b) => {
+        const dA = driverById[a.driverId];
+        const dB = driverById[b.driverId];
+        return compareSchoolAndBus(
+          {
+            schoolId: dA?.schoolId ?? a.schoolId,
+            schoolName: dA?.schoolName ?? a.schoolName,
+            busNumber: dA?.busNumber ?? a.busNumber,
+            vehicleId: dA ? dA.vehicleId : undefined,
+          },
+          {
+            schoolId: dB?.schoolId ?? b.schoolId,
+            schoolName: dB?.schoolName ?? b.schoolName,
+            busNumber: dB?.busNumber ?? b.busNumber,
+            vehicleId: dB ? dB.vehicleId : undefined,
+          }
+        );
+      })
+    : [];
+
+  const groupedSalaries = groupBySchoolSortedByBus(
+    sortedSalaries.map((s) => {
+      const d = driverById[s.driverId];
+      return {
+        ...s,
+        schoolId: d?.schoolId ?? s.schoolId,
+        schoolName: d?.schoolName ?? s.schoolName,
+        busNumber: d?.busNumber ?? s.busNumber,
+        vehicleId: d ? d.vehicleId : undefined,
+      };
+    })
+  );
+
+  const sortedSupervisors = data?.supervisors
+    ? [...data.supervisors].sort(compareSchoolAndBus)
+    : [];
+  const groupedSupervisors = groupBySchoolSortedByBus(sortedSupervisors);
+
   const handleExportExcel = () => {
     if (!data) return;
     if (reportType === 'salaries' || reportType === 'statements') {
@@ -160,6 +204,7 @@ export const ReportsModule: React.FC = () => {
         [
           'كود السائق',
           'الاسم',
+          'الباص',
           'المدرسة',
           'الأساسي',
           'السلف',
@@ -169,11 +214,12 @@ export const ReportsModule: React.FC = () => {
           'المكافآت',
           'الصافي',
         ],
-        data.salaries.map((s) => {
+        sortedSalaries.map((s) => {
           const d = driverById[s.driverId];
           return [
             d?.driverCode || '',
             d?.fullName || '',
+            formatBusBadgeLabel(d?.busNumber ?? s.busNumber, d?.vehicleId),
             d?.schoolName || '',
             Number(s.baseSalary),
             Number(s.totalAdvances),
@@ -188,10 +234,11 @@ export const ReportsModule: React.FC = () => {
     } else if (reportType === 'supervisors') {
       exportRowsToExcel(
         `alwaleed-supervisors-${year}-${month}`,
-        ['الكود', 'المشرفة', 'المدرسة', 'نطاق الدورة', 'رحلات الصباح', 'رحلات المساء', 'أيام مكتملة', 'الراتب الشهري'],
-        (data.supervisors || []).map((sv) => [
+        ['الكود', 'المشرفة', 'الباص', 'المدرسة', 'نطاق الدورة', 'رحلات الصباح', 'رحلات المساء', 'أيام مكتملة', 'الراتب الشهري'],
+        sortedSupervisors.map((sv) => [
           sv.supervisorCode,
           sv.fullName,
+          formatBusBadgeLabel(sv.busNumber, sv.vehicleId),
           sv.schoolName,
           `${sv.billingRange.startDate} -> ${sv.billingRange.endDate}`,
           sv.morningTripsCount,
@@ -592,37 +639,62 @@ export const ReportsModule: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {data.salaries.map((s) => {
-                    const d = driverById[s.driverId];
-                    return (
-                      <tr key={s.id}>
-                        <td className="py-3 px-4 font-mono font-bold">{d?.driverCode}</td>
-                        <td className="py-3 px-4 font-semibold">{d?.fullName}</td>
-                        <td className="py-3 px-4">{d?.schoolName}</td>
-                        <td className="py-3 px-4 font-mono tabular-nums">{formatEGP(s.baseSalary)}</td>
-                        <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
-                          {formatEGP(s.totalAdvances)}
-                        </td>
-                        <td className="py-3 px-4 font-mono tabular-nums">
-                          <div className="text-red-700">
-                            {Number(s.totalCoverageDeductions || 0) > 0 ? '− ' : ''}
-                            {formatEGP(s.totalCoverageDeductions)}
-                          </div>
-                          {Number(s.totalCoverageAdditions || 0) > 0 && (
-                            <div className="text-[11px] font-semibold text-emerald-700">
-                              + {formatEGP(s.totalCoverageAdditions || 0)} بديل
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 font-mono text-emerald-700 tabular-nums">
-                          {formatEGP(s.bonuses)}
-                        </td>
-                        <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
-                          {formatEGP(s.netSalary)}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {groupedSalaries.map((grp) => (
+                    <React.Fragment key={grp.schoolKey}>
+                      {groupedSalaries.length > 1 && (
+                        <tr className="bg-slate-100/80 border-y border-slate-200">
+                          <td colSpan={8} className="py-2 px-4 font-bold text-[#0B1F3A] text-xs">
+                            {grp.schoolName} ({grp.items.length})
+                          </td>
+                        </tr>
+                      )}
+                      {grp.items.map((s) => {
+                        const d = driverById[s.driverId];
+                        const busLabel = formatBusBadgeLabel(s.busNumber, s.vehicleId);
+                        return (
+                          <tr key={s.id}>
+                            <td className="py-3 px-4 font-mono font-bold">{d?.driverCode}</td>
+                            <td className="py-3 px-4">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-semibold">{d?.fullName}</span>
+                                <span
+                                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                                    busLabel === 'بدون باص حالي'
+                                      ? 'bg-slate-100 text-slate-500'
+                                      : 'bg-amber-50 text-[#0B1F3A] border border-amber-200'
+                                  }`}
+                                >
+                                  {busLabel}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4">{d?.schoolName}</td>
+                            <td className="py-3 px-4 font-mono tabular-nums">{formatEGP(s.baseSalary)}</td>
+                            <td className="py-3 px-4 font-mono text-red-700 tabular-nums">
+                              {formatEGP(s.totalAdvances)}
+                            </td>
+                            <td className="py-3 px-4 font-mono tabular-nums">
+                              <div className="text-red-700">
+                                {Number(s.totalCoverageDeductions || 0) > 0 ? '− ' : ''}
+                                {formatEGP(s.totalCoverageDeductions)}
+                              </div>
+                              {Number(s.totalCoverageAdditions || 0) > 0 && (
+                                <div className="text-[11px] font-semibold text-emerald-700">
+                                  + {formatEGP(s.totalCoverageAdditions || 0)} بديل
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 font-mono text-emerald-700 tabular-nums">
+                              {formatEGP(s.bonuses)}
+                            </td>
+                            <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                              {formatEGP(s.netSalary)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
+                  ))}
                 </tbody>
               </table>
             )}
@@ -642,28 +714,55 @@ export const ReportsModule: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {(data.supervisors || []).length === 0 ? (
+                  {sortedSupervisors.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="py-8 text-center text-slate-400">
                         لا توجد مشرفات مسجلات في هذا النطاق
                       </td>
                     </tr>
                   ) : (
-                    (data.supervisors || []).map((sv) => (
-                      <tr key={sv.supervisorId}>
-                        <td className="py-3 px-4 font-mono font-bold">{sv.supervisorCode}</td>
-                        <td className="py-3 px-4 font-semibold">{sv.fullName}</td>
-                        <td className="py-3 px-4">{sv.schoolName}</td>
-                        <td className="py-3 px-4 font-mono tabular-nums">
-                          {sv.billingRange.startDate} ← {sv.billingRange.endDate}
-                        </td>
-                        <td className="py-3 px-4 font-mono tabular-nums">{sv.morningTripsCount}</td>
-                        <td className="py-3 px-4 font-mono tabular-nums">{sv.eveningTripsCount}</td>
-                        <td className="py-3 px-4 font-mono tabular-nums">{sv.completedDaysCount}</td>
-                        <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
-                          {formatEGP(sv.monthlySalary)}
-                        </td>
-                      </tr>
+                    groupedSupervisors.map((grp) => (
+                      <React.Fragment key={grp.schoolKey}>
+                        {groupedSupervisors.length > 1 && (
+                          <tr className="bg-slate-100/80 border-y border-slate-200">
+                            <td colSpan={8} className="py-2 px-4 font-bold text-[#0B1F3A] text-xs">
+                              {grp.schoolName} ({grp.items.length})
+                            </td>
+                          </tr>
+                        )}
+                        {grp.items.map((sv) => {
+                          const busLabel = formatBusBadgeLabel(sv.busNumber, sv.vehicleId);
+                          return (
+                            <tr key={sv.supervisorId}>
+                              <td className="py-3 px-4 font-mono font-bold">{sv.supervisorCode}</td>
+                              <td className="py-3 px-4">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="font-semibold">{sv.fullName}</span>
+                                  <span
+                                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+                                      busLabel === 'بدون باص حالي'
+                                        ? 'bg-slate-100 text-slate-500'
+                                        : 'bg-amber-50 text-[#0B1F3A] border border-amber-200'
+                                    }`}
+                                  >
+                                    {busLabel}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="py-3 px-4">{sv.schoolName}</td>
+                              <td className="py-3 px-4 font-mono tabular-nums">
+                                {sv.billingRange.startDate} ← {sv.billingRange.endDate}
+                              </td>
+                              <td className="py-3 px-4 font-mono tabular-nums">{sv.morningTripsCount}</td>
+                              <td className="py-3 px-4 font-mono tabular-nums">{sv.eveningTripsCount}</td>
+                              <td className="py-3 px-4 font-mono tabular-nums">{sv.completedDaysCount}</td>
+                              <td className="py-3 px-4 font-mono font-bold text-[#0B1F3A] tabular-nums">
+                                {formatEGP(sv.monthlySalary)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </React.Fragment>
                     ))
                   )}
                 </tbody>
@@ -817,7 +916,7 @@ export const ReportsModule: React.FC = () => {
                 <tbody className="divide-y divide-slate-100">
                   {data.fleet.map((v) => (
                     <tr key={v.id}>
-                      <td className="py-3 px-4 font-mono font-bold">{v.busNumber}</td>
+                      <td className="py-3 px-4 font-mono font-bold">{formatBusBadgeLabel(v.busNumber)}</td>
                       <td className="py-3 px-4">{v.registrationNumber}</td>
                       <td className="py-3 px-4">
                         {v.schoolName} · {v.routeName}

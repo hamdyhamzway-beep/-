@@ -82,6 +82,12 @@ const DEFAULT_ROLES = [
     description: 'صلاحيات عامة لإرسال التقارير اليومية ومتابعة العمل الميداني في المدرسة المخصصة له',
     permissions: ROLE_DEFAULT_PERMISSIONS.employee,
   },
+  {
+    slug: 'school_movement_manager',
+    nameAr: 'مدير حركة مدرسة',
+    description: 'تسجيل ومتابعة ملاحظات المدرسة اليومية وعرض التقرير الشهري للمدرسة المخصصة له فقط',
+    permissions: ROLE_DEFAULT_PERMISSIONS.school_movement_manager,
+  },
 ];
 
 let rolesSeeded = false;
@@ -89,7 +95,12 @@ let rolesSeeded = false;
 export async function ensureRolesExist() {
   if (rolesSeeded) return;
   for (const r of DEFAULT_ROLES) {
-    if (r.slug === 'movement_manager' || r.slug === 'accountant' || r.slug === 'employee') {
+    if (
+      r.slug === 'movement_manager' ||
+      r.slug === 'accountant' ||
+      r.slug === 'employee' ||
+      r.slug === 'school_movement_manager'
+    ) {
       await db
         .insert(userRoles)
         .values(r)
@@ -127,6 +138,9 @@ export function buildEffectivePermissions(
   customPermissions: unknown
 ): string[] {
   if (roleSlug === 'super_admin') return ['*'];
+  if (roleSlug === 'school_movement_manager') {
+    return [...ROLE_DEFAULT_PERMISSIONS.school_movement_manager];
+  }
   if (Array.isArray(customPermissions)) return customPermissions;
   if (Array.isArray(rolePermissions)) return rolePermissions as string[];
   return [];
@@ -716,6 +730,7 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
 export function isSchoolUnrestricted(user: DbUserContext | undefined): boolean {
   if (!user) return false;
   if (user.roleSlug === 'super_admin' || user.permissions.includes('*')) return true;
+  if (user.roleSlug === 'school_movement_manager') return false;
   return !user.assignedSchoolIds || user.assignedSchoolIds.length === 0;
 }
 

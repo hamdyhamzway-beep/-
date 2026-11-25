@@ -9,7 +9,15 @@ export interface DbUser {
   fullName: string;
   phone: string | null;
   roleId: number;
-  roleSlug: 'super_admin' | 'driver' | 'supervisor' | 'movement_manager' | 'accountant' | 'employee' | string;
+  roleSlug:
+    | 'super_admin'
+    | 'driver'
+    | 'supervisor'
+    | 'movement_manager'
+    | 'school_movement_manager'
+    | 'accountant'
+    | 'employee'
+    | string;
   roleNameAr: string;
   permissions: string[];
   customPermissions?: string[] | null;
@@ -45,6 +53,7 @@ export interface EnrichedDriver {
   schoolId: number | null;
   schoolName: string;
   vehicleId: number | null;
+  hasCurrentVehicle?: boolean;
   busNumber: string;
   registrationNumber: string;
   vehicleOwnerName: string;
@@ -64,6 +73,7 @@ export interface SchoolDriverSalarySummary {
   driverCode: string;
   fullName: string;
   phone: string;
+  vehicleId?: number | null;
   busNumber: string;
   routeName: string;
   monthlyAgreedSalary: number;
@@ -149,6 +159,9 @@ export interface RouteItem {
   pickupTime: string;
   dropoffTime: string;
   estimatedDistanceKm: number | null;
+  vehicleId?: number | null;
+  busNumber?: string;
+  vehicleType?: string;
 }
 
 export interface SalaryRecord {
@@ -331,7 +344,9 @@ export interface SupervisorRecord {
   schoolLat?: number | null;
   schoolLng?: number | null;
   vehicleId: number | null;
+  hasCurrentVehicle?: boolean;
   busNumber: string;
+  vehicleType?: string;
   registrationNumber: string;
   routeId: number | null;
   routeName: string;
@@ -358,6 +373,8 @@ export interface SupervisorCycleSummaryItem {
   phone: string;
   schoolId: number | null;
   schoolName: string;
+  vehicleId?: number | null;
+  busNumber?: string;
   monthlySalary: number;
   tripsCount: number;
   morningTripsCount: number;
@@ -689,10 +706,80 @@ export interface ExternalAccountsStats {
 
 export interface CustodyLookupData {
   schools: Array<{ id: number; name: string }>;
-  drivers: Array<{ id: number; fullName: string; driverCode: string; phone?: string; schoolId?: number | null }>;
-  supervisors: Array<{ id: number; fullName: string; phone?: string; schoolId?: number | null }>;
+  drivers: Array<{ id: number; fullName: string; driverCode: string; phone?: string; schoolId?: number | null; schoolName?: string; vehicleId?: number | null; busNumber?: string }>;
+  supervisors: Array<{ id: number; fullName: string; phone?: string; schoolId?: number | null; schoolName?: string; vehicleId?: number | null; busNumber?: string }>;
   employees: Array<{ id: number; fullName: string; phone?: string; jobTitle?: string; schoolId?: number | null }>;
 }
+
+export type SchoolNoteType = 'positive' | 'negative';
+export type SchoolNoteCategory = 'delay' | 'cleanliness' | 'behavior' | 'safety';
+export type SchoolNoteStatus = 'open' | 'closed';
+
+export interface SchoolNoteItem {
+  id: number;
+  schoolId: number;
+  schoolName: string;
+  routeId: number | null;
+  routeName: string;
+  driverId: number | null;
+  driverName: string;
+  tripDate: string;
+  noteType: SchoolNoteType;
+  category: SchoolNoteCategory;
+  body: string;
+  photoUrl: string;
+  status: SchoolNoteStatus;
+  adminReply: string;
+  resolution: string;
+  createdByUserId: number;
+  createdByName: string;
+  resolvedByUserId: number | null;
+  resolvedByName: string;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SchoolMovementRouteOption {
+  id: number;
+  name: string;
+  pickupArea: string;
+  dropoffArea: string;
+  pickupTime: string;
+  dropoffTime: string;
+  currentDriverId: number | null;
+  currentDriverName: string;
+  vehicleId?: number | null;
+  busNumber?: string;
+  vehicleType?: string;
+}
+
+export interface SchoolMonthlyReportSummary {
+  schoolId: number;
+  schoolName: string;
+  month: string; // YYYY-MM
+  positiveCount: number;
+  negativeCount: number;
+  totalNotes: number;
+  categories: {
+    delay: number;
+    cleanliness: number;
+    behavior: number;
+    safety: number;
+  };
+  complaintsClosedCount: number;
+  complaintsOpenCount: number;
+  punctuality: {
+    onTimeGraceMinutes: number;
+    measuredDaysCount: number;
+    totalSchoolDays: number;
+    measuredTripsCount: number;
+    onTimeTripsCount: number;
+    ratePercent: number | null;
+    summaryText: string;
+  };
+}
+
 
 
 
