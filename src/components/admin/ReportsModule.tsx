@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Copy, Download, FileSpreadsheet, Loader2, MessageCircle, Sparkles, X } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Copy, Download, FileSpreadsheet, Loader2, MessageCircle, RefreshCw, Sparkles, X } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, exportRowsToExcel, formatEGP, formatRelativeArabicTime } from '../../lib/api';
 import {
@@ -14,6 +14,7 @@ import {
   formatBusBadgeLabel,
   groupBySchoolSortedByBus,
 } from '../../lib/bus-sorting';
+import { getMarginRating, useMarginRatingThresholds } from '../../lib/profit-rating';
 import type {
   AdvanceRecord,
   CoverageRecord,
@@ -61,23 +62,74 @@ type ReportKind =
   | 'gps'
   | 'profitability';
 
+const REPORTS_SCHOOL_STORAGE_KEY = 'alwaleed_reports_school_v1';
+
+interface SchoolFilterOption {
+  id: number;
+  name: string;
+  shortLabelAr?: string;
+}
+
+function mergeSchoolOptions(
+  prev: SchoolFilterOption[],
+  incoming: SchoolFilterOption[]
+): SchoolFilterOption[] {
+  if (!incoming.length) return prev;
+  const map = new Map<number, SchoolFilterOption>();
+  for (const opt of prev) {
+    map.set(opt.id, opt);
+  }
+  for (const opt of incoming) {
+    if (!opt || !Number.isFinite(opt.id)) continue;
+    const existing = map.get(opt.id);
+    map.set(opt.id, {
+      id: opt.id,
+      name: opt.name || existing?.name || `مدرسة #${opt.id}`,
+      shortLabelAr: opt.shortLabelAr ?? existing?.shortLabelAr,
+    });
+  }
+  return Array.from(map.values());
+}
+
+function formatPct(pct: number | null): string {
+  if (pct === null || !Number.isFinite(pct)) return '—';
+  return `${pct.toFixed(1)}%`;
+}
+
 export const ReportsModule: React.FC = () => {
   const { dbUser } = useAuth();
   const isSuperAdmin =
     dbUser?.roleSlug === 'super_admin' || (dbUser?.permissions || []).includes('*');
-  const restrictedSchoolIds = dbUser?.assignedSchoolIds || [];
+  const restrictedSchoolIds = useMemo(
+    () => dbUser?.assignedSchoolIds || [],
+    [dbUser?.assignedSchoolIds]
+  );
   const isSingleSchoolRestricted = !isSuperAdmin && restrictedSchoolIds.length === 1;
+
+  const marginThresholds = useMarginRatingThresholds();
 
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [year, setYear] = useState(new Date().getFullYear());
-  const [selectedSchoolId, setSelectedSchoolId] = useState<string>(() =>
-    isSingleSchoolRestricted ? String(restrictedSchoolIds[0]) : 'all'
-  );
+  const [selectedSchoolId, setSelectedSchoolId] = useState<string>(() => {
+    if (isSingleSchoolRestricted && restrictedSchoolIds[0]) {
+      return String(restrictedSchoolIds[0]);
+    }
+    try {
+      return window.localStorage.getItem(REPORTS_SCHOOL_STORAGE_KEY) || 'all';
+    } catch {
+      return 'all';
+    }
+  });
+  const [schoolOptions, setSchoolOptions] = useState<SchoolFilterOption[]>([]);
+  const [schoolOptionsLoaded, setSchoolOptionsLoaded] = useState(false);
+
   const initialPeriodSyncedRef = useRef(false);
   const autoTodayPeriodRef = useRef(false);
+  const requestSeqRef = useRef(0);
   const [reportType, setReportType] = useState<ReportKind>('salaries');
   const [data, setData] = useState<ReportsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [slowLoading, setSlowLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const reportCaptureRef = useRef<HTMLDivElement | null>(null);
   const [sharingWhatsApp, setSharingWhatsApp] = useState(false);
@@ -97,7 +149,49 @@ export const ReportsModule: React.FC = () => {
     });
   }, []);
 
+  // Silent one-time fetch of school list so the filter dropdown stays populated even if report summary is loading/failing
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch<
+          | {
+              schools?: Array<{
+                id: number;
+                name: string;
+                currentBillingRange?: { shortLabelAr?: string };
+              }>;
+            }
+          | Array<{
+              id: number;
+              name: string;
+              currentBillingRange?: { shortLabelAr?: string };
+            }>
+        >('/api/schools');
+        if (cancelled) return;
+        const list = Array.isArray(res) ? res : res?.schools || [];
+        const filtered =
+          !isSuperAdmin && restrictedSchoolIds.length > 0
+            ? list.filter((s) => restrictedSchoolIds.includes(s.id))
+            : list;
+        const mapped: SchoolFilterOption[] = filtered.map((s) => ({
+          id: s.id,
+          name: s.name,
+          shortLabelAr: s.currentBillingRange?.shortLabelAr,
+        }));
+        setSchoolOptions((prev) => mergeSchoolOptions(prev, mapped));
+        setSchoolOptionsLoaded(true);
+      } catch {
+        // Silent by design: user may not have schools:read permission; fallback populates from summary response
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isSuperAdmin, restrictedSchoolIds]);
+
   const loadReports = useCallback(async () => {
+    const seq = ++requestSeqRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -115,18 +209,39 @@ export const ReportsModule: React.FC = () => {
       const qs = params.toString();
       const url = qs ? `/api/reports/summary?${qs}` : `/api/reports/summary`;
       const res = await apiFetch<ReportsResponse>(url);
+      if (seq !== requestSeqRef.current) return;
+
       if ((!initialPeriodSyncedRef.current || autoTodayPeriodRef.current) && res.period) {
         initialPeriodSyncedRef.current = true;
         autoTodayPeriodRef.current = false;
         setMonth(res.period.month);
         setYear(res.period.year);
       }
+      if (res.schoolBillingRanges && res.schoolBillingRanges.length > 0) {
+        const rangeOpts: SchoolFilterOption[] = res.schoolBillingRanges.map((sb) => ({
+          id: sb.schoolId,
+          name: sb.schoolName,
+          shortLabelAr: sb.range?.shortLabelAr,
+        }));
+        setSchoolOptions((prev) => mergeSchoolOptions(prev, rangeOpts));
+        setSchoolOptionsLoaded(true);
+      } else if (res.schools && res.schools.length > 0) {
+        const schoolFallbackOpts: SchoolFilterOption[] = res.schools.map((s) => ({
+          id: s.id,
+          name: s.name,
+        }));
+        setSchoolOptions((prev) => mergeSchoolOptions(prev, schoolFallbackOpts));
+        setSchoolOptionsLoaded(true);
+      }
       setData(res);
     } catch (err: unknown) {
+      if (seq !== requestSeqRef.current) return;
       autoTodayPeriodRef.current = false;
       setError(err instanceof Error ? err.message : 'تعذر تحميل بيانات التقارير');
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [month, year, selectedSchoolId]);
 
@@ -140,6 +255,35 @@ export const ReportsModule: React.FC = () => {
       setSelectedSchoolId(String(restrictedSchoolIds[0]));
     }
   }, [isSingleSchoolRestricted, restrictedSchoolIds]);
+
+  // Verify saved localStorage schoolId exists once options are known; otherwise fall back to 'all'
+  useEffect(() => {
+    if (isSingleSchoolRestricted) return;
+    if (!schoolOptionsLoaded || schoolOptions.length === 0) return;
+    if (
+      selectedSchoolId !== 'all' &&
+      !schoolOptions.some((opt) => String(opt.id) === selectedSchoolId)
+    ) {
+      setSelectedSchoolId('all');
+      try {
+        window.localStorage.setItem(REPORTS_SCHOOL_STORAGE_KEY, 'all');
+      } catch {
+        // ignore
+      }
+    }
+  }, [isSingleSchoolRestricted, schoolOptionsLoaded, schoolOptions, selectedSchoolId]);
+
+  // 15-second slow-loading warning timer
+  useEffect(() => {
+    if (!loading) {
+      setSlowLoading(false);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setSlowLoading(true);
+    }, 15000);
+    return () => window.clearTimeout(timer);
+  }, [loading]);
 
   useEffect(() => {
     clearWhatsappPreview();
@@ -284,14 +428,36 @@ export const ReportsModule: React.FC = () => {
     } else if (reportType === 'schools' || reportType === 'profitability') {
       exportRowsToExcel(
         `alwaleed-profitability-${year}-${month}`,
-        ['المدرسة', 'قيمة العقد الشهري', 'عدد المركبات', 'إجمالي رواتب السائقين', 'صافي ربح المدرسة'],
-        data.schools.map((s) => {
-          const vCount = data.fleet.filter((v) => v.schoolId === s.id).length;
-          const schoolSal = data.salaries
-            .filter((sal) => driverById[sal.driverId]?.schoolId === s.id)
-            .reduce((sum, sal) => sum + Number(sal.netSalary || 0), 0);
-          return [s.name, Number(s.monthlyContractValue), vCount, schoolSal, Number(s.monthlyContractValue) - schoolSal];
-        })
+        [
+          'المدرسة',
+          'قيمة العقد الشهري',
+          'عدد الباصات',
+          'الرواتب الأساسية',
+          'السلف',
+          'خصم التغطيات',
+          'مستحق التغطيات',
+          'صافي الفرق',
+          'الهامش الفعلي (ج)',
+          'الهامش الفعلي (%)',
+          'الصافي بعد السلف والتغطيات (ج)',
+          'الصافي بعد السلف والتغطيات (%)',
+          'التقييم',
+        ],
+        schoolProfitRows.map((row) => [
+          row.school.name,
+          row.contractValue,
+          row.busCount,
+          row.baseSalaries,
+          row.advances,
+          row.coverageDeductions,
+          row.coverageAdditions,
+          row.difference,
+          row.actualMargin,
+          row.actualMarginPct !== null ? Number(row.actualMarginPct.toFixed(1)) : '—',
+          row.netAfterAdvances,
+          row.netAfterAdvancesPct !== null ? Number(row.netAfterAdvancesPct.toFixed(1)) : '—',
+          row.rating.label,
+        ])
       );
     } else if (reportType === 'vehicles' || reportType === 'gps') {
       exportRowsToExcel(
@@ -331,18 +497,124 @@ export const ReportsModule: React.FC = () => {
     { id: 'profitability', label: 'تقرير ربحية المكتب' },
   ];
 
-  const totalSchoolRevenue =
-    data?.schools.reduce((sum, s) => sum + Number(s.monthlyContractValue || 0), 0) || 0;
-  const totalSalariesNet =
-    data?.salaries.reduce((sum, sal) => sum + Number(sal.netSalary || 0), 0) || 0;
+  const schoolProfitRows = useMemo(() => {
+    if (!data) return [];
+    const byDriver: Record<number, EnrichedDriver> = {};
+    for (const d of data.drivers) byDriver[d.id] = d;
+
+    return data.schools.map((s) => {
+      const busCount = data.fleet.filter((v) => v.schoolId === s.id).length;
+      const schoolSalaries = data.salaries.filter(
+        (sal) => (byDriver[sal.driverId]?.schoolId ?? sal.schoolId) === s.id
+      );
+
+      const contractValue = Number(s.monthlyContractValue || 0);
+      const baseSalaries = schoolSalaries.reduce((sum, sal) => sum + Number(sal.baseSalary || 0), 0);
+      const advances = schoolSalaries.reduce((sum, sal) => sum + Number(sal.totalAdvances || 0), 0);
+      const coverageDeductions = schoolSalaries.reduce(
+        (sum, sal) => sum + Number(sal.totalCoverageDeductions || 0),
+        0
+      );
+      const coverageAdditions = schoolSalaries.reduce(
+        (sum, sal) => sum + Number(sal.totalCoverageAdditions || 0),
+        0
+      );
+      const bonuses = schoolSalaries.reduce((sum, sal) => sum + Number(sal.bonuses || 0), 0);
+      const otherDeductions = schoolSalaries.reduce(
+        (sum, sal) => sum + Number(sal.otherDeductions || 0),
+        0
+      );
+      const netSalaries = schoolSalaries.reduce((sum, sal) => sum + Number(sal.netSalary || 0), 0);
+
+      const actualMargin = contractValue - baseSalaries;
+      const actualMarginPct = contractValue > 0 ? (actualMargin / contractValue) * 100 : null;
+      const netAfterAdvances = contractValue - netSalaries;
+      const netAfterAdvancesPct =
+        contractValue > 0 ? (netAfterAdvances / contractValue) * 100 : null;
+      const difference =
+        advances + coverageDeductions - coverageAdditions - bonuses + otherDeductions;
+      const rating = getMarginRating(netAfterAdvancesPct, marginThresholds);
+
+      return {
+        school: s,
+        busCount,
+        contractValue,
+        baseSalaries,
+        advances,
+        coverageDeductions,
+        coverageAdditions,
+        bonuses,
+        otherDeductions,
+        netSalaries,
+        actualMargin,
+        actualMarginPct,
+        netAfterAdvances,
+        netAfterAdvancesPct,
+        difference,
+        rating,
+      };
+    });
+  }, [data, marginThresholds]);
+
+  const profitTotals = useMemo(() => {
+    const sums = schoolProfitRows.reduce(
+      (acc, r) => ({
+        contractValue: acc.contractValue + r.contractValue,
+        busCount: acc.busCount + r.busCount,
+        baseSalaries: acc.baseSalaries + r.baseSalaries,
+        advances: acc.advances + r.advances,
+        coverageDeductions: acc.coverageDeductions + r.coverageDeductions,
+        coverageAdditions: acc.coverageAdditions + r.coverageAdditions,
+        bonuses: acc.bonuses + r.bonuses,
+        otherDeductions: acc.otherDeductions + r.otherDeductions,
+        netSalaries: acc.netSalaries + r.netSalaries,
+        actualMargin: acc.actualMargin + r.actualMargin,
+        netAfterAdvances: acc.netAfterAdvances + r.netAfterAdvances,
+        difference: acc.difference + r.difference,
+      }),
+      {
+        contractValue: 0,
+        busCount: 0,
+        baseSalaries: 0,
+        advances: 0,
+        coverageDeductions: 0,
+        coverageAdditions: 0,
+        bonuses: 0,
+        otherDeductions: 0,
+        netSalaries: 0,
+        actualMargin: 0,
+        netAfterAdvances: 0,
+        difference: 0,
+      }
+    );
+
+    const actualMarginPct =
+      sums.contractValue > 0 ? (sums.actualMargin / sums.contractValue) * 100 : null;
+    const netAfterAdvancesPct =
+      sums.contractValue > 0 ? (sums.netAfterAdvances / sums.contractValue) * 100 : null;
+    const rating = getMarginRating(netAfterAdvancesPct, marginThresholds);
+
+    return {
+      ...sums,
+      actualMarginPct,
+      netAfterAdvancesPct,
+      rating,
+    };
+  }, [schoolProfitRows, marginThresholds]);
+
+  const selectedSchoolOption = schoolOptions.find((o) => String(o.id) === selectedSchoolId);
+  const activeSchoolName =
+    data?.period?.schoolName || (selectedSchoolId !== 'all' ? selectedSchoolOption?.name || null : null);
 
   const handleSendReportToWhatsApp = async () => {
     if (!reportCaptureRef.current || !data) return;
     setSharingWhatsApp(true);
     setError(null);
     try {
+      const captureWidth =
+        reportType === 'schools' || reportType === 'profitability' ? 1200 : 1020;
       const blob = await captureElementAsPngBlob(reportCaptureRef.current, {
-        width: 1020,
+        width: captureWidth,
         backgroundColor: '#ffffff',
       });
       const label = reportTabs.find((r) => r.id === reportType)?.label || 'تقرير';
@@ -388,7 +660,17 @@ export const ReportsModule: React.FC = () => {
           <select
             value={selectedSchoolId}
             disabled={isSingleSchoolRestricted}
-            onChange={(e) => setSelectedSchoolId(e.target.value)}
+            onChange={(e) => {
+              const nextId = e.target.value;
+              setSelectedSchoolId(nextId);
+              if (!isSingleSchoolRestricted) {
+                try {
+                  window.localStorage.setItem(REPORTS_SCHOOL_STORAGE_KEY, nextId);
+                } catch {
+                  // ignore storage errors
+                }
+              }
+            }}
             aria-label="تصفية التقارير حسب المدرسة"
             className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-[#0B1F3A] focus:outline-none focus:border-[#C89B3C] disabled:bg-slate-100"
           >
@@ -399,15 +681,14 @@ export const ReportsModule: React.FC = () => {
                   : 'جميع المدارس (كل دورة حسب مدرستها)'}
               </option>
             )}
-            {(data?.schoolBillingRanges || []).map((sb) => (
-              <option key={sb.schoolId} value={String(sb.schoolId)}>
-                {sb.schoolName} ({sb.range.shortLabelAr})
+            {schoolOptions.map((sb) => (
+              <option key={sb.id} value={String(sb.id)}>
+                {sb.name}
+                {sb.shortLabelAr ? ` (${sb.shortLabelAr})` : ''}
               </option>
             ))}
             {isSingleSchoolRestricted &&
-              !(data?.schoolBillingRanges || []).some(
-                (sb) => String(sb.schoolId) === String(restrictedSchoolIds[0])
-              ) && (
+              !schoolOptions.some((sb) => String(sb.id) === String(restrictedSchoolIds[0])) && (
                 <option value={String(restrictedSchoolIds[0])}>
                   {dbUser?.assignedSchoolNames?.[0] || 'المدرسة المخصصة'}
                 </option>
@@ -472,17 +753,27 @@ export const ReportsModule: React.FC = () => {
         </div>
       </div>
 
-      {error && (
+      {error && data && (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs text-red-800 flex items-center justify-between gap-2 no-print">
           <span>{error}</span>
-          <button
-            type="button"
-            onClick={() => setError(null)}
-            aria-label="إغلاق التنبيه"
-            className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={loadReports}
+              className="inline-flex items-center gap-1 rounded-lg bg-white border border-red-200 px-2.5 py-1 text-[11px] font-bold text-red-800 hover:bg-red-100 cursor-pointer"
+            >
+              <RefreshCw className="w-3 h-3" />
+              إعادة المحاولة
+            </button>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              aria-label="إغلاق التنبيه"
+              className="p-1 text-red-500 hover:text-red-800 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -595,10 +886,11 @@ export const ReportsModule: React.FC = () => {
           <div>
             <h2 className="font-display text-base font-bold text-[#0B1F3A]">
               الوليد ترافيل — {reportTabs.find((r) => r.id === reportType)?.label}
-              {data?.period?.schoolName ? ` (${data.period.schoolName})` : ''}
+              {activeSchoolName ? ` (${activeSchoolName})` : ''}
             </h2>
             <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
               الفترة: شهر {month} / {year}
+              {activeSchoolName ? ` · المدرسة: ${activeSchoolName}` : ''}
               {data?.period?.labelAr ? ` · ${data.period.labelAr}` : ''}
             </p>
           </div>
@@ -620,8 +912,32 @@ export const ReportsModule: React.FC = () => {
           )}
         </div>
 
-        {loading || !data ? (
-          <div className="p-10 text-center text-xs text-slate-400">جاري تجهيز التقرير...</div>
+        {loading ? (
+          <div className="p-10 text-center space-y-2">
+            <div className="inline-flex items-center gap-2 text-xs font-semibold text-slate-500">
+              <Loader2 className="w-4 h-4 animate-spin text-[#0B1F3A]" />
+              <span>جاري تجهيز التقرير...</span>
+            </div>
+            {slowLoading && (
+              <p className="text-xs font-semibold text-amber-700">
+                التحميل أبطأ من المعتاد. جرّب تختار مدرسة واحدة
+              </p>
+            )}
+          </div>
+        ) : error && !data ? (
+          <div className="p-10 text-center space-y-3">
+            <p className="text-xs font-semibold text-red-700">{error}</p>
+            <button
+              type="button"
+              onClick={loadReports}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B1F3A] hover:bg-[#13325c] px-4 py-2 text-xs font-bold text-white cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-[#C89B3C]" />
+              إعادة المحاولة
+            </button>
+          </div>
+        ) : !data ? (
+          <div className="p-10 text-center text-xs text-slate-400">لا توجد بيانات للعرض</div>
         ) : (
           <div className="overflow-x-auto">
             {(reportType === 'salaries' || reportType === 'statements') && (
@@ -844,60 +1160,257 @@ export const ReportsModule: React.FC = () => {
 
             {(reportType === 'schools' || reportType === 'profitability') && (
               <div className="p-5 space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
-                  <div className="border border-slate-200 rounded-xl p-4">
-                    <div className="text-slate-500">إجمالي إيرادات عقود المدارس</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
+                  <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                    <div className="text-slate-500">إيرادات العقود</div>
                     <div className="mt-1 font-mono text-lg font-bold text-[#0B1F3A] tabular-nums">
-                      {formatEGP(totalSchoolRevenue)}
+                      {formatEGP(profitTotals.contractValue)}
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500 tabular-nums">
+                      {schoolProfitRows.length} مدرسة · {profitTotals.busCount} باص
                     </div>
                   </div>
-                  <div className="border border-slate-200 rounded-xl p-4">
-                    <div className="text-slate-500">إجمالي صافي رواتب السائقين</div>
+
+                  <div className="border border-slate-200 rounded-xl p-4 bg-white">
+                    <div className="text-slate-500">الرواتب الأساسية</div>
                     <div className="mt-1 font-mono text-lg font-bold text-red-700 tabular-nums">
-                      {formatEGP(totalSalariesNet)}
+                      {formatEGP(profitTotals.baseSalaries)}
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-500 tabular-nums">
+                      الصافي المنصرف للسائقين: {formatEGP(profitTotals.netSalaries)}
                     </div>
                   </div>
+
+                  <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/70">
+                    <div className="text-slate-600 font-semibold">الهامش الفعلي</div>
+                    <div
+                      className={`mt-1 font-mono text-lg font-bold tabular-nums ${
+                        profitTotals.actualMargin >= 0 ? 'text-emerald-700' : 'text-red-700'
+                      }`}
+                    >
+                      {formatEGP(profitTotals.actualMargin)}
+                    </div>
+                    <div className="mt-1 text-[11px] font-semibold text-slate-600 tabular-nums">
+                      نسبة من العقود:{' '}
+                      <span dir="ltr" className="font-mono font-bold text-[#0B1F3A]">
+                        {formatPct(profitTotals.actualMarginPct)}
+                      </span>
+                    </div>
+                  </div>
+
                   <div className="bg-[#0B1F3A] text-white rounded-xl p-4">
-                    <div className="text-slate-300">صافي ربح المكتب المتوقع</div>
+                    <div className="text-slate-300">الصافي بعد السلف والتغطيات</div>
                     <div className="mt-1 font-mono text-lg font-bold text-[#C89B3C] tabular-nums">
-                      {formatEGP(totalSchoolRevenue - totalSalariesNet)}
+                      {formatEGP(profitTotals.netAfterAdvances)}
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] text-slate-200 font-mono tabular-nums" dir="ltr">
+                        {formatPct(profitTotals.netAfterAdvancesPct)}
+                      </span>
+                      <span
+                        className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-bold ${profitTotals.rating.badgeClassName}`}
+                      >
+                        {profitTotals.rating.label}
+                      </span>
                     </div>
                   </div>
                 </div>
-                <table className="w-full text-right text-xs border border-slate-200">
-                  <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
-                    <tr>
-                      <th className="py-3 px-4">المدرسة</th>
-                      <th className="py-3 px-4">قيمة العقد الشهري</th>
-                      <th className="py-3 px-4">عدد الباصات</th>
-                      <th className="py-3 px-4">رواتب السائقين</th>
-                      <th className="py-3 px-4">صافي الربح المتوقع</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {data.schools.map((s) => {
-                      const vCount = data.fleet.filter((v) => v.schoolId === s.id).length;
-                      const schoolSal = data.salaries
-                        .filter((sal) => driverById[sal.driverId]?.schoolId === s.id)
-                        .reduce((sum, sal) => sum + Number(sal.netSalary || 0), 0);
-                      return (
-                        <tr key={s.id}>
-                          <td className="py-3 px-4 font-semibold">{s.name}</td>
-                          <td className="py-3 px-4 font-mono tabular-nums">
-                            {formatEGP(s.monthlyContractValue)}
-                          </td>
-                          <td className="py-3 px-4 font-mono tabular-nums">{vCount}</td>
-                          <td className="py-3 px-4 font-mono tabular-nums text-red-700">
-                            {formatEGP(schoolSal)}
-                          </td>
-                          <td className="py-3 px-4 font-mono font-bold text-emerald-700 tabular-nums">
-                            {formatEGP(Number(s.monthlyContractValue) - schoolSal)}
+
+                {/* Explicit breakdown of the difference between Actual Margin and Net After Advances */}
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-[11px] text-slate-700 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="font-bold text-[#0B1F3A]">
+                      الفرق بين الهامش الفعلي والصافي بعد السلف والتغطيات:
+                    </span>
+                    <span className="font-mono font-bold text-[#0B1F3A] tabular-nums">
+                      {formatEGP(profitTotals.difference)}
+                    </span>
+                  </div>
+                  <div className="text-slate-600 tabular-nums">
+                    السلف ({formatEGP(profitTotals.advances)}) + خصم التغطيات (
+                    {formatEGP(profitTotals.coverageDeductions)}) − مستحق التغطيات (
+                    {formatEGP(profitTotals.coverageAdditions)}) − المكافآت (
+                    {formatEGP(profitTotals.bonuses)}) + الخصومات الأخرى (
+                    {formatEGP(profitTotals.otherDeductions)})
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-right text-xs border border-slate-200">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-3 whitespace-nowrap">المدرسة</th>
+                        <th className="py-3 px-3 whitespace-nowrap">قيمة العقد</th>
+                        <th className="py-3 px-3 whitespace-nowrap">عدد الباصات</th>
+                        <th className="py-3 px-3 whitespace-nowrap">الرواتب الأساسية</th>
+                        <th className="py-3 px-3 whitespace-nowrap">السلف</th>
+                        <th className="py-3 px-3 whitespace-nowrap">التغطيات (الخصم / المستحق)</th>
+                        <th className="py-3 px-3 whitespace-nowrap">الهامش الفعلي (ج)</th>
+                        <th className="py-3 px-3 whitespace-nowrap">الهامش الفعلي (%)</th>
+                        <th className="py-3 px-3 whitespace-nowrap">الصافي بعد السلف والتغطيات</th>
+                        <th className="py-3 px-3 whitespace-nowrap">التقييم</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {schoolProfitRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={10} className="py-8 text-center text-slate-400">
+                            لا توجد مدارس مسجلة في هذا النطاق
                           </td>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      ) : (
+                        schoolProfitRows.map((row) => {
+                          const coverageNet = row.coverageDeductions - row.coverageAdditions;
+                          return (
+                            <tr key={row.school.id} className="hover:bg-slate-50/70">
+                              <td className="py-3 px-3 font-semibold text-[#0B1F3A] whitespace-nowrap">
+                                {row.school.name}
+                              </td>
+                              <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                                {formatEGP(row.contractValue)}
+                              </td>
+                              <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                                {row.busCount}
+                              </td>
+                              <td className="py-3 px-3 font-mono tabular-nums text-red-700 whitespace-nowrap">
+                                {formatEGP(row.baseSalaries)}
+                              </td>
+                              <td className="py-3 px-3 font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                                {formatEGP(row.advances)}
+                              </td>
+                              <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                                {row.coverageDeductions === 0 && row.coverageAdditions === 0 ? (
+                                  <span className="text-slate-400">{formatEGP(0)}</span>
+                                ) : (
+                                  <div className="space-y-0.5">
+                                    {row.coverageDeductions > 0 && (
+                                      <div className="text-red-700">
+                                        خصم: {formatEGP(row.coverageDeductions)}
+                                      </div>
+                                    )}
+                                    {row.coverageAdditions > 0 && (
+                                      <div className="text-emerald-700">
+                                        مستحق: {formatEGP(row.coverageAdditions)}
+                                      </div>
+                                    )}
+                                    <div className="text-[10px] text-slate-500">
+                                      صافي: {coverageNet >= 0 ? '+' : ''}
+                                      {formatEGP(coverageNet)}
+                                    </div>
+                                  </div>
+                                )}
+                              </td>
+                              <td
+                                className={`py-3 px-3 font-mono font-bold tabular-nums whitespace-nowrap ${
+                                  row.actualMargin >= 0 ? 'text-emerald-700' : 'text-red-700'
+                                }`}
+                              >
+                                {formatEGP(row.actualMargin)}
+                              </td>
+                              <td className="py-3 px-3 font-mono font-semibold text-[#0B1F3A] tabular-nums whitespace-nowrap">
+                                <span dir="ltr">{formatPct(row.actualMarginPct)}</span>
+                              </td>
+                              <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                                <div
+                                  className={`font-bold ${
+                                    row.netAfterAdvances >= 0 ? 'text-[#0B1F3A]' : 'text-red-700'
+                                  }`}
+                                >
+                                  {formatEGP(row.netAfterAdvances)}
+                                </div>
+                                <div className="text-[11px] text-slate-500" dir="ltr">
+                                  {formatPct(row.netAfterAdvancesPct)}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 whitespace-nowrap">
+                                <span
+                                  className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold ${row.rating.badgeClassName}`}
+                                >
+                                  {row.rating.label}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                    {schoolProfitRows.length > 0 && (
+                      <tfoot className="bg-slate-100 border-t-2 border-slate-200 font-bold text-[#0B1F3A]">
+                        <tr>
+                          <td className="py-3 px-3 whitespace-nowrap">الإجمالي</td>
+                          <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                            {formatEGP(profitTotals.contractValue)}
+                          </td>
+                          <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                            {profitTotals.busCount}
+                          </td>
+                          <td className="py-3 px-3 font-mono tabular-nums text-red-700 whitespace-nowrap">
+                            {formatEGP(profitTotals.baseSalaries)}
+                          </td>
+                          <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                            {formatEGP(profitTotals.advances)}
+                          </td>
+                          <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                            {formatEGP(profitTotals.coverageDeductions - profitTotals.coverageAdditions)}
+                          </td>
+                          <td
+                            className={`py-3 px-3 font-mono tabular-nums whitespace-nowrap ${
+                              profitTotals.actualMargin >= 0 ? 'text-emerald-700' : 'text-red-700'
+                            }`}
+                          >
+                            {formatEGP(profitTotals.actualMargin)}
+                          </td>
+                          <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                            <span dir="ltr">{formatPct(profitTotals.actualMarginPct)}</span>
+                          </td>
+                          <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                            <div>{formatEGP(profitTotals.netAfterAdvances)}</div>
+                            <div className="text-[11px] text-slate-600" dir="ltr">
+                              {formatPct(profitTotals.netAfterAdvancesPct)}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 whitespace-nowrap">
+                            <span
+                              className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold ${profitTotals.rating.badgeClassName}`}
+                            >
+                              {profitTotals.rating.label}
+                            </span>
+                          </td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+
+                {/* Rating thresholds legend & explanatory footnotes */}
+                <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 text-[11px] text-slate-600">
+                  <div className="flex flex-wrap items-center gap-1.5 text-slate-700">
+                    <span className="font-bold text-[#0B1F3A]">نطاقات التقييم (على الصافي بعد السلف والتغطيات %):</span>
+                    <span className="font-semibold text-red-900">خسارة &lt; 0%</span>
+                    <span>·</span>
+                    <span className="font-semibold text-red-700">
+                      ضعيف جدًا &lt; {marginThresholds.veryWeakMax}%
+                    </span>
+                    <span>·</span>
+                    <span className="font-semibold text-orange-700">
+                      ضعيف {marginThresholds.veryWeakMax}%–&lt;{marginThresholds.weakMax}%
+                    </span>
+                    <span>·</span>
+                    <span className="font-semibold text-emerald-700">
+                      جيد {marginThresholds.weakMax}%–&lt;{marginThresholds.goodMax}%
+                    </span>
+                    <span>·</span>
+                    <span className="font-semibold text-emerald-900">
+                      ممتاز ≥ {marginThresholds.goodMax}%
+                    </span>
+                  </div>
+                  <p>
+                    السلف وخصم التغطيات بيقلّلوا اللي هتدفعه للسواقين لكن مش ربح؛ الهامش الفعلي هو الأساس للمقارنة
+                  </p>
+                  <p className="text-slate-500">
+                    ملاحظة: رواتب المشرفات والموظفين غير داخلة في هذا الحساب (نفس منطق الهامش على مستوى العقود والسائقين).
+                  </p>
+                </div>
               </div>
             )}
 

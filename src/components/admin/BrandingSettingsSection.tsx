@@ -1,10 +1,11 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Building2,
   Check,
   ImagePlus,
   Palette,
   RotateCcw,
+  SlidersHorizontal,
   Type,
   Upload,
 } from 'lucide-react';
@@ -13,6 +14,16 @@ import {
   type AppFontChoice,
   useBranding,
 } from '../../contexts/BrandingContext';
+import {
+  DEFAULT_MARGIN_RATING_THRESHOLDS,
+  getMarginRating,
+  loadMarginRatingThresholds,
+  RATING_THRESHOLDS_EVENT,
+  REPORT_RATING_STORAGE_KEY,
+  resetMarginRatingThresholds,
+  saveMarginRatingThresholds,
+  validateMarginRatingThresholds,
+} from '../../lib/profit-rating';
 import { BrandLogo } from '../BrandLogo';
 
 async function prepareLogoDataUrl(file: File): Promise<string> {
@@ -61,6 +72,92 @@ export const BrandingSettingsSection: React.FC = () => {
   const [uploadBusy, setUploadBusy] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const [savedThresholds, setSavedThresholds] = useState(() => loadMarginRatingThresholds());
+  const [thresholdDrafts, setThresholdDrafts] = useState(() => {
+    const initial = loadMarginRatingThresholds();
+    return {
+      veryWeakMax: String(initial.veryWeakMax),
+      weakMax: String(initial.weakMax),
+      goodMax: String(initial.goodMax),
+    };
+  });
+  const [ratingError, setRatingError] = useState<string | null>(null);
+  const [ratingSavedNotice, setRatingSavedNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    const syncFromStorage = () => {
+      const latest = loadMarginRatingThresholds();
+      setSavedThresholds(latest);
+      setThresholdDrafts({
+        veryWeakMax: String(latest.veryWeakMax),
+        weakMax: String(latest.weakMax),
+        goodMax: String(latest.goodMax),
+      });
+      setRatingError(null);
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === REPORT_RATING_STORAGE_KEY) {
+        syncFromStorage();
+      }
+    };
+    window.addEventListener(RATING_THRESHOLDS_EVENT, syncFromStorage);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(RATING_THRESHOLDS_EVENT, syncFromStorage);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  const handleThresholdDraftChange = (
+    field: 'veryWeakMax' | 'weakMax' | 'goodMax',
+    rawValue: string
+  ) => {
+    const nextDrafts = { ...thresholdDrafts, [field]: rawValue };
+    setThresholdDrafts(nextDrafts);
+    setRatingSavedNotice(null);
+
+    if (
+      nextDrafts.veryWeakMax.trim() === '' ||
+      nextDrafts.weakMax.trim() === '' ||
+      nextDrafts.goodMax.trim() === ''
+    ) {
+      setRatingError('من فضلك أدخل القيم الثلاث كاملة ليتم حفظ الحدود.');
+      return;
+    }
+
+    const candidate = {
+      veryWeakMax: Number(nextDrafts.veryWeakMax),
+      weakMax: Number(nextDrafts.weakMax),
+      goodMax: Number(nextDrafts.goodMax),
+    };
+    const validation = validateMarginRatingThresholds(candidate);
+    if (!validation.valid) {
+      setRatingError(validation.error);
+      return;
+    }
+
+    const res = saveMarginRatingThresholds(candidate);
+    if (res.ok) {
+      setSavedThresholds(res.thresholds);
+      setRatingError(null);
+      setRatingSavedNotice('تم حفظ حدود التقييم وتطبيقها فوراً على شاشة التقارير');
+    } else {
+      setRatingError(res.error);
+    }
+  };
+
+  const handleResetRatingThresholds = () => {
+    const defaults = resetMarginRatingThresholds();
+    setSavedThresholds(defaults);
+    setThresholdDrafts({
+      veryWeakMax: String(defaults.veryWeakMax),
+      weakMax: String(defaults.weakMax),
+      goodMax: String(defaults.goodMax),
+    });
+    setRatingError(null);
+    setRatingSavedNotice('تمت استعادة حدود التقييم الافتراضية (5% / 8% / 12%)');
+  };
 
   const showSuccess = (msg: string) => {
     setErrorMsg(null);
@@ -327,6 +424,136 @@ export const BrandingSettingsSection: React.FC = () => {
             placeholder="مثال: جميع الرحلات مراقبة بنظام التتبع المباشر على مدار الساعة"
             className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none"
           />
+        </div>
+      </div>
+
+      {/* Profit Margin Rating Thresholds Sub-section (super_admin only) */}
+      <div className="border-t border-slate-200 pt-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-50 border border-amber-200 text-[#0B1F3A] flex items-center justify-center shrink-0">
+              <SlidersHorizontal className="w-4 h-4 text-[#C89B3C]" />
+            </div>
+            <div>
+              <h4 className="font-display text-sm font-bold text-[#0B1F3A]">
+                حدود تقييم هامش الربح
+              </h4>
+              <p className="text-xs text-slate-600 mt-0.5">
+                الأرقام دي افتراضية تقديرية، عدّلها على أرقام مكتبك الحقيقية
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleResetRatingThresholds}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-bold text-[#0B1F3A] cursor-pointer whitespace-nowrap"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-[#C89B3C]" />
+            استعادة الافتراضي
+          </button>
+        </div>
+
+        {ratingError && (
+          <div
+            role="alert"
+            className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-xs font-semibold text-red-800"
+          >
+            {ratingError}
+          </div>
+        )}
+
+        {!ratingError && ratingSavedNotice && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-800 flex items-center gap-2">
+            <Check className="w-4 h-4 shrink-0" />
+            <span>{ratingSavedNotice}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+          <div>
+            <label className="block font-semibold text-[#0B1F3A] mb-1.5">
+              حد «ضعيف جدًا / ضعيف» (%)
+            </label>
+            <input
+              type="number"
+              step="0.5"
+              min="0.5"
+              max="98"
+              dir="ltr"
+              value={thresholdDrafts.veryWeakMax}
+              onChange={(e) => handleThresholdDraftChange('veryWeakMax', e.target.value)}
+              placeholder={String(DEFAULT_MARGIN_RATING_THRESHOLDS.veryWeakMax)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-mono font-bold text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none"
+            />
+            <span className="block text-[11px] text-slate-500 mt-1">
+              أقل من هذا الرقم (وفوق 0%) يُقيّم «ضعيف جدًا»
+            </span>
+          </div>
+
+          <div>
+            <label className="block font-semibold text-[#0B1F3A] mb-1.5">
+              حد «ضعيف / جيد» (%)
+            </label>
+            <input
+              type="number"
+              step="0.5"
+              min="1"
+              max="99"
+              dir="ltr"
+              value={thresholdDrafts.weakMax}
+              onChange={(e) => handleThresholdDraftChange('weakMax', e.target.value)}
+              placeholder={String(DEFAULT_MARGIN_RATING_THRESHOLDS.weakMax)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-mono font-bold text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none"
+            />
+            <span className="block text-[11px] text-slate-500 mt-1">
+              من الحد الأول وحتى أقل من هذا الرقم يُقيّم «ضعيف»
+            </span>
+          </div>
+
+          <div>
+            <label className="block font-semibold text-[#0B1F3A] mb-1.5">
+              حد «جيد / ممتاز» (%)
+            </label>
+            <input
+              type="number"
+              step="0.5"
+              min="1.5"
+              max="100"
+              dir="ltr"
+              value={thresholdDrafts.goodMax}
+              onChange={(e) => handleThresholdDraftChange('goodMax', e.target.value)}
+              placeholder={String(DEFAULT_MARGIN_RATING_THRESHOLDS.goodMax)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-mono font-bold text-[#0B1F3A] focus:border-[#0B1F3A] focus:outline-none"
+            />
+            <span className="block text-[11px] text-slate-500 mt-1">
+              من هذا الرقم فأعلى يُقيّم «ممتاز» (وما قبله «جيد»)
+            </span>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-slate-50/70 px-3.5 py-2.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-700">
+          <span className="font-bold text-[#0B1F3A]">معاينة النطاقات المطبّقة حالياً:</span>
+          {[
+            { pct: -1, text: '< 0%' },
+            { pct: 0, text: `0% – < ${savedThresholds.veryWeakMax}%` },
+            { pct: savedThresholds.veryWeakMax, text: `${savedThresholds.veryWeakMax}% – < ${savedThresholds.weakMax}%` },
+            { pct: savedThresholds.weakMax, text: `${savedThresholds.weakMax}% – < ${savedThresholds.goodMax}%` },
+            { pct: savedThresholds.goodMax, text: `≥ ${savedThresholds.goodMax}%` },
+          ].map((item) => {
+            const r = getMarginRating(item.pct, savedThresholds);
+            return (
+              <span
+                key={item.text}
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-bold ${r.badgeClassName}`}
+              >
+                <span>{r.label}</span>
+                <span className="font-mono text-[10px] opacity-90" dir="ltr">
+                  ({item.text})
+                </span>
+              </span>
+            );
+          })}
         </div>
       </div>
     </section>
