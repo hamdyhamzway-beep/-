@@ -439,9 +439,9 @@ export const ReportsModule: React.FC = () => {
           'صافي الفرق',
           'الهامش الفعلي (ج)',
           'الهامش الفعلي (%)',
-          'الصافي بعد السلف والتغطيات (ج)',
-          'الصافي بعد السلف والتغطيات (%)',
           'التقييم',
+          'الصافي بعد السلف والتغطيات (ج) - للمعلومة',
+          'الصافي بعد السلف والتغطيات (%) - للمعلومة',
         ],
         schoolProfitRows.map((row) => [
           row.school.name,
@@ -454,9 +454,9 @@ export const ReportsModule: React.FC = () => {
           row.difference,
           row.actualMargin,
           row.actualMarginPct !== null ? Number(row.actualMarginPct.toFixed(1)) : '—',
+          row.actualMarginPct !== null ? row.rating.label : '—',
           row.netAfterAdvances,
           row.netAfterAdvancesPct !== null ? Number(row.netAfterAdvancesPct.toFixed(1)) : '—',
-          row.rating.label,
         ])
       );
     } else if (reportType === 'vehicles' || reportType === 'gps') {
@@ -533,7 +533,7 @@ export const ReportsModule: React.FC = () => {
         contractValue > 0 ? (netAfterAdvances / contractValue) * 100 : null;
       const difference =
         advances + coverageDeductions - coverageAdditions - bonuses + otherDeductions;
-      const rating = getMarginRating(netAfterAdvancesPct, marginThresholds);
+      const rating = getMarginRating(actualMarginPct, marginThresholds);
 
       return {
         school: s,
@@ -592,7 +592,7 @@ export const ReportsModule: React.FC = () => {
       sums.contractValue > 0 ? (sums.actualMargin / sums.contractValue) * 100 : null;
     const netAfterAdvancesPct =
       sums.contractValue > 0 ? (sums.netAfterAdvances / sums.contractValue) * 100 : null;
-    const rating = getMarginRating(netAfterAdvancesPct, marginThresholds);
+    const rating = getMarginRating(actualMarginPct, marginThresholds);
 
     return {
       ...sums,
@@ -1181,36 +1181,40 @@ export const ReportsModule: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/70">
-                    <div className="text-slate-600 font-semibold">الهامش الفعلي</div>
+                  <div className="bg-[#0B1F3A] text-white rounded-xl p-4">
+                    <div className="text-slate-300 font-semibold">الهامش الفعلي</div>
                     <div
                       className={`mt-1 font-mono text-lg font-bold tabular-nums ${
-                        profitTotals.actualMargin >= 0 ? 'text-emerald-700' : 'text-red-700'
+                        profitTotals.actualMargin >= 0 ? 'text-[#C89B3C]' : 'text-red-300'
                       }`}
                     >
                       {formatEGP(profitTotals.actualMargin)}
                     </div>
-                    <div className="mt-1 text-[11px] font-semibold text-slate-600 tabular-nums">
-                      نسبة من العقود:{' '}
-                      <span dir="ltr" className="font-mono font-bold text-[#0B1F3A]">
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] text-slate-200 font-mono tabular-nums" dir="ltr">
                         {formatPct(profitTotals.actualMarginPct)}
                       </span>
+                      {profitTotals.actualMarginPct !== null ? (
+                        <span
+                          className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-bold ${profitTotals.rating.badgeClassName}`}
+                        >
+                          {profitTotals.rating.label}
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">—</span>
+                      )}
                     </div>
                   </div>
 
-                  <div className="bg-[#0B1F3A] text-white rounded-xl p-4">
-                    <div className="text-slate-300">الصافي بعد السلف والتغطيات</div>
-                    <div className="mt-1 font-mono text-lg font-bold text-[#C89B3C] tabular-nums">
+                  <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/70">
+                    <div className="text-slate-500">الصافي بعد السلف والتغطيات (للمعلومة فقط)</div>
+                    <div className="mt-1 font-mono text-base font-semibold text-slate-700 tabular-nums">
                       {formatEGP(profitTotals.netAfterAdvances)}
                     </div>
-                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                      <span className="text-[11px] text-slate-200 font-mono tabular-nums" dir="ltr">
+                    <div className="mt-1 text-[11px] text-slate-500 tabular-nums">
+                      نسبة من العقود:{' '}
+                      <span dir="ltr" className="font-mono font-semibold text-slate-700">
                         {formatPct(profitTotals.netAfterAdvancesPct)}
-                      </span>
-                      <span
-                        className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-bold ${profitTotals.rating.badgeClassName}`}
-                      >
-                        {profitTotals.rating.label}
                       </span>
                     </div>
                   </div>
@@ -1245,10 +1249,12 @@ export const ReportsModule: React.FC = () => {
                         <th className="py-3 px-3 whitespace-nowrap">الرواتب الأساسية</th>
                         <th className="py-3 px-3 whitespace-nowrap">السلف</th>
                         <th className="py-3 px-3 whitespace-nowrap">التغطيات (الخصم / المستحق)</th>
-                        <th className="py-3 px-3 whitespace-nowrap">الهامش الفعلي (ج)</th>
-                        <th className="py-3 px-3 whitespace-nowrap">الهامش الفعلي (%)</th>
-                        <th className="py-3 px-3 whitespace-nowrap">الصافي بعد السلف والتغطيات</th>
-                        <th className="py-3 px-3 whitespace-nowrap">التقييم</th>
+                        <th className="py-3 px-3 whitespace-nowrap font-bold text-[#0B1F3A]">الهامش الفعلي (ج)</th>
+                        <th className="py-3 px-3 whitespace-nowrap font-bold text-[#0B1F3A]">الهامش الفعلي (%)</th>
+                        <th className="py-3 px-3 whitespace-nowrap font-bold text-[#0B1F3A]">التقييم</th>
+                        <th className="py-3 px-3 whitespace-nowrap text-slate-500 font-medium">
+                          الصافي بعد السلف والتغطيات (للمعلومة)
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -1302,32 +1308,32 @@ export const ReportsModule: React.FC = () => {
                               </td>
                               <td
                                 className={`py-3 px-3 font-mono font-bold tabular-nums whitespace-nowrap ${
-                                  row.actualMargin >= 0 ? 'text-emerald-700' : 'text-red-700'
+                                  row.actualMargin >= 0 ? 'text-[#0B1F3A]' : 'text-red-700'
                                 }`}
                               >
                                 {formatEGP(row.actualMargin)}
                               </td>
-                              <td className="py-3 px-3 font-mono font-semibold text-[#0B1F3A] tabular-nums whitespace-nowrap">
+                              <td className="py-3 px-3 font-mono font-bold text-[#0B1F3A] tabular-nums whitespace-nowrap">
                                 <span dir="ltr">{formatPct(row.actualMarginPct)}</span>
                               </td>
-                              <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
-                                <div
-                                  className={`font-bold ${
-                                    row.netAfterAdvances >= 0 ? 'text-[#0B1F3A]' : 'text-red-700'
-                                  }`}
-                                >
+                              <td className="py-3 px-3 whitespace-nowrap">
+                                {row.actualMarginPct !== null ? (
+                                  <span
+                                    className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold ${row.rating.badgeClassName}`}
+                                  >
+                                    {row.rating.label}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap text-slate-500">
+                                <div className="font-medium text-slate-600">
                                   {formatEGP(row.netAfterAdvances)}
                                 </div>
-                                <div className="text-[11px] text-slate-500" dir="ltr">
+                                <div className="text-[11px] text-slate-400" dir="ltr">
                                   {formatPct(row.netAfterAdvancesPct)}
                                 </div>
-                              </td>
-                              <td className="py-3 px-3 whitespace-nowrap">
-                                <span
-                                  className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold ${row.rating.badgeClassName}`}
-                                >
-                                  {row.rating.label}
-                                </span>
                               </td>
                             </tr>
                           );
@@ -1355,7 +1361,7 @@ export const ReportsModule: React.FC = () => {
                           </td>
                           <td
                             className={`py-3 px-3 font-mono tabular-nums whitespace-nowrap ${
-                              profitTotals.actualMargin >= 0 ? 'text-emerald-700' : 'text-red-700'
+                              profitTotals.actualMargin >= 0 ? 'text-[#0B1F3A]' : 'text-red-700'
                             }`}
                           >
                             {formatEGP(profitTotals.actualMargin)}
@@ -1363,18 +1369,22 @@ export const ReportsModule: React.FC = () => {
                           <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
                             <span dir="ltr">{formatPct(profitTotals.actualMarginPct)}</span>
                           </td>
-                          <td className="py-3 px-3 font-mono tabular-nums whitespace-nowrap">
+                          <td className="py-3 px-3 whitespace-nowrap">
+                            {profitTotals.actualMarginPct !== null ? (
+                              <span
+                                className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold ${profitTotals.rating.badgeClassName}`}
+                              >
+                                {profitTotals.rating.label}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 font-mono font-medium tabular-nums whitespace-nowrap text-slate-600">
                             <div>{formatEGP(profitTotals.netAfterAdvances)}</div>
-                            <div className="text-[11px] text-slate-600" dir="ltr">
+                            <div className="text-[11px] text-slate-500" dir="ltr">
                               {formatPct(profitTotals.netAfterAdvancesPct)}
                             </div>
-                          </td>
-                          <td className="py-3 px-3 whitespace-nowrap">
-                            <span
-                              className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold ${profitTotals.rating.badgeClassName}`}
-                            >
-                              {profitTotals.rating.label}
-                            </span>
                           </td>
                         </tr>
                       </tfoot>
@@ -1385,7 +1395,9 @@ export const ReportsModule: React.FC = () => {
                 {/* Rating thresholds legend & explanatory footnotes */}
                 <div className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 text-[11px] text-slate-600">
                   <div className="flex flex-wrap items-center gap-1.5 text-slate-700">
-                    <span className="font-bold text-[#0B1F3A]">نطاقات التقييم (على الصافي بعد السلف والتغطيات %):</span>
+                    <span className="font-bold text-[#0B1F3A]">
+                      التقييم على الهامش الفعلي (قيمة العقد − الرواتب الأساسية). الصافي بعد السلف والتغطيات للمعلومة فقط:
+                    </span>
                     <span className="font-semibold text-red-900">خسارة &lt; 0%</span>
                     <span>·</span>
                     <span className="font-semibold text-red-700">
