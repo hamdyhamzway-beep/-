@@ -351,7 +351,7 @@ export const EmployeesModule: React.FC = () => {
                 {s.name}
               </option>
             ))}
-            {isSuperAdmin && <option value="general">الإدارة العامة (غير معين بمدرسة)</option>}
+            {isSuperAdmin && <option value="general">المكتب الرئيسي (غير معين بمدرسة)</option>}
           </select>
         </div>
       </div>
@@ -424,7 +424,7 @@ export const EmployeesModule: React.FC = () => {
                       </div>
                     </td>
                     <td className="py-3.5 px-4 text-slate-700 font-medium">
-                      {emp.schoolName || 'الإدارة العامة'}
+                      {emp.schoolName || 'المكتب الرئيسي'}
                     </td>
                     <td className="py-3.5 px-4 font-mono text-slate-600">{emp.phone || '—'}</td>
                     <td className="py-3.5 px-4 font-mono tabular-nums">
@@ -636,7 +636,7 @@ export const EmployeesModule: React.FC = () => {
                     className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-semibold text-[#0B1F3A] disabled:bg-slate-100"
                   >
                     {(isSuperAdmin || restrictedSchoolIds.length === 0) && (
-                      <option value="">الإدارة العامة (غير معين بمدرسة)</option>
+                      <option value="">المكتب الرئيسي (غير معين بمدرسة)</option>
                     )}
                     {mySchools.map((s) => (
                       <option key={s.id} value={String(s.id)}>

@@ -2090,7 +2090,7 @@ export const CustodiesAndExternalAccountsModule: React.FC<
                     }
                     className="w-full rounded-lg border border-slate-200 px-3 py-2"
                   >
-                    <option value="">الإدارة العامة / بدون مدرسة محددة</option>
+                    <option value="">المكتب الرئيسي / بدون مدرسة محددة</option>
                     {lookups.schools.map((sc) => (
                       <option key={sc.id} value={sc.id}>
                         {sc.name}
@@ -2751,7 +2751,7 @@ export const CustodiesAndExternalAccountsModule: React.FC<
                     onChange={(e) => setAccountForm({ ...accountForm, schoolId: e.target.value })}
                     className="w-full rounded-lg border border-slate-200 px-3 py-2"
                   >
-                    <option value="">حساب حر / الإدارة العامة</option>
+                    <option value="">حساب حر / المكتب الرئيسي</option>
                     {lookups.schools.map((sc) => (
                       <option key={sc.id} value={sc.id}>
                         {sc.name}

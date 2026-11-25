@@ -32,6 +32,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import { useBranding } from '../../contexts/BrandingContext';
 import {
   apiFetch,
   formatArabicTimestampTime,
@@ -44,6 +45,7 @@ import {
   isValidGpsCoordinate,
 } from '../../lib/gps-tracker';
 import { AppLogoBackdrop } from '../AppLogoBackdrop';
+import { BrandLogo } from '../BrandLogo';
 import { ChatHubModule } from '../chat/ChatHubModule';
 import { CompanyLegalFooter } from '../CompanyLegalFooter';
 import { DriverAvatar } from '../DriverAvatar';
@@ -763,6 +765,8 @@ export const SupervisorApp: React.FC<{
     school?.lng,
   ]);
 
+  const { headerBrandName } = useBranding();
+
   return (
     <div className="min-h-screen bg-[#eef2f7] relative flex flex-col">
       <AppLogoBackdrop />
@@ -771,19 +775,22 @@ export const SupervisorApp: React.FC<{
       <header
         className={`sticky ${
           hasPreviewBar ? 'top-12' : 'top-0'
-        } z-30 h-14 bg-[#0B1F3A] text-white border-b border-slate-800 px-4`}
+        } z-30 h-14 bg-[#0B1F3A] text-white border-b border-slate-800 px-3 sm:px-4`}
       >
-        <div className="max-w-4xl mx-auto h-full flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <DriverAvatar
-              name={supervisor?.fullName || 'مشرفة'}
-              photoUrl={supervisor?.photoUrl}
-              size="sm"
-              variant="dark"
-            />
+        <div className="max-w-4xl mx-auto h-full flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <BrandLogo size="sm" />
+            {supervisor && (
+              <DriverAvatar
+                name={supervisor.fullName}
+                photoUrl={supervisor.photoUrl}
+                size="sm"
+                variant="dark"
+              />
+            )}
             <div className="min-w-0">
               <div className="font-display text-sm font-bold truncate">
-                {supervisor ? supervisor.fullName : 'بوابة المشرفة · الوليد ترافيل'}
+                {supervisor ? supervisor.fullName : `بوابة المشرفة · ${headerBrandName}`}
               </div>
               {supervisor && (
                 <div className="text-[11px] text-slate-300 font-mono tabular-nums truncate">
@@ -794,22 +801,23 @@ export const SupervisorApp: React.FC<{
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {showChatHub ? (
               <button
                 type="button"
                 onClick={closeChatHub}
-                className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-3 text-xs font-bold text-[#0B1F3A] cursor-pointer"
+                className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-[#C89B3C] hover:bg-[#d8ac4e] px-2.5 sm:px-3 text-xs font-bold text-[#0B1F3A] cursor-pointer"
               >
                 <ArrowRight className="w-4 h-4" />
-                <span>العودة للقائمة السابقة</span>
+                <span className="hidden sm:inline">العودة للقائمة السابقة</span>
+                <span className="sm:hidden">رجوع</span>
               </button>
             ) : (
               data?.linked && (
                 <button
                   type="button"
                   onClick={openChatHub}
-                  className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 px-3 text-xs font-semibold text-white cursor-pointer"
+                  className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 px-2.5 sm:px-3 text-xs font-semibold text-white cursor-pointer"
                 >
                   <MessageSquare className="w-4 h-4 text-[#C89B3C]" />
                   <span>المحادثات</span>
@@ -826,7 +834,7 @@ export const SupervisorApp: React.FC<{
                   setSelectedSupervisorId(e.target.value);
                 }}
                 aria-label="اختيار مشرفة للمعاينة"
-                className="rounded-lg bg-slate-900 border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#C89B3C]"
+                className="max-w-[115px] sm:max-w-[210px] truncate rounded-lg bg-slate-900 border border-slate-700 px-2 sm:px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#C89B3C]"
               >
                 {allSupervisors.map((s) => (
                   <option key={s.id} value={s.id}>
@@ -970,7 +978,7 @@ export const SupervisorApp: React.FC<{
                     />
                     <div className="space-y-1">
                       <p className="text-xs font-semibold text-[#ebd089]">
-                        نسخة المشرفة · الوليد ترافيل
+                        نسخة المشرفة · {headerBrandName}
                       </p>
                       <h1 className="font-display text-2xl font-bold">{supervisor.fullName}</h1>
                     </div>

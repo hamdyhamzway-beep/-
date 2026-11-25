@@ -13,10 +13,12 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
 import { apiFetch, normalizeLookupText } from '../../lib/api';
 import { PERMISSION_LABEL_MAP } from '../../lib/permissions';
 import { useEscapeKey } from '../../lib/useEscapeKey';
 import { AppVersionBadge } from '../AppVersionBadge';
+import { BrandingSettingsSection } from './BrandingSettingsSection';
 import {
   StaffAccessModal,
   type StaffEmployeeOption,
@@ -53,6 +55,8 @@ interface AuditItem {
 export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> = ({
   onOpenSupervisors,
 }) => {
+  const { dbUser } = useAuth();
+  const isSuperAdmin = dbUser?.roleSlug === 'super_admin';
   const [usersList, setUsersList] = useState<UserItem[]>([]);
   const [rolesList, setRolesList] = useState<StaffRoleOption[]>([]);
   const [schoolsList, setSchoolsList] = useState<StaffSchoolOption[]>([]);
@@ -763,6 +767,8 @@ export const SettingsUsersModule: React.FC<{ onOpenSupervisors?: () => void }> =
           </div>
         </div>
       )}
+      {isSuperAdmin && <BrandingSettingsSection />}
+
       <div className="pt-2 border-t border-slate-200/80">
         <AppVersionBadge variant="light" />
       </div>

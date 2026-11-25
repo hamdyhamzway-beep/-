@@ -42,7 +42,7 @@ export const AppVersionBadge: React.FC<AppVersionBadgeProps> = ({
     <div
       dir="rtl"
       className={`text-[11px] leading-relaxed ${
-        isDark ? 'text-slate-400' : 'text-slate-500'
+        isDark ? 'text-slate-300' : 'text-slate-600'
       } ${className}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-x-2.5 gap-y-1">
@@ -56,8 +56,8 @@ export const AppVersionBadge: React.FC<AppVersionBadgeProps> = ({
           onClick={handleCheckUpdate}
           className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-50 ${
             isDark
-              ? 'text-slate-300 hover:text-white hover:bg-white/10 border border-white/15'
-              : 'text-slate-600 hover:text-[#0B1F3A] hover:bg-slate-100 border border-slate-200 bg-white/80'
+              ? 'text-slate-200 hover:text-white hover:bg-white/10 border border-white/15'
+              : 'text-[#0B1F3A] hover:bg-slate-100 border border-slate-300 bg-white'
           }`}
         >
           <RefreshCw className={`w-3 h-3 ${checking ? 'animate-spin' : ''}`} />

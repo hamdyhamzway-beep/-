@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck, MapPin, Mic, User, KeyRound, Loader2, Wallet } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { useBranding } from '../contexts/BrandingContext';
 import { BrandLogo } from './BrandLogo';
 import { CompanyLegalFooter } from './CompanyLegalFooter';
 import { PWAInstallButton } from './PWAInstall';
@@ -10,6 +11,7 @@ import travelBackdropImg from '../assets/images/alwaleed_travel_backdrop_1794752
 type LoginTab = 'driver' | 'supervisor' | 'admin';
 
 export const SignInScreen: React.FC = () => {
+  const { branding, headerBrandName } = useBranding();
   const {
     loginWithGoogle,
     loginDriverWithPhoneCode,
@@ -112,10 +114,10 @@ export const SignInScreen: React.FC = () => {
             <BrandLogo size="sm" />
             <div className="flex flex-col">
               <span className="font-display text-lg font-bold text-white leading-tight">
-                الوليد ترافيل
+                {headerBrandName}
               </span>
               <span className="text-[10px] font-semibold tracking-widest text-[#C89B3C] uppercase">
-                AL WALEED TRAVEL
+                {branding.businessNameEn.trim() || 'AL WALEED TRAVEL'}
               </span>
             </div>
           </div>

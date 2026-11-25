@@ -622,7 +622,7 @@ export const EmployeeDailyReportModal: React.FC<EmployeeDailyReportModalProps> =
                   className="bg-white border border-slate-200 rounded-lg px-2.5 py-1 text-xs font-bold text-[#0B1F3A] disabled:bg-slate-100"
                 >
                   {(isSuperAdmin || restrictedSchoolIds.length === 0) && (
-                    <option value="">الإدارة العامة (تلقائي)</option>
+                    <option value="">المكتب الرئيسي (تلقائي)</option>
                   )}
                   {mySchools.map((s) => (
                     <option key={s.id} value={String(s.id)}>

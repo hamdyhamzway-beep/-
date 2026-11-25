@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Bus } from 'lucide-react';
-import brandLogoImg from '../assets/images/alwaleed_splash_screen_1794752422708.jpg';
+import { useBranding } from '../contexts/BrandingContext';
 
 interface BrandLogoProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';
@@ -15,7 +15,13 @@ const SIZE_CLASSES: Record<NonNullable<BrandLogoProps['size']>, string> = {
 };
 
 export const BrandLogo: React.FC<BrandLogoProps> = ({ size = 'md', className = '' }) => {
+  const { branding, defaultLogoSrc } = useBranding();
+  const activeSrc = branding.logoUrl.trim() || defaultLogoSrc;
   const [imgFailed, setImgFailed] = useState(false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [activeSrc]);
 
   if (imgFailed) {
     return (
@@ -29,14 +35,14 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({ size = 'md', className = '
 
   return (
     <div
-      className={`${SIZE_CLASSES[size]} bg-[#0B1F3A] border border-[#C89B3C]/50 overflow-hidden shrink-0 shadow-xs ${className}`}
+      className={`${SIZE_CLASSES[size]} bg-[#0B1F3A] border border-[#C89B3C]/50 overflow-hidden shrink-0 shadow-xs flex items-center justify-center ${className}`}
     >
       <img
-        src={brandLogoImg}
-        alt="شعار الوليد ترافيل"
+        src={activeSrc}
+        alt={`شعار ${branding.businessNameAr.trim() || 'الوليد ترافيل'}`}
         referrerPolicy="no-referrer"
         onError={() => setImgFailed(true)}
-        className="w-full h-full object-cover object-center scale-125"
+        className="w-full h-full object-contain object-center"
       />
     </div>
   );

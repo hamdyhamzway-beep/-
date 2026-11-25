@@ -32,6 +32,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
+import { useBranding } from '../../contexts/BrandingContext';
 import { AppVersionBadge } from '../AppVersionBadge';
 import {
   ApiHttpError,
@@ -75,6 +76,7 @@ import {
   stopArabicSpeech,
 } from '../../lib/background-notifications';
 import { AppLogoBackdrop } from '../AppLogoBackdrop';
+import { BrandLogo } from '../BrandLogo';
 import { ChatHubModule } from '../chat/ChatHubModule';
 import { CompanyLegalFooter } from '../CompanyLegalFooter';
 import { DriverAvatar } from '../DriverAvatar';
@@ -987,6 +989,7 @@ export const DriverApp: React.FC<{
     if (!ok) setIsSpeakingNotifs(false);
   };
 
+  const { headerBrandName } = useBranding();
   const unreadCount = (data?.notifications || []).filter((n) => !n.isRead).length;
   const driver = data?.driver;
   const salary = data?.salary;
@@ -1008,25 +1011,22 @@ export const DriverApp: React.FC<{
       <header
         className={`sticky ${
           hasPreviewBar ? 'top-12' : 'top-0'
-        } z-30 h-14 bg-[#0B1F3A] text-white border-b border-slate-800 px-4`}
+        } z-30 h-14 bg-[#0B1F3A] text-white border-b border-slate-800 px-3 sm:px-4`}
       >
-        <div className="max-w-3xl mx-auto h-full flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            {driver ? (
+        <div className="max-w-3xl mx-auto h-full flex items-center justify-between gap-2 sm:gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <BrandLogo size="sm" />
+            {driver && (
               <DriverAvatar
                 name={driver.fullName}
                 photoUrl={driver.photoUrl}
                 size="sm"
                 variant="dark"
               />
-            ) : (
-              <div className="w-8 h-8 rounded-lg bg-[#C89B3C] text-[#0B1F3A] flex items-center justify-center shrink-0">
-                <Bus className="w-4 h-4" />
-              </div>
             )}
             <div className="min-w-0">
               <div className="font-display text-sm font-bold truncate">
-                {driver ? driver.fullName : 'تطبيق السائق · الوليد ترافيل'}
+                {driver ? driver.fullName : `تطبيق السائق · ${headerBrandName}`}
               </div>
               {driver && (
                 <div className="text-[11px] text-slate-300 font-mono tabular-nums truncate">
@@ -1036,7 +1036,7 @@ export const DriverApp: React.FC<{
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {(activeTab !== 'home' || tabHistory.length > 0) && (
               <button
                 type="button"
@@ -1055,7 +1055,7 @@ export const DriverApp: React.FC<{
                 value={selectedDriverId}
                 onChange={(e) => setSelectedDriverId(e.target.value)}
                 aria-label="اختيار سائق للمعاينة"
-                className="rounded-lg bg-slate-900 border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#C89B3C]"
+                className="max-w-[115px] sm:max-w-[210px] truncate rounded-lg bg-slate-900 border border-slate-700 px-2 sm:px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#C89B3C]"
               >
                 {allDrivers.map((d) => (
                   <option key={d.id} value={d.id}>
@@ -1081,7 +1081,7 @@ export const DriverApp: React.FC<{
       </header>
 
       {/* Main Content */}
-      <main className="app-glass-cards relative z-10 flex-1 w-full max-w-3xl mx-auto px-4 pt-4 pb-24 space-y-4">
+      <main className="app-glass-cards relative z-10 flex-1 w-full max-w-3xl mx-auto px-4 pt-4 pb-[calc(6.5rem+env(safe-area-inset-bottom))] space-y-4">
         {allowDriverSelector && (
           <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 flex items-center justify-between gap-3">
             <span>وضع معاينة تطبيق السائق (حساب المدير العام)</span>
@@ -1209,7 +1209,7 @@ export const DriverApp: React.FC<{
                         />
                         <div className="min-w-0">
                           <p className="text-[11px] text-[#ebd089] font-semibold">
-                            ملف السائق · الوليد ترافيل
+                            ملف السائق · {headerBrandName}
                           </p>
                           <h1 className="font-display text-xl font-bold mt-0.5 truncate">
                             {driver.fullName}

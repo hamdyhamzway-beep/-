@@ -56,7 +56,7 @@ export default defineConfig(() => {
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          globPatterns: ['**/*.{js,css,html,ico,png,jpg,jpeg,svg,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//],
           importScripts: ['/sw-gps-sync.js'],
           cleanupOutdatedCaches: true,

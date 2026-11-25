@@ -430,7 +430,7 @@ export const DailyReportsModule: React.FC = () => {
                         <span>{formatRelativeArabicTime(rep.createdAt)}</span>
                         <span>·</span>
                         <span className="font-semibold text-[#0B1F3A]">
-                          {rep.schoolName || 'الإدارة العامة'}
+                          {rep.schoolName || 'المكتب الرئيسي'}
                         </span>
                       </div>
                     </div>

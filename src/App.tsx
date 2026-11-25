@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { BrandingProvider, useBranding } from './contexts/BrandingContext';
 import { AppLogoBackdrop } from './components/AppLogoBackdrop';
 import { BrandLogo } from './components/BrandLogo';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstall';
@@ -104,6 +105,7 @@ function getDefaultTabForUser(
 
 const AppShell: React.FC = () => {
   const { isAuthenticated, dbUser, loading, logout } = useAuth();
+  const { headerBrandName } = useBranding();
   const [activeTab, setActiveTab] = useState<AdminTabId>('overview');
   const [tabHistory, setTabHistory] = useState<AdminTabId[]>([]);
   const [chatInitialRoomKey, setChatInitialRoomKey] = useState<string>('broadcast');
@@ -489,7 +491,7 @@ const AppShell: React.FC = () => {
         <div className="relative z-10 h-16 px-5 flex items-center gap-3 border-b border-white/10">
           <BrandLogo size="sm" />
           <div className="min-w-0">
-            <div className="font-display text-base font-bold truncate">الوليد ترافيل</div>
+            <div className="font-display text-base font-bold truncate">{headerBrandName}</div>
             <div className="text-[11px] text-slate-300 truncate">إدارة النقل المدرسي</div>
           </div>
         </div>
@@ -579,7 +581,7 @@ const AppShell: React.FC = () => {
             <div className="relative z-10 h-16 px-4 flex items-center justify-between border-b border-white/10">
               <div className="flex items-center gap-2.5">
                 <BrandLogo size="sm" />
-                <span className="font-display text-base font-bold">الوليد ترافيل</span>
+                <span className="font-display text-base font-bold truncate">{headerBrandName}</span>
               </div>
               <button
                 onClick={() => setMobileMenuOpen(false)}
@@ -660,20 +662,21 @@ const AppShell: React.FC = () => {
 
       {/* Main Content Area */}
       <div className="relative z-10 flex-1 lg:pr-64 flex flex-col min-w-0">
-        <header className="sticky top-0 z-20 h-16 bg-white/90 backdrop-blur-md border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 no-print">
-          <div className="flex items-center gap-3 min-w-0">
+        <header className="sticky top-0 z-20 h-16 bg-white/90 backdrop-blur-md border-b border-slate-200 px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 no-print">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               onClick={() => setMobileMenuOpen(true)}
               aria-label="فتح القائمة"
-              className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer shrink-0"
             >
               <Menu className="w-5 h-5" />
             </button>
+            <BrandLogo size="sm" className="lg:hidden" />
             {(tabHistory.length > 0 || activeTab !== defaultTab) && (
               <button
                 type="button"
                 onClick={handleGoBack}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-xs font-bold text-[#0B1F3A] shrink-0 cursor-pointer transition-colors"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-2.5 sm:px-3 py-1.5 text-xs font-bold text-[#0B1F3A] shrink-0 cursor-pointer transition-colors"
                 title="العودة للقائمة السابقة دون الخروج"
               >
                 <ArrowRight className="w-3.5 h-3.5 text-[#C89B3C]" />
@@ -681,7 +684,7 @@ const AppShell: React.FC = () => {
                 <span className="sm:hidden">رجوع</span>
               </button>
             )}
-            <span className="font-display text-base font-bold text-[#0B1F3A] truncate">
+            <span className="font-display text-sm sm:text-base font-bold text-[#0B1F3A] truncate">
               {currentTabLabel}
             </span>
           </div>
@@ -812,32 +815,34 @@ export default function App() {
 
   return (
     <AppErrorBoundary>
-      <AuthProvider>
-        {quotaExceeded && (
-          <div
-            role="alert"
-            className="sticky top-0 z-50 bg-amber-600 text-white px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3"
-          >
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              <span>
-                تم تجاوز حصة مفتاح خرائط جوجل التجريبي. لاستمرار التتبع المباشر بدون انقطاع، يرجى
-                الربط بمشروع Google Cloud الخاص بك:
-              </span>
-            </div>
-            <a
-              href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
-              target="_blank"
-              rel="noreferrer"
-              className="underline font-bold whitespace-nowrap"
+      <BrandingProvider>
+        <AuthProvider>
+          {quotaExceeded && (
+            <div
+              role="alert"
+              className="sticky top-0 z-50 bg-amber-600 text-white px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3"
             >
-              دليل حل مشكلة الحصة (Quota Guide)
-            </a>
-          </div>
-        )}
-        <OfflineIndicator />
-        <AppShell />
-      </AuthProvider>
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>
+                  تم تجاوز حصة مفتاح خرائط جوجل التجريبي. لاستمرار التتبع المباشر بدون انقطاع، يرجى
+                  الربط بمشروع Google Cloud الخاص بك:
+                </span>
+              </div>
+              <a
+                href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+                target="_blank"
+                rel="noreferrer"
+                className="underline font-bold whitespace-nowrap"
+              >
+                دليل حل مشكلة الحصة (Quota Guide)
+              </a>
+            </div>
+          )}
+          <OfflineIndicator />
+          <AppShell />
+        </AuthProvider>
+      </BrandingProvider>
     </AppErrorBoundary>
   );
 }
